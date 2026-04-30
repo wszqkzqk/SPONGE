@@ -1,5 +1,4 @@
-﻿#ifndef QC_STRUCTURE_DFT_H
-#define QC_STRUCTURE_DFT_H
+﻿#pragma once
 
 #include "../../common.h"
 
@@ -45,6 +44,38 @@ struct QC_DFT
     float* d_Vxc = NULL;
     float* d_Vxc_beta = NULL;
     double* d_exc_total = NULL;
-};
 
-#endif
+    // AO screening: 每个壳层的最大有效距离平方
+    float* d_shell_r2_screen = NULL;  // [nbas]
+
+    // VXC BLAS 优化用缓冲（预分配，避免热路径 malloc）
+    float* d_ao_norm = NULL;      // [grid_batch_size * nao]
+    float* d_gx_norm = NULL;      // [grid_batch_size * nao]
+    float* d_gy_norm = NULL;      // [grid_batch_size * nao]
+    float* d_gz_norm = NULL;      // [grid_batch_size * nao]
+    float* d_Pao = NULL;          // [nao * grid_batch_size]
+    float* d_W_full = NULL;       // [grid_batch_size * nao]
+    float* d_W_sigma = NULL;      // [grid_batch_size * nao]
+    double* d_grad_rho_x = NULL;  // [grid_batch_size]
+    double* d_grad_rho_y = NULL;  // [grid_batch_size]
+    double* d_grad_rho_z = NULL;  // [grid_batch_size]
+
+    // UKS 额外缓冲
+    float* d_Pao_b = NULL;      // [nao * grid_batch_size]
+    double* d_rho_a = NULL;     // [grid_batch_size]
+    double* d_rho_b = NULL;     // [grid_batch_size]
+    double* d_sigma_aa = NULL;  // [grid_batch_size]
+    double* d_sigma_ab = NULL;  // [grid_batch_size]
+    double* d_sigma_bb = NULL;  // [grid_batch_size]
+    double* d_grb_x = NULL;     // [grid_batch_size]
+    double* d_grb_y = NULL;     // [grid_batch_size]
+    double* d_grb_z = NULL;     // [grid_batch_size]
+    double* d_exc_buf = NULL;   // [grid_batch_size]
+    double* d_vra = NULL;       // [grid_batch_size]
+    double* d_vrb = NULL;       // [grid_batch_size]
+    double* d_vsaa = NULL;      // [grid_batch_size]
+    double* d_vsab = NULL;      // [grid_batch_size]
+    double* d_vsbb = NULL;      // [grid_batch_size]
+    float* d_Wb_full = NULL;    // [grid_batch_size * nao]
+    float* d_Wb_sigma = NULL;   // [grid_batch_size * nao]
+};

@@ -1,7 +1,7 @@
-﻿#ifndef QC_STRUCTURE_SCF_WORKSPACE_H
-#define QC_STRUCTURE_SCF_WORKSPACE_H
+﻿#pragma once
 
 #include "../../common.h"
+#include "ri_workspace.h"
 
 // 持久 AO 核心矩阵与能量结果缓存
 struct QC_SCF_Core_Matrices
@@ -9,6 +9,7 @@ struct QC_SCF_Core_Matrices
     float* d_S = NULL;
     float* d_T = NULL;
     float* d_V = NULL;
+    float* d_V_ECP = NULL;
     float* d_H_core = NULL;
     double* d_scf_energy = NULL;
     double* d_nuc_energy_dev = NULL;
@@ -26,6 +27,7 @@ struct QC_SCF_Spin_Channel
     std::vector<float> h_C;
     float* d_C = NULL;
     double* d_F_double = NULL;
+    double* d_F_for_grad = NULL;  // 梯度用: 缓存 Build_Fock 后、DIIS 前的 Fock
 };
 
 // 重叠正交化、本征分解与双精度临时缓冲
@@ -35,6 +37,7 @@ struct QC_SCF_Ortho_Workspace
     double* d_X = NULL;
     std::vector<float> h_W;
     float* d_W = NULL;
+    float* d_W_alpha = NULL;  // UHF: 保存 alpha 特征值（beta 会覆盖 d_W）
     std::vector<float> h_Work;
     float* d_Work = NULL;
     float* d_solver_work = NULL;
@@ -55,29 +58,51 @@ struct QC_SCF_Ortho_Workspace
     int nao_eff = 0;
 };
 
-// DIIS/ADIIS 迭代加速相关缓冲与历史状态
+// DIIS/EDIIS/ADIIS/MESA 迭代加速相关缓冲与历史状态
+//
+// MESA 算法参考:
+//   S. Lehtola, "OpenOrbitalOptimizer - a reusable open source library for
+//   self-consistent field calculations", arXiv:2503.23034 (2025).
+//
+// EDIIS 参考:
+//   K. N. Kudin, G. E. Scuseria, E. Cancès, J. Chem. Phys. 116, 8255 (2002).
+//
+// ADIIS 参考:
+//   X. Hu, W. Yang, J. Chem. Phys. 132, 054109 (2010).
 struct QC_SCF_DIIS_Workspace
 {
     double* d_diis_err = NULL;
     float *d_diis_w1 = NULL, *d_diis_w2 = NULL, *d_diis_w3 = NULL,
           *d_diis_w4 = NULL;
+    // CDIIS: Fock 和误差向量历史
     std::vector<double*> d_diis_f_hist;
     std::vector<double*> d_diis_e_hist;
     std::vector<double*> d_diis_f_hist_b;
     std::vector<double*> d_diis_e_hist_b;
-    std::vector<double*> d_adiis_d_hist;
-    std::vector<double*> d_adiis_d_hist_b;
 
-    int adiis_count = 0;
-    int adiis_head = 0;
-    double adiis_to_cdiis_threshold = 0.1;
+    // EDIIS/ADIIS: 密度矩阵历史和 SCF 能量历史
+    std::vector<double*> d_diis_d_hist;
+    std::vector<double*> d_diis_d_hist_b;
+    std::vector<double> energy_hist;
 
     int diis_hist_count = 0;
     int diis_hist_head = 0;
     int diis_hist_count_b = 0;
     int diis_hist_head_b = 0;
 
+    // MESA → CDIIS 切换阈值
+    double mesa_to_cdiis_threshold = 1e-1;
+
+    // 最近一轮的 DIIS 误差范数（用于动态 level shift）
+    double last_enorm = 1e10;
+
     double* d_diis_accum = NULL;
+
+    // 批量 Tr 用连续缓冲: 两块 [diis_space × nao²]，存 gather 后的历史向量
+    double* d_gather_a = NULL;
+    double* d_gather_b = NULL;
+    // 批量 Tr 输出: [diis_space × diis_space]
+    double* d_dot_out = NULL;
 };
 
 // direct SCF 的 pair density、线程私有 Fock 与 ERI 工作池
@@ -96,6 +121,15 @@ struct QC_SCF_Direct_Workspace
 
     float* d_Ptot = NULL;
     float* d_P_coul = NULL;
+
+    // Incremental Fock: previous densities and accumulated ERI Fock
+    float* d_P_coul_prev = NULL;
+    float* d_P_exx_prev = NULL;
+    float* d_P_exx_b_prev = NULL;
+    double* d_F_eri_accum = NULL;  // CPU: double-precision accumulator
+    double* d_F_eri_b_accum = NULL;
+    float* d_F_eri_accum_f = NULL;  // GPU: float accumulator
+    float* d_F_eri_b_accum_f = NULL;
 };
 
 // SCF 配置、收敛状态与能量累计缓冲
@@ -105,7 +139,6 @@ struct QC_SCF_Runtime_State
     int n_alpha = 0;
     int n_beta = 0;
     float occ_factor = 2.0f;
-    float density_mixing = 0.20f;
     int max_scf_iter = 100;
     bool use_diis = true;
     int diis_start_iter = 8;
@@ -114,6 +147,9 @@ struct QC_SCF_Runtime_State
     double energy_tol = 1e-6;
     double level_shift = 0.25;
     bool print_iter = false;
+
+    double spin_square = 0.0;
+    double spin_square_exact = 0.0;
 
     double* d_e = NULL;
     double* d_e_b = NULL;
@@ -134,6 +170,5 @@ struct QC_SCF_WORKSPACE
     QC_SCF_DIIS_Workspace diis;
     QC_SCF_Direct_Workspace direct;
     QC_SCF_Runtime_State runtime;
+    QC_RI_WORKSPACE ri;
 };
-
-#endif

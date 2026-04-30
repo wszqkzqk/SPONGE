@@ -2,6 +2,16 @@
 
 #include "../integrals/one_e.hpp"
 
+// xc_deriv.hpp 提供解析导数 (在 xc.hpp 之后 include)
+// 前向声明:
+static inline __host__ __device__ void QC_VXC_Analytical_RKS(
+    QC_METHOD method, double rho, double sigma, double& exc, double& vrho,
+    double& vsigma);
+static inline __host__ __device__ void QC_VXC_Analytical_UKS(
+    QC_METHOD method, double ra, double rb, double saa, double sab, double sbb,
+    double& exc, double& vra, double& vrb, double& vsaa, double& vsab,
+    double& vsbb);
+
 static inline __host__ __device__ void QC_Local_Vrho_Vsigma_FD(
     QC_METHOD method, double rho, double sigma, double& e, double& vrho,
     double& vsigma);
@@ -11,27 +21,17 @@ static inline __host__ __device__ void QC_Local_UKS_Derivs_FD(
     double& v_rho_b, double& v_sigma_aa, double& v_sigma_ab,
     double& v_sigma_bb);
 
-// =============================================================================
 // Device DFT Kernels
-// =============================================================================
+// deriv_level: 0 = LDA (仅值), 1 = GGA (值+梯度), 2 = meta-GGA (预留)
 
-// Kernel 1: Evaluate AO values and gradients on grid points (batched)
-// Parallelizes over grid points, each thread computes all AOs for one point
-static __global__ void QC_Eval_AO_Grid_Batch_Kernel(
-    const int n_grid_batch,    // Number of grid points in this batch
-    const float* grid_coords,  // [n_grid_batch * 3] xyz coordinates
-    const int nao,             // Number of atomic orbitals
-    const int nbas,            // Number of basis shells
-    const VECTOR* centers,     // [nbas] shell centers
-    const int* l_list,         // [nbas] angular momentum
-    const float* exps,         // Primitive exponents
-    const float* coeffs,       // Primitive coefficients
-    const int* shell_offsets,  // [nbas] offset into exps/coeffs
-    const int* shell_sizes,    // [nbas] number of primitives
-    const int* ao_offsets,     // [nbas] offset into AO array
-    float* ao_vals,            // [n_grid_batch * nao] OUTPUT
-    float* ao_grad_x,          // [n_grid_batch * nao] OUTPUT
-    float* ao_grad_y, float* ao_grad_z)
+// AO 求值: 在网格点上计算基函数值和（可选的）梯度
+template <int deriv_level>
+static __global__ void QC_Eval_AO_Grid_Kernel(
+    const int n_grid_batch, const float* grid_coords, const int nao,
+    const int nbas, const VECTOR* centers, const int* l_list, const float* exps,
+    const float* coeffs, const int* shell_offsets, const int* shell_sizes,
+    const int* ao_offsets, const float* shell_r2_screen, float* ao_vals,
+    float* ao_grad_x, float* ao_grad_y, float* ao_grad_z)
 {
     SIMPLE_DEVICE_FOR(ig, n_grid_batch)
     {
@@ -39,32 +39,32 @@ static __global__ void QC_Eval_AO_Grid_Batch_Kernel(
         const float y = grid_coords[ig * 3 + 1];
         const float z = grid_coords[ig * 3 + 2];
 
-        // Initialize outputs
         for (int i = 0; i < nao; i++)
         {
             ao_vals[ig * nao + i] = 0.0f;
-            ao_grad_x[ig * nao + i] = 0.0f;
-            ao_grad_y[ig * nao + i] = 0.0f;
-            ao_grad_z[ig * nao + i] = 0.0f;
+            if (deriv_level >= 1)
+            {
+                ao_grad_x[ig * nao + i] = 0.0f;
+                ao_grad_y[ig * nao + i] = 0.0f;
+                ao_grad_z[ig * nao + i] = 0.0f;
+            }
         }
 
-        // Loop over shells (reuse CPU logic!)
         for (int ish = 0; ish < nbas; ish++)
         {
-            const int l = l_list[ish];
-            const int ncart = (l + 1) * (l + 2) / 2;
-            const int ao_off = ao_offsets[ish];
             const VECTOR c = centers[ish];
             const float dx = x - c.x;
             const float dy = y - c.y;
             const float dz = z - c.z;
             const float r2 = dx * dx + dy * dy + dz * dz;
+            if (r2 > shell_r2_screen[ish]) continue;
 
-            // Precompute powers
+            const int l = l_list[ish];
+            const int ncart = (l + 1) * (l + 2) / 2;
+            const int ao_off = ao_offsets[ish];
+
             float px[6], py[6], pz[6];
-            px[0] = 1.0f;
-            py[0] = 1.0f;
-            pz[0] = 1.0f;
+            px[0] = py[0] = pz[0] = 1.0f;
             for (int k = 1; k <= 5; k++)
             {
                 px[k] = px[k - 1] * dx;
@@ -72,43 +72,39 @@ static __global__ void QC_Eval_AO_Grid_Batch_Kernel(
                 pz[k] = pz[k - 1] * dz;
             }
 
-            // Loop over primitives
             for (int ip = 0; ip < shell_sizes[ish]; ip++)
             {
                 const int pidx = shell_offsets[ish] + ip;
                 const float alpha = exps[pidx];
-                const float coeff = coeffs[pidx];
-                const float e = coeff * expf(-alpha * r2);
+                const float e = coeffs[pidx] * expf(-alpha * r2);
                 if (fabsf(e) < 1e-20f) continue;
 
-                // Loop over cartesian components
                 for (int ic = 0; ic < ncart; ic++)
                 {
                     int lx, ly, lz;
                     QC_Get_Lxyz_Device(l, ic, lx, ly, lz);
                     const float poly = px[lx] * py[ly] * pz[lz];
-                    const float val = e * poly;
-
-                    // Gradients
-                    const float dpoly_x =
-                        ((lx > 0) ? (float)lx * px[lx - 1] : 0.0f) * py[ly] *
-                        pz[lz];
-                    const float dpoly_y =
-                        px[lx] * ((ly > 0) ? (float)ly * py[ly - 1] : 0.0f) *
-                        pz[lz];
-                    const float dpoly_z =
-                        px[lx] * py[ly] *
-                        ((lz > 0) ? (float)lz * pz[lz - 1] : 0.0f);
-
-                    const float gxv = e * (dpoly_x - 2.0f * alpha * dx * poly);
-                    const float gyv = e * (dpoly_y - 2.0f * alpha * dy * poly);
-                    const float gzv = e * (dpoly_z - 2.0f * alpha * dz * poly);
-
                     const int i = ao_off + ic;
-                    ao_vals[ig * nao + i] += val;
-                    ao_grad_x[ig * nao + i] += gxv;
-                    ao_grad_y[ig * nao + i] += gyv;
-                    ao_grad_z[ig * nao + i] += gzv;
+                    ao_vals[ig * nao + i] += e * poly;
+
+                    if (deriv_level >= 1)
+                    {
+                        const float dpx =
+                            (lx > 0 ? (float)lx * px[lx - 1] : 0.0f) * py[ly] *
+                            pz[lz];
+                        const float dpy =
+                            px[lx] * (ly > 0 ? (float)ly * py[ly - 1] : 0.0f) *
+                            pz[lz];
+                        const float dpz =
+                            px[lx] * py[ly] *
+                            (lz > 0 ? (float)lz * pz[lz - 1] : 0.0f);
+                        ao_grad_x[ig * nao + i] +=
+                            e * (dpx - 2.0f * alpha * dx * poly);
+                        ao_grad_y[ig * nao + i] +=
+                            e * (dpy - 2.0f * alpha * dy * poly);
+                        ao_grad_z[ig * nao + i] +=
+                            e * (dpz - 2.0f * alpha * dz * poly);
+                    }
                 }
             }
         }
@@ -182,8 +178,8 @@ static __global__ void QC_Eval_XC_Derivs_Kernel(
         else
         {
             double e = 0.0, v_rho = 0.0, v_sigma = 0.0;
-            QC_Local_Vrho_Vsigma_FD((QC_METHOD)method_id, rho_val, sigma[ig], e,
-                                    v_rho, v_sigma);
+            QC_VXC_Analytical_RKS((QC_METHOD)method_id, rho_val, sigma[ig], e,
+                                  v_rho, v_sigma);
             exc[ig] = e;
             vrho[ig] = v_rho;
             vsigma[ig] = v_sigma;

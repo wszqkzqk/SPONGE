@@ -1,4 +1,4 @@
-﻿#include "main.h"
+#include "main.h"
 
 #define SUBPACKAGE_HINT \
     "SPONGE, for general-purpose molecular dynamics simulations"
@@ -43,6 +43,7 @@ COLLECTIVE_VARIABLE_CONTROLLER cv_controller;
 STEER_CV steer_cv;
 RESTRAIN_CV restrain_cv;
 META meta;
+VORONOI_DETECTOR voronoi_detector;
 LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
 HARD_WALL hard_wall;
@@ -240,6 +241,7 @@ void Main_Initial(int argc, char* argv[])
     steer_cv.Initial(&controller, &cv_controller);
     restrain_cv.Initial(&controller, &cv_controller);
     meta.Initial(&controller, &cv_controller);
+    voronoi_detector.Initial(&controller, &cv_controller);
 
     cv_controller.Print_Initial();
     plugin.After_Initial();
@@ -499,6 +501,9 @@ void Main_Calculate_Force()
                                  md_info.need_potential, md_info.need_pressure,
                                  dd.frc, dd.d_energy, dd.d_virial,
                                  md_info.sys.h_temperature);
+            voronoi_detector.Detect(cv_atom_numbers, dd.crd,
+                                    md_info.pbc.cell, md_info.pbc.rcell,
+                                    md_info.sys.steps, &md_info, &controller);
             vatom.Force_Redistribute_CV(dd.crd, md_info.pbc.cell,
                                         md_info.pbc.rcell, dd.frc);
         }
@@ -822,6 +827,7 @@ void Main_Print()
         restrain_cv.Step_Print(&controller);
         meta.Step_Print(&controller);
         soft_walls.Step_Print(&controller);
+        voronoi_detector.Step_Print(&controller);
         controller.Print_To_Screen_And_Mdout();
     }
 
@@ -853,6 +859,17 @@ void Main_Print()
     {
         md_info.output.Export_Restart_File();
         nhc.Save_Restart_File();
+    }
+
+    if (voronoi_detector.crossing_detected &&
+        voronoi_detector.crossing_step == md_info.sys.steps)
+    {
+        md_info.Crd_Vel_dd_to_Device(dd.crd, dd.vel, dd.atom_local_label,
+                                     dd.atom_local_id, main_stream);
+        deviceStreamSynchronize(main_stream);
+        md_info.output.Export_Restart_File(voronoi_detector.restart_name);
+        controller.printf("VORONOI_DETECTOR: wrote restart %s\n",
+                          voronoi_detector.restart_name);
     }
 }
 

@@ -39,6 +39,7 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/bias/steer.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/bias/restrain_cv.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/bias/sinkmeta.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/bias/voronoi_detector.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/SITS/SITS.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/custom_force/listed_forces.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/custom_force/pairwise_force.cpp

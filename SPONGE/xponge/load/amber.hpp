@@ -39,6 +39,22 @@ static void Amber_Require_Section_Size(const std::vector<std::string>& values,
     }
 }
 
+template <typename T>
+static void Amber_Require_Exact_Section_Size(const std::vector<T>& values,
+                                             std::size_t expected_count,
+                                             CONTROLLER* controller,
+                                             const char* error_by,
+                                             const char* section_name)
+{
+    if (values.size() != expected_count)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, error_by,
+            "Reason:\n\tAMBER section %s has %zu values; expected %zu\n",
+            section_name, values.size(), expected_count);
+    }
+}
+
 static int Amber_Get_Atom_Numbers(const System* system);
 static std::vector<std::string> Amber_Read_Section(
     const std::vector<std::string>& lines, std::size_t* index);
@@ -87,6 +103,8 @@ static void Amber_Load_Classical_Force_Field(System* system,
     int bond_type_numbers = 0;
     int angle_type_numbers = 0;
     int dihedral_type_numbers = 0;
+    int charmm_improper_numbers = 0;
+    int charmm_improper_type_numbers = 0;
 
     std::vector<float> bond_type_k;
     std::vector<float> bond_type_r0;
@@ -97,12 +115,25 @@ static void Amber_Load_Classical_Force_Field(System* system,
     std::vector<float> dihedral_type_periodicity;
     std::vector<float> scee_scale_factor;
     std::vector<float> scnb_scale_factor;
+    std::vector<float> charmm_improper_type_k;
+    std::vector<float> charmm_improper_type_phase;
+    std::vector<float> lj14_pair_A;
+    std::vector<float> lj14_pair_B;
 
     std::vector<int> raw_dihedral_a;
     std::vector<int> raw_dihedral_b;
     std::vector<int> raw_dihedral_c;
     std::vector<int> raw_dihedral_d;
     std::vector<int> raw_dihedral_type;
+    std::vector<int> raw_charmm_impropers;
+
+    bool has_charmm_improper_numbers = false;
+    bool has_charmm_improper_type_numbers = false;
+    bool has_charmm_impropers = false;
+    bool has_charmm_improper_type_k = false;
+    bool has_charmm_improper_type_phase = false;
+    bool has_lj14_pair_A = false;
+    bool has_lj14_pair_B = false;
 
     for (std::size_t i = 0; i < lines.size(); i++)
     {
@@ -329,6 +360,65 @@ static void Amber_Load_Classical_Force_Field(System* system,
                 scnb_scale_factor[j] = Amber_Parse_Float(values[j]);
             }
         }
+        else if (current_flag == "CHARMM_NUM_IMPROPERS")
+        {
+            Amber_Require_Exact_Section_Size(
+                values, 1, controller,
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "CHARMM_NUM_IMPROPERS");
+            charmm_improper_numbers = Amber_Parse_Int(values[0]);
+            if (charmm_improper_numbers < 0)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat,
+                    "Xponge::Amber_Load_Classical_Force_Field",
+                    "Reason:\n\tCHARMM_NUM_IMPROPERS cannot be negative\n");
+            }
+            has_charmm_improper_numbers = true;
+        }
+        else if (current_flag == "CHARMM_NUM_IMPR_TYPES")
+        {
+            Amber_Require_Exact_Section_Size(
+                values, 1, controller,
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "CHARMM_NUM_IMPR_TYPES");
+            charmm_improper_type_numbers = Amber_Parse_Int(values[0]);
+            if (charmm_improper_type_numbers < 0)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat,
+                    "Xponge::Amber_Load_Classical_Force_Field",
+                    "Reason:\n\tCHARMM_NUM_IMPR_TYPES cannot be negative\n");
+            }
+            has_charmm_improper_type_numbers = true;
+        }
+        else if (current_flag == "CHARMM_IMPROPERS")
+        {
+            raw_charmm_impropers.resize(values.size());
+            for (std::size_t j = 0; j < values.size(); j++)
+            {
+                raw_charmm_impropers[j] = Amber_Parse_Int(values[j]);
+            }
+            has_charmm_impropers = true;
+        }
+        else if (current_flag == "CHARMM_IMPROPER_FORCE_CONSTANT")
+        {
+            charmm_improper_type_k.resize(values.size());
+            for (std::size_t j = 0; j < values.size(); j++)
+            {
+                charmm_improper_type_k[j] = Amber_Parse_Float(values[j]);
+            }
+            has_charmm_improper_type_k = true;
+        }
+        else if (current_flag == "CHARMM_IMPROPER_PHASE")
+        {
+            charmm_improper_type_phase.resize(values.size());
+            for (std::size_t j = 0; j < values.size(); j++)
+            {
+                charmm_improper_type_phase[j] = Amber_Parse_Float(values[j]);
+            }
+            has_charmm_improper_type_phase = true;
+        }
         else if (current_flag == "DIHEDRALS_INC_HYDROGEN" ||
                  current_flag == "DIHEDRALS_WITHOUT_HYDROGEN")
         {
@@ -384,10 +474,126 @@ static void Amber_Load_Classical_Force_Field(System* system,
                 ff->lj.pair_B[j] = 6.0f * Amber_Parse_Float(values[j]);
             }
         }
+        else if (current_flag == "LENNARD_JONES_14_ACOEF")
+        {
+            int pair_type_numbers =
+                atom_type_numbers * (atom_type_numbers + 1) / 2;
+            Amber_Require_Exact_Section_Size(
+                values, static_cast<std::size_t>(pair_type_numbers), controller,
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "LENNARD_JONES_14_ACOEF");
+            lj14_pair_A.resize(pair_type_numbers);
+            for (int j = 0; j < pair_type_numbers; j++)
+            {
+                lj14_pair_A[j] = 12.0f * Amber_Parse_Float(values[j]);
+            }
+            has_lj14_pair_A = true;
+        }
+        else if (current_flag == "LENNARD_JONES_14_BCOEF")
+        {
+            int pair_type_numbers =
+                atom_type_numbers * (atom_type_numbers + 1) / 2;
+            Amber_Require_Exact_Section_Size(
+                values, static_cast<std::size_t>(pair_type_numbers), controller,
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "LENNARD_JONES_14_BCOEF");
+            lj14_pair_B.resize(pair_type_numbers);
+            for (int j = 0; j < pair_type_numbers; j++)
+            {
+                lj14_pair_B[j] = 6.0f * Amber_Parse_Float(values[j]);
+            }
+            has_lj14_pair_B = true;
+        }
         i--;
     }
 
+    if (has_lj14_pair_A != has_lj14_pair_B)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "Reason:\n\tLENNARD_JONES_14_ACOEF and "
+            "LENNARD_JONES_14_BCOEF must either both be present or both be "
+            "absent\n");
+    }
+
+    int charmm_improper_flag_numbers =
+        static_cast<int>(has_charmm_improper_numbers) +
+        static_cast<int>(has_charmm_improper_type_numbers) +
+        static_cast<int>(has_charmm_impropers) +
+        static_cast<int>(has_charmm_improper_type_k) +
+        static_cast<int>(has_charmm_improper_type_phase);
+    if (charmm_improper_flag_numbers != 0 && charmm_improper_flag_numbers != 5)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "Reason:\n\tthe CHAMBER improper sections are incomplete\n");
+    }
+    if (charmm_improper_flag_numbers == 5)
+    {
+        Amber_Require_Exact_Section_Size(
+            raw_charmm_impropers,
+            5 * static_cast<std::size_t>(charmm_improper_numbers), controller,
+            "Xponge::Amber_Load_Classical_Force_Field", "CHARMM_IMPROPERS");
+        Amber_Require_Exact_Section_Size(
+            charmm_improper_type_k,
+            static_cast<std::size_t>(charmm_improper_type_numbers), controller,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "CHARMM_IMPROPER_FORCE_CONSTANT");
+        Amber_Require_Exact_Section_Size(
+            charmm_improper_type_phase,
+            static_cast<std::size_t>(charmm_improper_type_numbers), controller,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "CHARMM_IMPROPER_PHASE");
+
+        ff->impropers.atom_a.reserve(charmm_improper_numbers);
+        ff->impropers.atom_b.reserve(charmm_improper_numbers);
+        ff->impropers.atom_c.reserve(charmm_improper_numbers);
+        ff->impropers.atom_d.reserve(charmm_improper_numbers);
+        ff->impropers.pk.reserve(charmm_improper_numbers);
+        ff->impropers.pn.reserve(charmm_improper_numbers);
+        ff->impropers.ipn.reserve(charmm_improper_numbers);
+        ff->impropers.gamc.reserve(charmm_improper_numbers);
+        ff->impropers.gams.reserve(charmm_improper_numbers);
+        for (int j = 0; j < charmm_improper_numbers; j++)
+        {
+            int atom_a = raw_charmm_impropers[5 * j] - 1;
+            int atom_b = raw_charmm_impropers[5 * j + 1] - 1;
+            int atom_c = raw_charmm_impropers[5 * j + 2] - 1;
+            int atom_d = raw_charmm_impropers[5 * j + 3] - 1;
+            int type_index = raw_charmm_impropers[5 * j + 4] - 1;
+            if (atom_a < 0 || atom_a >= atom_numbers || atom_b < 0 ||
+                atom_b >= atom_numbers || atom_c < 0 ||
+                atom_c >= atom_numbers || atom_d < 0 ||
+                atom_d >= atom_numbers || type_index < 0 ||
+                type_index >= charmm_improper_type_numbers)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat,
+                    "Xponge::Amber_Load_Classical_Force_Field",
+                    "Reason:\n\tCHARMM_IMPROPERS contains an out-of-range "
+                    "atom or type index\n");
+            }
+            ff->impropers.atom_a.push_back(atom_a);
+            ff->impropers.atom_b.push_back(atom_b);
+            ff->impropers.atom_c.push_back(atom_c);
+            ff->impropers.atom_d.push_back(atom_d);
+            ff->impropers.pk.push_back(charmm_improper_type_k[type_index]);
+            ff->impropers.pn.push_back(0.0f);
+            ff->impropers.ipn.push_back(0);
+            ff->impropers.gamc.push_back(
+                charmm_improper_type_phase[type_index]);
+            ff->impropers.gams.push_back(0.0f);
+        }
+    }
+
     ff->lj.atom_type_numbers = atom_type_numbers;
+
+    const std::vector<float>& nb14_pair_A =
+        has_lj14_pair_A ? lj14_pair_A : ff->lj.pair_A;
+    const std::vector<float>& nb14_pair_B =
+        has_lj14_pair_B ? lj14_pair_B : ff->lj.pair_B;
 
     ff->dihedrals.atom_a.reserve(raw_dihedral_a.size());
     ff->dihedrals.atom_b.reserve(raw_dihedral_a.size());
@@ -441,7 +647,7 @@ static void Amber_Load_Classical_Force_Field(System* system,
         ff->dihedrals.gams.push_back(gams);
 
         if (raw_dihedral_c[i] > 0 && !ff->lj.atom_type.empty() &&
-            !ff->lj.pair_A.empty() && !ff->lj.pair_B.empty())
+            !nb14_pair_A.empty() && !nb14_pair_B.empty())
         {
             int type_a = ff->lj.atom_type[atom_a];
             int type_b = ff->lj.atom_type[atom_d];
@@ -466,8 +672,8 @@ static void Amber_Load_Classical_Force_Field(System* system,
             }
             ff->nb14.atom_a.push_back(atom_a);
             ff->nb14.atom_b.push_back(atom_d);
-            ff->nb14.A.push_back(lj_scale * ff->lj.pair_A[pair_type]);
-            ff->nb14.B.push_back(lj_scale * ff->lj.pair_B[pair_type]);
+            ff->nb14.A.push_back(lj_scale * nb14_pair_A[pair_type]);
+            ff->nb14.B.push_back(lj_scale * nb14_pair_B[pair_type]);
             ff->nb14.cf_scale_factor.push_back(cf_scale);
         }
     }

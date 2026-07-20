@@ -1,5 +1,8 @@
 ﻿#pragma once
 
+#include <cstdint>
+#include <cstring>
+
 #include "../xponge.h"
 #include "./common.hpp"
 
@@ -180,9 +183,17 @@ struct Gromacs_Topology
     std::vector<Gromacs_Angle_Type> angle_types;
     std::vector<Gromacs_Dihedral_Type> dihedral_types;
     std::vector<Gromacs_Pair_Type> pair_types;
+    std::vector<Gromacs_Pair_Type> nonbond_params;
     std::vector<Gromacs_CMap_Type> cmap_types;
     std::unordered_map<std::string, Gromacs_Molecule> molecules;
     std::vector<std::pair<std::string, int>> system_molecules;
+};
+
+struct Gromacs_Source_Line
+{
+    std::string text;
+    fs::path file_path;
+    std::size_t line_number = 0;
 };
 
 static std::string Gromacs_Trim(const std::string& value)
@@ -278,7 +289,7 @@ static fs::path Gromacs_Resolve_Include(
 static void Gromacs_Preprocess_File(const fs::path& file_path,
                                     std::set<std::string>* macros,
                                     const std::vector<fs::path>& include_dirs,
-                                    std::vector<std::string>* lines,
+                                    std::vector<Gromacs_Source_Line>* lines,
                                     CONTROLLER* controller,
                                     const char* error_by)
 {
@@ -310,8 +321,11 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
 
     std::string raw_line;
     std::string continued_line;
+    std::size_t line_number = 0;
     while (std::getline(fin, raw_line))
     {
+        line_number++;
+        std::size_t logical_line_number = line_number;
         std::string line = Gromacs_Trim(raw_line);
         if (!line.empty() && line[0] == '#')
         {
@@ -424,6 +438,7 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
                     spongeErrorBadFileFormat, error_by,
                     "Reason:\n\tunterminated GROMACS line continuation\n");
             }
+            line_number++;
             std::string next_line =
                 Gromacs_Strip_Comment(Gromacs_Trim(raw_line));
             if (!next_line.empty())
@@ -434,7 +449,7 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
         }
         if (!continued_line.empty())
         {
-            lines->push_back(continued_line);
+            lines->push_back({continued_line, file_path, logical_line_number});
             continued_line.clear();
         }
     }
@@ -447,6 +462,17 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
     }
 }
 
+static bool Gromacs_Is_Recognized_Section(const std::string& section)
+{
+    static const std::set<std::string> recognized_sections = {
+        "defaults",      "atomtypes", "bondtypes",      "angletypes",
+        "dihedraltypes", "pairtypes", "nonbond_params", "cmaptypes",
+        "moleculetype",  "atoms",     "bonds",          "pairs",
+        "angles",        "dihedrals", "settles",        "constraints",
+        "cmap",          "system",    "molecules"};
+    return recognized_sections.count(section) > 0;
+}
+
 static float Gromacs_To_Kcal(float value_in_kj) { return value_in_kj / 4.184f; }
 
 static float Gromacs_To_Angstrom(float value_in_nm)
@@ -457,6 +483,67 @@ static float Gromacs_To_Angstrom(float value_in_nm)
 static float Gromacs_To_Radian(float value_in_degree)
 {
     return value_in_degree * Gromacs_Pi / 180.0f;
+}
+
+// This target is built with -ffast-math, under which std::isfinite can be
+// optimized away. Inspect the IEEE-754 exponent bits for input validation.
+static bool Gromacs_Is_Finite(double value)
+{
+    static_assert(sizeof(double) == sizeof(std::uint64_t));
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(value));
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
+
+static bool Gromacs_Is_Decimal_Number_Token(const std::string& token)
+{
+    if (token.empty())
+    {
+        return false;
+    }
+    std::size_t i = 0;
+    if (token[i] == '+' || token[i] == '-')
+    {
+        i++;
+    }
+    bool mantissa_digit = false;
+    while (i < token.size() && token[i] >= '0' && token[i] <= '9')
+    {
+        mantissa_digit = true;
+        i++;
+    }
+    if (i < token.size() && token[i] == '.')
+    {
+        i++;
+        while (i < token.size() && token[i] >= '0' && token[i] <= '9')
+        {
+            mantissa_digit = true;
+            i++;
+        }
+    }
+    if (!mantissa_digit)
+    {
+        return false;
+    }
+    if (i < token.size() && (token[i] == 'e' || token[i] == 'E'))
+    {
+        i++;
+        if (i < token.size() && (token[i] == '+' || token[i] == '-'))
+        {
+            i++;
+        }
+        bool exponent_digit = false;
+        while (i < token.size() && token[i] >= '0' && token[i] <= '9')
+        {
+            exponent_digit = true;
+            i++;
+        }
+        if (!exponent_digit)
+        {
+            return false;
+        }
+    }
+    return i == token.size();
 }
 
 static std::pair<float, float> Gromacs_Get_C6_C12(
@@ -609,6 +696,25 @@ static const Gromacs_Pair_Type* Gromacs_Find_Pair_Type(
     return NULL;
 }
 
+static const Gromacs_Pair_Type* Gromacs_Find_Last_Pair_Type(
+    const std::vector<Gromacs_Pair_Type>& pair_types, const std::string& ai,
+    const std::string& aj, int funct)
+{
+    for (auto iter = pair_types.rbegin(); iter != pair_types.rend(); ++iter)
+    {
+        if (iter->funct != funct)
+        {
+            continue;
+        }
+        if ((iter->ai == ai && iter->aj == aj) ||
+            (iter->ai == aj && iter->aj == ai))
+        {
+            return &*iter;
+        }
+    }
+    return NULL;
+}
+
 static int Gromacs_Find_CMap_Type(
     const std::vector<Gromacs_CMap_Type>& cmap_types, const std::string& ai,
     const std::string& aj, const std::string& ak, const std::string& al,
@@ -680,19 +786,32 @@ static Gromacs_Topology Gromacs_Parse_Topology(CONTROLLER* controller)
         }
     }
 
-    std::vector<std::string> lines;
+    std::vector<Gromacs_Source_Line> lines;
     Gromacs_Preprocess_File(top_path, &macros, include_dirs, &lines, controller,
                             error_by);
 
     Gromacs_Topology topology;
     std::string current_section;
     Gromacs_Molecule* current_molecule = NULL;
+    std::set<std::string> warned_sections;
 
-    for (const std::string& line : lines)
+    for (const Gromacs_Source_Line& source_line : lines)
     {
+        const std::string& line = source_line.text;
         if (line.front() == '[' && line.back() == ']')
         {
             current_section = Gromacs_Trim(line.substr(1, line.size() - 2));
+            if (!Gromacs_Is_Recognized_Section(current_section) &&
+                warned_sections.insert(current_section).second)
+            {
+                std::string warning =
+                    "unsupported GROMACS topology section [ " +
+                    current_section + " ] at " +
+                    source_line.file_path.string() + ":" +
+                    std::to_string(source_line.line_number) +
+                    "; section contents will be ignored";
+                controller->printf("Warning: %s\n", warning.c_str());
+            }
             continue;
         }
 
@@ -814,6 +933,32 @@ static Gromacs_Topology Gromacs_Parse_Topology(CONTROLLER* controller)
                 pair_type.parameters.push_back(std::stof(tokens[i]));
             }
             topology.pair_types.push_back(pair_type);
+        }
+        else if (current_section == "nonbond_params")
+        {
+            if (tokens.size() < 5)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tinvalid [ nonbond_params ] section in "
+                    "GROMACS topology\n");
+            }
+            Gromacs_Pair_Type nonbond_parameter;
+            nonbond_parameter.ai = tokens[0];
+            nonbond_parameter.aj = tokens[1];
+            nonbond_parameter.funct = std::stoi(tokens[2]);
+            if (nonbond_parameter.funct != 1)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tonly Lennard-Jones function 1 is supported "
+                    "in GROMACS [ nonbond_params ]\n");
+            }
+            for (std::size_t i = 3; i < tokens.size(); i++)
+            {
+                nonbond_parameter.parameters.push_back(std::stof(tokens[i]));
+            }
+            topology.nonbond_params.push_back(nonbond_parameter);
         }
         else if (current_section == "cmaptypes")
         {
@@ -1105,21 +1250,107 @@ static void Gromacs_Load_Gro(System* system, CONTROLLER* controller)
             spongeErrorBadFileFormat, error_by,
             "Reason:\n\tunsupported box line in GROMACS gro file\n");
     }
-    if (tokens.size() == 9 && (std::fabs(std::stof(tokens[3])) > 1e-6f ||
-                               std::fabs(std::stof(tokens[4])) > 1e-6f ||
-                               std::fabs(std::stof(tokens[5])) > 1e-6f ||
-                               std::fabs(std::stof(tokens[6])) > 1e-6f ||
-                               std::fabs(std::stof(tokens[7])) > 1e-6f ||
-                               std::fabs(std::stof(tokens[8])) > 1e-6f))
+
+    double values[9] = {0.0};
+    bool invalid_numeric_field = false;
+    try
+    {
+        for (std::size_t i = 0; i < tokens.size(); i++)
+        {
+            if (!Gromacs_Is_Decimal_Number_Token(tokens[i]))
+            {
+                invalid_numeric_field = true;
+                continue;
+            }
+            std::size_t parsed_characters = 0;
+            values[i] = std::stod(tokens[i], &parsed_characters);
+            if (parsed_characters != tokens[i].size() ||
+                !Gromacs_Is_Finite(values[i]))
+            {
+                invalid_numeric_field = true;
+            }
+        }
+    }
+    catch (const std::exception&)
+    {
+        invalid_numeric_field = true;
+    }
+    if (invalid_numeric_field)
     {
         controller->Throw_SPONGE_Error(
             spongeErrorBadFileFormat, error_by,
-            "Reason:\n\ttriclinic GROMACS gro boxes are not supported yet\n");
+            "Reason:\n\tinvalid numeric field in GROMACS gro box line\n");
     }
-    system->box.box_length = {Gromacs_To_Angstrom(std::stof(tokens[0])),
-                              Gromacs_To_Angstrom(std::stof(tokens[1])),
-                              Gromacs_To_Angstrom(std::stof(tokens[2]))};
-    system->box.box_angle = {90.0f, 90.0f, 90.0f};
+
+    // GRO stores triclinic boxes as
+    // v1x v2y v3z v1y v1z v2x v2z v3x v3y.
+    double vectors[3][3] = {
+        {values[0], 0.0, 0.0}, {0.0, values[1], 0.0}, {0.0, 0.0, values[2]}};
+    if (tokens.size() == 9)
+    {
+        vectors[0][1] = values[3];
+        vectors[0][2] = values[4];
+        vectors[1][0] = values[5];
+        vectors[1][2] = values[6];
+        vectors[2][0] = values[7];
+        vectors[2][1] = values[8];
+
+        // GROMACS keeps GRO triclinic cells in a canonical orientation:
+        // v1y=v1z=v2z=0.  SPONGE stores lengths and angles and reconstructs
+        // that same orientation.  Accepting an arbitrarily rotated cell here
+        // without rotating all coordinates would silently change PBC.
+        double component_scale = std::max(
+            1.0,
+            std::max(std::fabs(values[0]),
+                     std::max(std::fabs(values[1]), std::fabs(values[2]))));
+        if (std::fabs(values[3]) > 1.0e-7 * component_scale ||
+            std::fabs(values[4]) > 1.0e-7 * component_scale ||
+            std::fabs(values[6]) > 1.0e-7 * component_scale)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorBadFileFormat, error_by,
+                "Reason:\n\tunsupported non-canonical GROMACS triclinic box "
+                "orientation\n");
+        }
+    }
+
+    auto dot = [&](int a, int b)
+    {
+        return vectors[a][0] * vectors[b][0] + vectors[a][1] * vectors[b][1] +
+               vectors[a][2] * vectors[b][2];
+    };
+    double lengths[3] = {std::sqrt(dot(0, 0)), std::sqrt(dot(1, 1)),
+                         std::sqrt(dot(2, 2))};
+    double length_product = lengths[0] * lengths[1] * lengths[2];
+    double determinant =
+        vectors[0][0] *
+            (vectors[1][1] * vectors[2][2] - vectors[1][2] * vectors[2][1]) -
+        vectors[0][1] *
+            (vectors[1][0] * vectors[2][2] - vectors[1][2] * vectors[2][0]) +
+        vectors[0][2] *
+            (vectors[1][0] * vectors[2][1] - vectors[1][1] * vectors[2][0]);
+    if (values[0] <= 0.0 || values[1] <= 0.0 || values[2] <= 0.0 ||
+        !Gromacs_Is_Finite(length_product) || length_product <= 0.0 ||
+        !Gromacs_Is_Finite(determinant) ||
+        std::fabs(determinant) <= 1.0e-8 * length_product)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat, error_by,
+            "Reason:\n\tinvalid GROMACS gro box geometry\n");
+    }
+
+    auto angle_degrees = [&](int a, int b)
+    {
+        double cosine = dot(a, b) / lengths[a] / lengths[b];
+        cosine = std::max(-1.0, std::min(1.0, cosine));
+        return std::acos(cosine) * 180.0 / static_cast<double>(Gromacs_Pi);
+    };
+    system->box.box_length = {static_cast<float>(10.0 * lengths[0]),
+                              static_cast<float>(10.0 * lengths[1]),
+                              static_cast<float>(10.0 * lengths[2])};
+    system->box.box_angle = {static_cast<float>(angle_degrees(1, 2)),
+                             static_cast<float>(angle_degrees(0, 2)),
+                             static_cast<float>(angle_degrees(0, 1))};
 }
 
 static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
@@ -1220,15 +1451,27 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
 
     std::unordered_map<std::string, int> atom_type_id;
     std::vector<std::string> ordered_types;
+    bool preserve_named_atom_types = !topology.nonbond_params.empty();
     for (const std::string& atom_type_name : global_atom_types)
     {
         const Gromacs_Atom_Type& atom_type =
             topology.atom_types.at(atom_type_name);
         std::pair<float, float> self_c6_c12 =
             Gromacs_Get_C6_C12(topology.defaults, atom_type, atom_type);
-        char lj_key[CHAR_LENGTH_MAX];
-        snprintf(lj_key, sizeof(lj_key), "%.9g|%.9g", self_c6_c12.first,
-                 self_c6_c12.second);
+        std::string lj_key;
+        if (preserve_named_atom_types)
+        {
+            // A type-pair override can distinguish atom types that have the
+            // same self LJ parameters, so their names must remain distinct.
+            lj_key = atom_type_name;
+        }
+        else
+        {
+            char parameter_key[CHAR_LENGTH_MAX];
+            snprintf(parameter_key, sizeof(parameter_key), "%.9g|%.9g",
+                     self_c6_c12.first, self_c6_c12.second);
+            lj_key = parameter_key;
+        }
         auto iter = atom_type_id.find(lj_key);
         if (iter == atom_type_id.end())
         {
@@ -1258,6 +1501,14 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                 topology.atom_types.at(ordered_types[type_j_index]);
             std::pair<float, float> c6_c12 =
                 Gromacs_Get_C6_C12(topology.defaults, type_i, type_j);
+            const Gromacs_Pair_Type* nonbond_parameter =
+                Gromacs_Find_Last_Pair_Type(topology.nonbond_params,
+                                            type_i.name, type_j.name, 1);
+            if (nonbond_parameter != NULL)
+            {
+                c6_c12 = Gromacs_Get_C6_C12_From_Pair_Parameters(
+                    topology.defaults, nonbond_parameter->parameters);
+            }
             int pair_id = type_j_index * (type_j_index + 1) / 2 + type_i_index;
             system->classical_force_field.lj.pair_A[pair_id] =
                 12.0f * c6_c12.second;
@@ -1530,7 +1781,10 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                     impropers.atom_b.push_back(local_to_global[aj_local]);
                     impropers.atom_c.push_back(local_to_global[ak_local]);
                     impropers.atom_d.push_back(local_to_global[al_local]);
-                    impropers.pk.push_back(Gromacs_To_Kcal(k_kj));
+                    // GROMACS harmonic impropers use 1/2*k*(phi-phi0)^2,
+                    // whereas SPONGE stores the coefficient of
+                    // (phi-phi0)^2 directly.
+                    impropers.pk.push_back(Gromacs_To_Kcal(k_kj) / 2.0f);
                     impropers.pn.push_back(0.0f);
                     impropers.ipn.push_back(0);
                     impropers.gamc.push_back(Gromacs_To_Radian(phase_deg));

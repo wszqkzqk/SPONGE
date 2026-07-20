@@ -18,7 +18,6 @@ from benchmarks.comparison.utils import (
 )
 from benchmarks.utils import Extractor, Runner
 
-
 KJ_PER_MOL_TO_KCAL_PER_MOL = 0.2390057361376673
 KJ_PER_MOL_PER_NM_TO_KCAL_PER_MOL_PER_A = 0.02390057361376673
 
@@ -470,6 +469,29 @@ def write_sponge_run0_mdin(case_dir, input_prefix="sys_flexible"):
         + "\n"
     )
     Path(case_dir, "sponge.mdin").write_text(mdin)
+
+
+def write_sponge_direct_gromacs_run0_mdin(case_dir):
+    mdin = (
+        textwrap.dedent(
+            """
+            md_name = "gromacs charmm27 tip3p direct flexible run0"
+            mode = "nve"
+            step_limit = 0
+            dt = 0
+            cutoff = 12.0
+            gromacs_top = "topol.top"
+            gromacs_gro = "solv.gro"
+            gromacs_define = "FLEXIBLE"
+            frc = "frc.dat"
+            print_pressure = 1
+            print_zeroth_frame = 1
+            write_mdout_interval = 1
+            """
+        ).strip()
+        + "\n"
+    )
+    Path(case_dir, "sponge.direct.toml").write_text(mdin)
 
 
 def extract_sponge_terms(case_dir):

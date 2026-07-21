@@ -2,9 +2,8 @@ import math
 
 import pytest
 
-from benchmarks.utils import Outputer, Runner
-
 from benchmarks.comparison.tests.gromacs.tests.utils import (
+    copy_gromacs_reference_case_files,
     copy_gromacs_reference_sponge_inputs,
     extract_sponge_forces,
     extract_sponge_terms,
@@ -12,7 +11,10 @@ from benchmarks.comparison.tests.gromacs.tests.utils import (
     load_gromacs_reference_entry,
     load_gromacs_reference_forces,
     load_gromacs_reference_terms,
+    perturb_gro_inplace,
+    write_sponge_direct_gromacs_run0_mdin,
 )
+from benchmarks.utils import Outputer, Runner
 
 PERTURB_CASES = [
     (0, 0.00),
@@ -165,3 +167,82 @@ def test_gromacs_alanine_dipeptide_charmm_tip3p_flexible_run0(
     assert stats["cosine_similarity"] >= force_cos_tol
     assert math.isfinite(gmx_terms["pressure"])
     assert math.isfinite(sponge_terms["pressure"])
+
+
+@pytest.mark.parametrize(
+    "iteration,perturbation",
+    PERTURB_CASES,
+    ids=[f"direct_iter{it}_pert{pert:.2f}" for it, pert in PERTURB_CASES],
+)
+def test_gromacs_alanine_dipeptide_direct_topgro_energy_and_force_run0(
+    iteration,
+    perturbation,
+    statics_path,
+    outputs_path,
+    mpi_np,
+):
+    case_name = "alanine_dipeptide_charmm_tip3p"
+    case_dir = Outputer.prepare_output_case(
+        statics_path,
+        outputs_path,
+        case_name,
+        mpi_np=mpi_np,
+        run_name=f"direct-{iteration}",
+    )
+
+    ref_entry = load_gromacs_reference_entry(statics_path, case_name, iteration)
+    assert abs(float(ref_entry["perturbation"]) - perturbation) <= 1.0e-12
+    copy_gromacs_reference_case_files(statics_path, case_dir, case_name)
+    perturb_gro_inplace(
+        case_dir / "solv.gro",
+        perturbation_angstrom=perturbation,
+        seed=int(ref_entry["seed"]),
+        perturb_non_water=False,
+    )
+    write_sponge_direct_gromacs_run0_mdin(case_dir)
+
+    gmx_terms = load_gromacs_reference_terms(statics_path, case_name, iteration)
+    gmx_forces = load_gromacs_reference_forces(
+        statics_path, case_name, iteration
+    )
+
+    Runner.run_sponge(
+        case_dir,
+        mpi_np=mpi_np,
+        mdin_name="sponge.direct.toml",
+    )
+
+    sponge_terms = extract_sponge_terms(case_dir)
+    sponge_forces = extract_sponge_forces(case_dir, natom=gmx_forces.shape[0])
+    stats = force_stats(gmx_forces, sponge_forces)
+
+    assert abs(gmx_terms["bond"] - sponge_terms["bond"]) <= 0.5
+    assert (
+        abs(
+            (gmx_terms["angle"] + gmx_terms["urey_bradley"])
+            - sponge_terms["urey_bradley"]
+        )
+        <= 0.5
+    )
+    assert (
+        abs(gmx_terms["proper_dihedral"] - sponge_terms["proper_dihedral"])
+        <= 0.1
+    )
+    assert (
+        abs(gmx_terms["improper_dihedral"] - sponge_terms["improper_dihedral"])
+        <= 0.02
+    )
+    assert abs(gmx_terms["lj14"] - sponge_terms["nb14_lj"]) <= 0.1
+    assert abs(gmx_terms["coulomb14"] - sponge_terms["nb14_ee"]) <= 0.2
+    assert abs(gmx_terms["lj_sr"] - sponge_terms["lj_short"]) <= 25.0
+    assert (
+        abs(
+            (gmx_terms["coulomb_sr"] + gmx_terms["coulomb_recip"])
+            - sponge_terms["pm"]
+        )
+        <= 2.0
+    )
+    assert abs(gmx_terms["potential"] - sponge_terms["potential"]) <= 40.0
+    assert stats["max_abs_diff"] <= 0.07
+    assert stats["rms_diff"] <= 0.01
+    assert stats["cosine_similarity"] >= 0.999

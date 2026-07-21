@@ -1530,7 +1530,9 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                     impropers.atom_b.push_back(local_to_global[aj_local]);
                     impropers.atom_c.push_back(local_to_global[ak_local]);
                     impropers.atom_d.push_back(local_to_global[al_local]);
-                    impropers.pk.push_back(Gromacs_To_Kcal(k_kj));
+                    // GROMACS uses E = 1/2*k*(phi-phi0)^2, while SPONGE
+                    // stores the coefficient of (phi-phi0)^2 directly.
+                    impropers.pk.push_back(Gromacs_To_Kcal(k_kj) / 2.0f);
                     impropers.pn.push_back(0.0f);
                     impropers.ipn.push_back(0);
                     impropers.gamc.push_back(Gromacs_To_Radian(phase_deg));

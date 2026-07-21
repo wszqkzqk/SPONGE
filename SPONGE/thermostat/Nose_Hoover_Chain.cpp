@@ -131,7 +131,9 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Initial(CONTROLLER* controller,
     {
         FILE* fcrd = NULL;
         Open_File_Safely(
-            &fcrd, controller[0].Command(this->module_name, "restart_input"),
+            &fcrd,
+            controller[0].Original_Command(this->module_name,
+                                           "restart_input"),
             "r");
         for (int i = 0; i < chain_length; i++)
         {
@@ -156,29 +158,28 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Initial(CONTROLLER* controller,
     deviceMemcpy(velocity, h_velocity, sizeof(float) * (chain_length + 1),
                  deviceMemcpyHostToDevice);
 
-    restart_file_name[0] = 0;
+    restart_file_name.clear();
     if (controller[0].Command_Exist(this->module_name, "restart_output"))
     {
-        strcpy(restart_file_name,
-               controller->Command(this->module_name, "restart_output"));
+        restart_file_name = controller->Original_Command(this->module_name,
+                                                         "restart_output");
     }
 
-    char tempchar[CHAR_LENGTH_MAX];
-    tempchar[0] = 0;
     f_crd_traj = NULL;
     if (controller[0].Command_Exist(this->module_name, "crd"))
     {
-        strcpy(tempchar, controller->Command(this->module_name, "crd"));
-        Open_File_Safely(&f_crd_traj, tempchar, "w");
+        Open_File_Safely(
+            &f_crd_traj,
+            controller->Original_Command(this->module_name, "crd"), "w");
         controller->Set_File_Buffer(f_crd_traj,
                                     sizeof(char) * 15 * chain_length);
     }
-    tempchar[0] = 0;
     f_vel_traj = NULL;
     if (controller[0].Command_Exist(this->module_name, "vel"))
     {
-        strcpy(tempchar, controller->Command(this->module_name, "vel"));
-        Open_File_Safely(&f_vel_traj, tempchar, "w");
+        Open_File_Safely(
+            &f_vel_traj,
+            controller->Original_Command(this->module_name, "vel"), "w");
         controller->Set_File_Buffer(f_vel_traj,
                                     sizeof(char) * 15 * chain_length);
     }
@@ -292,11 +293,11 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Set_Target_Temperature(
 
 void NOSE_HOOVER_CHAIN_INFORMATION::Save_Restart_File()
 {
-    if (is_initialized && restart_file_name[0] != 0 &&
+    if (is_initialized && !restart_file_name.empty() &&
         CONTROLLER::MPI_rank == 0)
     {
         FILE* frst = NULL;
-        Open_File_Safely(&frst, restart_file_name, "w");
+        Open_File_Safely(&frst, restart_file_name.c_str(), "w");
         for (int i = 0; i < chain_length; i++)
         {
             fprintf(frst, "%f %f\n", h_coordinate[i], h_velocity[i]);

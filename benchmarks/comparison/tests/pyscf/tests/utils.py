@@ -18,6 +18,10 @@ QC_ENERGY_PATTERN = re.compile(
     r"(?:QC|SCF_Energy)\s*=\s*"
     r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 )
+SCF_ITER_ENERGY_PATTERN = re.compile(
+    r"SCF Iter\s+\d+\s+\|\s+E\(Ha\)="
+    r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+)
 
 
 def _sanitize_token(text: str) -> str:
@@ -159,16 +163,29 @@ def run_sponge_scf_energy_ha(
     restricted: bool,
     mpi_np=None,
     extra_sponge_args=None,
+    use_internal_scf_energy=False,
 ):
+    sponge_args = ["-qc_model_chemistry", model_chemistry]
+    sponge_args += [] if restricted else ["-qc_restricted", "0"]
+    sponge_args += extra_sponge_args or []
+    if use_internal_scf_energy:
+        sponge_args += ["-qc_scf_print_iter", "1"]
     output = Runner.run_sponge(
         sponge_dir,
         mpi_np=mpi_np,
         mdin_name="mdin.txt",
         sponge_cmd=os.environ.get("SPONGE_BIN", "SPONGE"),
-        extra_args=["-qc_model_chemistry", model_chemistry]
-        + ([] if restricted else ["-qc_restricted", "0"])
-        + (extra_sponge_args or []),
+        extra_args=sponge_args,
     )
+
+    if use_internal_scf_energy:
+        iteration_matches = SCF_ITER_ENERGY_PATTERN.findall(output)
+        if not iteration_matches:
+            raise ValueError(
+                "Failed to parse the internal SCF energy from SPONGE output.\n"
+                f"Output tail:\n{output[-2000:]}"
+            )
+        return float(iteration_matches[-1])
 
     matches = QC_ENERGY_PATTERN.findall(output)
     if not matches:

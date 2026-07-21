@@ -2,13 +2,25 @@
 
 #include <stdexcept>
 
+#include "eigensolver_policy.hpp"
+
 void QUANTUM_CHEMISTRY::Build_SCF_Workspace()
 {
     const int nao = mol.nao;
     const int nao2 = mol.nao2;
     const bool unrestricted = scf_ws.runtime.unrestricted;
     const int diis_space = scf_ws.runtime.diis_space;
-    const int spin_e = mol.multiplicity - 1;
+    const long long runtime_electron_count =
+        unrestricted ? static_cast<long long>(scf_ws.runtime.n_alpha) +
+                           scf_ws.runtime.n_beta
+                     : 2LL * scf_ws.runtime.n_alpha;
+    if (scf_ws.runtime.n_alpha < 0 || scf_ws.runtime.n_beta < 0 ||
+        scf_ws.runtime.n_alpha > nao || scf_ws.runtime.n_beta > nao ||
+        runtime_electron_count != mol.nelectron ||
+        scf_ws.runtime.occ_factor != (unrestricted ? 1.0f : 2.0f))
+        throw std::logic_error(
+            "SCF electron configuration was not validated before workspace "
+            "allocation");
 
     scf_ws.ortho.h_X.resize(nao2);
     scf_ws.alpha.h_F.resize(nao2);
@@ -16,7 +28,6 @@ void QUANTUM_CHEMISTRY::Build_SCF_Workspace()
     scf_ws.alpha.h_P.resize(nao2);
     scf_ws.alpha.h_P_new.resize(nao2);
     scf_ws.ortho.h_W.resize((int)nao);
-    scf_ws.ortho.h_Work.resize(nao2);
     if (unrestricted)
     {
         scf_ws.beta.h_F.resize(nao2);
@@ -77,7 +88,6 @@ void QUANTUM_CHEMISTRY::Build_SCF_Workspace()
     alloc_zero_float(&scf_ws.ortho.d_norms, (int)nao);
     alloc_zero_double(&scf_ws.ortho.d_X, nao2);
     alloc_from_host_float(&scf_ws.ortho.d_W, scf_ws.ortho.h_W);
-    alloc_from_host_float(&scf_ws.ortho.d_Work, scf_ws.ortho.h_Work);
     alloc_from_host_float(&scf_ws.alpha.d_F, scf_ws.alpha.h_F);
     alloc_from_host_float(&scf_ws.alpha.d_P, scf_ws.alpha.h_P);
     alloc_from_host_float(&scf_ws.alpha.d_P_new, scf_ws.alpha.h_P_new);
@@ -115,6 +125,24 @@ void QUANTUM_CHEMISTRY::Build_SCF_Workspace()
     alloc_zero_double(&scf_ws.runtime.d_delta_e, 1);
     alloc_zero_double(&scf_ws.runtime.d_density_residual, 1);
     alloc_zero_int(&scf_ws.runtime.d_converged, 1);
+    alloc_zero_float(&scf_ws.ensemble.d_origin_alpha, nao2);
+    alloc_zero_float(&scf_ws.ensemble.d_direction_alpha, nao2);
+    alloc_zero_double(&scf_ws.ensemble.d_spectral_origin_fock_alpha, nao2);
+    alloc_zero_double(&scf_ws.ensemble.d_commutator, nao2);
+    alloc_zero_double(&scf_ws.ensemble.d_accum, 1);
+    if (unrestricted)
+    {
+        alloc_zero_float(&scf_ws.ensemble.d_origin_beta, nao2);
+        alloc_zero_float(&scf_ws.ensemble.d_direction_beta, nao2);
+        alloc_zero_double(&scf_ws.ensemble.d_spectral_origin_fock_beta,
+                          nao2);
+    }
+    else
+    {
+        scf_ws.ensemble.d_origin_beta = NULL;
+        scf_ws.ensemble.d_direction_beta = NULL;
+        scf_ws.ensemble.d_spectral_origin_fock_beta = NULL;
+    }
     alloc_zero_float(&scf_ws.direct.d_pair_density_coul,
                      task_ctx.topo.n_shell_pairs);
     alloc_zero_float(&scf_ws.direct.d_pair_density_exx,
@@ -212,29 +240,26 @@ void QUANTUM_CHEMISTRY::Build_SCF_Workspace()
     // Double solver workspace
     {
         scf_ws.ortho.lwork_double = 0;
-        double* tmp_work = NULL;
-        QC_Diagonalize_Double_Workspace_Size(
+        const int workspace_status = QC_Diagonalize_Double_Workspace_Size(
             solver_handle, nao, scf_ws.ortho.d_dwork_nao2_1,
-            scf_ws.ortho.d_dW_double, &tmp_work, &scf_ws.ortho.lwork_double);
-        if (tmp_work)
-        {
-            deviceFree(tmp_work);
-            tmp_work = NULL;
-        }
-        if (scf_ws.ortho.lwork_double > 0)
-            Device_Malloc_Safely((void**)&scf_ws.ortho.d_solver_work_double,
-                                 sizeof(double) * scf_ws.ortho.lwork_double);
-    }
-
-    scf_ws.ortho.lwork = 0;
-    scf_ws.ortho.liwork = 0;
-    int solver_stat = QC_Diagonalize_Workspace_Size(
-        solver_handle, nao, scf_ws.ortho.d_Work, scf_ws.ortho.d_W,
-        &scf_ws.ortho.d_solver_work, (void**)&scf_ws.ortho.d_solver_iwork,
-        &scf_ws.ortho.lwork, &scf_ws.ortho.liwork);
-    if (solver_stat != 0 || scf_ws.ortho.lwork <= 0)
-    {
-        throw std::runtime_error("QC_Diagonalize_Workspace_Size failed");
+            scf_ws.ortho.d_dW_double, &scf_ws.ortho.d_solver_work_double,
+            &scf_ws.ortho.lwork_double);
+        const bool workspace_ok = QC_SCF_Require_Eigensolver_Workspace(
+            nao, workspace_status, scf_ws.ortho.lwork_double,
+            scf_ws.ortho.d_solver_work_double != NULL,
+            [&](const QC_SCF_Eigensolver_Workspace_Failure& failure)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorSimulationBreakDown,
+                    "QUANTUM_CHEMISTRY::Build_SCF_Workspace",
+                    "Reason:\n    eigensolver workspace setup failed during "
+                    "%s for channel %s: dimension=%d, api_status=%d, "
+                    "workspace_size=%d, workspace_available=%d\n",
+                    failure.stage_name, failure.channel_name, failure.dimension,
+                    failure.api_status, failure.workspace_size,
+                    failure.workspace_available ? 1 : 0);
+            });
+        if (!workspace_ok) return;
     }
 
     scf_ws.diis.d_diis_f_hist.clear();
@@ -290,10 +315,6 @@ void QUANTUM_CHEMISTRY::Build_SCF_Workspace()
         scf_ws.diis.d_dot_out = NULL;
     }
 
-    scf_ws.runtime.n_alpha = (mol.nelectron + (unrestricted ? spin_e : 0)) / 2;
-    scf_ws.runtime.n_beta =
-        unrestricted ? (mol.nelectron - scf_ws.runtime.n_alpha) : 0;
-    scf_ws.runtime.occ_factor = unrestricted ? 1.0f : 2.0f;
     scf_ws.direct.d_P_coul =
         unrestricted ? scf_ws.direct.d_Ptot : scf_ws.alpha.d_P;
 }

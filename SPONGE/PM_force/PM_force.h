@@ -1,16 +1,18 @@
 ﻿#pragma once
 
+#include <array>
+#include <vector>
+
 #include "../common.h"
 #include "../control.h"
+#include "pme_exclusion_dependency.h"
+
 // FFT Backend
 #include "../utils/fft.hpp"
 
 // 为以后MPI-FFT预留接口，默认使用fft3d
 typedef void* MPI_FFT_PLAN;
 // #include "fft3d_wrap.h"
-
-#define MAX_PME_MPI_SIZE 100
-#define MAX_PP_MPI_SIZE 100
 
 struct Particle_Mesh
 {
@@ -33,28 +35,28 @@ struct Particle_Mesh
     char FFT_MPI_TYPE[CHAR_LENGTH_MAX];
 
     // MPI参数,区域分解参数
-    int PM_MPI_size;
-    int pm_rank;
+    int PM_MPI_size = 0;
+    int pm_rank = -1;
 
     // 主进程初始化与通信使用
-    int pm_pp_corres[MAX_PME_MPI_SIZE]
-                    [MAX_PP_MPI_SIZE];  // 每个PM进程对应的PP进程号
-    int pm_pp_num[MAX_PME_MPI_SIZE];    // 每个PM进程对应的PP进程数
+    std::vector<std::vector<int>> pm_pp_corres;  // 每个PM进程对应的PP进程号
+    std::vector<int> pm_pp_num;                  // 每个PM进程对应的PP进程数
 
     // 每个进程私有
-    int pp_corres_pm_rank;                       // 当前PP进程对应的PM进程号
-    int pm_corres_pp_num;                        // 当前PM进程对应的PP进程数
-    int pm_corres_pp_rank_set[MAX_PP_MPI_SIZE];  // 当前PM进程对应的PP进程号集合
-    int pm_corres_pp_atom_number[MAX_PP_MPI_SIZE];
-    int pm_corres_pp_atom_number_prefix[MAX_PP_MPI_SIZE];
+    int pp_corres_pm_rank = -1;              // 当前PP进程对应的PM进程号
+    int pm_corres_pp_num = 0;                // 当前PM进程对应的PP进程数
+    std::vector<int> pm_corres_pp_rank_set;  // 当前PM进程对应的PP进程号集合
+    std::vector<int> pm_corres_pp_atom_number;
+    std::vector<int> pm_corres_pp_atom_number_prefix;
+    int reported_pp_atom_numbers = -1;
     INT_VECTOR pm_dom_dec_split_num = {0, 0, 0};
 
-    int neighbor_num[6];
-    int neighbor_dir[6][MAX_PME_MPI_SIZE];
+    std::array<int, 6> neighbor_num{};
+    std::array<std::vector<int>, 6> neighbor_dir;
     VECTOR min_corner;
     VECTOR max_corner;
-    VECTOR min_corner_set[MAX_PME_MPI_SIZE];
-    VECTOR max_corner_set[MAX_PME_MPI_SIZE];
+    std::vector<VECTOR> min_corner_set;
+    std::vector<VECTOR> max_corner_set;
 
     MPI_FFT_PLAN mpi_fft_plan;
     MPI_FFT_PLAN mpi_fft_plan_forward;
@@ -135,6 +137,9 @@ struct Particle_Mesh
     // 从局部编号到全局编号的映射
     int* atom_id_l_g = NULL;
     int* atom_id_g_l = NULL;
+    int* atom_id_g_l_candidate = NULL;
+    int* atom_id_validation_error = NULL;
+    bool atom_mapping_is_valid = false;
     VECTOR* g_crd = NULL;  // global 编号的crd
     VECTOR* g_frc = NULL;  // global  编号的frc
     void reset_global_force(int no_direct_interaction_virtual_atom_numbers);
@@ -175,7 +180,8 @@ struct Particle_Mesh
     void PME_Reciprocal_Force_With_Energy_And_Virial(
         const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
         const float* charge, VECTOR* force, int need_virial, int need_energy,
-        LTMatrix3* d_virial, float* d_potential, int step);
+        LTMatrix3* d_virial, float* d_potential, int step,
+        bool exact_state = false);
 
     void Update_Box(LTMatrix3 cell, LTMatrix3 rcell, LTMatrix3 g, float dt);
     void Step_Print(CONTROLLER* controller);
@@ -183,11 +189,13 @@ struct Particle_Mesh
     void Get_Local(CONTROLLER* controller, int step, VECTOR box_length,
                    float* pme_charge);
     void MPI_PME_Excluded_Force_With_Atom_Energy(
-        const int N, const int* id1, const int* id2, const VECTOR* crd,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const float* charge,
+        const int N, const VECTOR* crd, const LTMatrix3 cell,
+        const LTMatrix3 rcell, const float* charge,
         const int* excluded_list_start, const int* excluded_list,
-        const int* excluded_atom_numbers, VECTOR* frc, int need_energy,
-        float* atom_ene, int need_virial, LTMatrix3* atom_virial);
+        const int* excluded_atom_numbers,
+        const PME_EXCLUSION_DEPENDENCY_STATE* exclusion_dependencies,
+        VECTOR* frc, int need_energy, float* atom_ene, int need_virial,
+        LTMatrix3* atom_virial);
     void MPI_PME_Reciprocal_Force_With_Energy_And_Virial(
         VECTOR* frc, const VECTOR* crd, const LTMatrix3 cell,
         const LTMatrix3 rcell, const float* charge, int need_virial,

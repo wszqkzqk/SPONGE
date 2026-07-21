@@ -1,478 +1,401 @@
-﻿#pragma once
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+#include <limits>
 
 #include "dft.hpp"
 
-static inline __host__ __device__ double QC_Exc_Slater(double rho)
+// The project is compiled with -ffast-math.  std::isfinite and comparisons
+// against NaN are therefore not reliable guards: the optimizer is allowed to
+// assume that non-finite values do not exist.  Inspect the IEEE-754 exponent
+// bits instead.  This helper is used both on the host and in device kernels.
+static inline __host__ __device__ std::uint64_t QC_XC_Double_Bits(double value)
 {
-    if (rho <= 1e-18) return 0.0;
-    const double Cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
-    return -Cx * pow(rho, 4.0 / 3.0);
+    std::uint64_t bits = 0;
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    bits = static_cast<std::uint64_t>(__double_as_longlong(value));
+#elif defined(__GNUC__) || defined(__clang__)
+    static_assert(sizeof(bits) == sizeof(value) &&
+                      std::numeric_limits<double>::is_iec559,
+                  "SPONGE requires 64-bit IEEE-754 doubles");
+    std::memcpy(&bits, &value, sizeof(bits));
+    __asm__ __volatile__("" : "+r"(bits));
+#else
+    std::memcpy(&bits, &value, sizeof(bits));
+#endif
+    return bits;
 }
 
-static inline __host__ __device__ double QC_Exc_B88(double rho, double sigma)
+static inline __host__ __device__ bool QC_XC_Double_Is_Finite(double value)
 {
-    if (rho <= 1e-18) return 0.0;
-    const double grad = sqrt(fmax(0.0, sigma));
-    const double rho43 = pow(rho, 4.0 / 3.0);
-    const double x = grad / fmax(1e-20, rho43);
-    const double beta = 0.0042;
-    const double Cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
-    // Spin-unpolarized B88 is built from spin-scaling over rho/2 channels.
-    const double c2 = cbrt(2.0);
-    const double x_sigma = c2 * x;
-    const double corr = beta * c2 * rho43 * x * x /
-                        (1.0 + 6.0 * beta * x_sigma * asinh(x_sigma));
-    return -Cx * rho43 - corr;
+    const std::uint64_t bits = QC_XC_Double_Bits(value);
+    return (bits & UINT64_C(0x7ff0000000000000)) !=
+           UINT64_C(0x7ff0000000000000);
 }
 
-static inline __host__ __device__ double QC_Eps_VWN5(double rho)
+static inline __host__ __device__ double QC_XC_Double_From_Bits(
+    std::uint64_t bits)
 {
-    if (rho <= 1e-18) return 0.0;
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    const double s = sqrt(rs);
-    const double p0 = -0.10498;
-    const double p1 = 0.0621814;
-    const double p2 = 3.72744;
-    const double p3 = 12.9352;
-    const double den = (p0 * p0 + p0 * p2 + p3);
-    const double sq = sqrt(4.0 * p3 - p2 * p2);
-    const double A = p0 * p2 / den - 1.0;
-    const double B = 2.0 * A + 2.0;
-    const double C = 2.0 * p2 * (1.0 / sq - p0 / (den * sq / (p2 + 2.0 * p0)));
-    const double x = s * s + p2 * s + p3;
-    const double y = s - p0;
-    const double z = sq / (2.0 * s + p2);
-    return 0.5 * p1 * (2.0 * log(s) + A * log(x) - B * log(y) + C * atan(z));
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return __longlong_as_double(static_cast<long long>(bits));
+#else
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof(value));
+#if defined(__GNUC__) || defined(__clang__)
+    // Keep -ffast-math from replacing a bit-constructed special value with a
+    // value that satisfies its global finite-only assumption.
+    __asm__ __volatile__("" : "+m"(value));
+#endif
+    return value;
+#endif
 }
 
-static inline __host__ __device__ double QC_Ec_VWN5(double rho)
+static inline __host__ __device__ double QC_XC_Quiet_NaN()
 {
-    return rho * QC_Eps_VWN5(rho);
+    return QC_XC_Double_From_Bits(UINT64_C(0x7ff8000000000000));
 }
 
-static inline __host__ __device__ double QC_PW92_Eopt(double sqrt_rs,
-                                                      const double t[6])
+static inline __host__ __device__ double QC_XC_Positive_Infinity()
 {
-    const double rs = sqrt_rs * sqrt_rs;
-    const double poly =
-        sqrt_rs * (t[2] + sqrt_rs * (t[3] + sqrt_rs * (t[4] + t[5] * sqrt_rs)));
-    const double log_arg = 1.0 + 0.5 / (t[0] * poly);
-    const double pref = -2.0 * t[0] * (1.0 + t[1] * rs);
-    return pref * log(log_arg);
+    return QC_XC_Double_From_Bits(UINT64_C(0x7ff0000000000000));
 }
 
-static inline __host__ __device__ double QC_Eps_PW92_Unpol(double rho)
+static inline __host__ __device__ bool QC_XC_Method_Is_Supported(
+    QC_METHOD method)
 {
-    if (rho <= 1e-18) return 0.0;
-    static const double p[6] = {0.03109070, 0.21370, 7.59570,
-                                3.5876,     1.63820, 0.49294};
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    const double sqrt_rs = sqrt(rs);
-    return QC_PW92_Eopt(sqrt_rs, p);
+    return method == QC_METHOD::LDA || method == QC_METHOD::PBE ||
+           method == QC_METHOD::BLYP || method == QC_METHOD::PBE0 ||
+           method == QC_METHOD::B3LYP;
 }
 
-static inline __host__ __device__ double QC_Exc_PBE(double rho, double sigma)
-{
-    if (rho <= 1e-18) return 0.0;
-    const double Cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
-    const double grad = sqrt(fmax(0.0, sigma));
-    const double kf = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi * rho);
-    const double s = grad / fmax(1e-20, 2.0 * kf * rho);
-    const double kappa = 0.804;
-    const double mu = 0.2195149727645171;
-    const double fx = 1.0 + kappa - kappa / (1.0 + mu * s * s / kappa);
-    return -Cx * pow(rho, 4.0 / 3.0) * fx;
-}
-
-static inline __host__ __device__ double QC_Ec_PBE(double rho, double sigma)
-{
-    if (rho <= 1e-18) return 0.0;
-    const double eps_pw92 = QC_Eps_PW92_Unpol(rho);
-    const double gamma = (1.0 - log(2.0)) / (CONSTANT_Pi * CONSTANT_Pi);
-    const double beta = 0.06672455060314922;
-    const double beta_gamma = beta / gamma;
-    const double A = beta_gamma / expm1(-eps_pw92 / gamma);
-    const double d2_const = pow(
-        (1.0 / 12.0) * pow(3.0, 5.0 / 6.0) * pow(CONSTANT_Pi, 1.0 / 6.0), 2.0);
-    const double d2 = d2_const * fmax(0.0, sigma) / pow(rho, 7.0 / 3.0);
-    const double d2A = d2 * A;
-    const double H = gamma * log(1.0 + beta_gamma * d2 * (1.0 + d2A) /
-                                           (1.0 + d2A * (1.0 + d2A)));
-    return rho * (eps_pw92 + H);
-}
-
-static inline __host__ __device__ double QC_Ec_LYP(double rho, double sigma)
-{
-    if (rho <= 1e-18) return 0.0;
-    const double a = 0.04918;
-    const double b = 0.132;
-    const double c = 0.2533;
-    const double d = 0.349;
-
-    const double rho13 = cbrt(rho);
-    const double inv_rho13 = 1.0 / rho13;
-    const double den = 1.0 + d * inv_rho13;
-    const double den_inv = 1.0 / den;
-    const double exp_term = exp(-c * inv_rho13);
-    const double t16 = (d * den_inv + c) * inv_rho13;
-    const double rho83_inv = pow(rho, -8.0 / 3.0);
-    const double grad_coeff = (3.0 + 7.0 * t16) / 72.0;
-    const double const_term =
-        0.3 * pow(3.0, 2.0 / 3.0) * pow(CONSTANT_Pi, 4.0 / 3.0);
-    const double t62 = fmax(0.0, sigma) * rho83_inv * grad_coeff - const_term;
-    const double eps = a * (b * exp_term * den_inv * t62 - den_inv);
-    return rho * eps;
-}
-
-static inline __host__ __device__ double QC_Local_Exc_Density(QC_METHOD method,
-                                                              double rho,
+// XC is defined on non-negative densities and gradient invariants.  Vacuum is
+// a single boundary point: a zero density cannot carry a non-zero gradient.
+// No positive density, however small, is discarded.
+static inline __host__ __device__ bool QC_XC_Inputs_Valid_RKS(double rho,
                                                               double sigma)
 {
-    switch (method)
+    if (!QC_XC_Double_Is_Finite(rho) ||
+        !QC_XC_Double_Is_Finite(sigma))
+        return false;
+    if (rho < 0.0 || sigma < 0.0) return false;
+    return rho != 0.0 || sigma == 0.0;
+}
+
+struct QC_XC_Normalized_IEEE_Double
+{
+    std::uint64_t significand;
+    int exponent;
+};
+
+struct QC_XC_UInt106
+{
+    std::uint64_t high;
+    std::uint64_t low;
+    int exponent;
+};
+
+// Decompose a finite, positive IEEE-754 double as significand*2^exponent,
+// with the significand normalized to exactly 53 bits.  Subnormals are handled
+// by integer shifts, so no floating operation can flush them to zero.
+static inline __host__ __device__ QC_XC_Normalized_IEEE_Double
+QC_XC_Normalize_Positive_Double_Bits(std::uint64_t bits)
+{
+    const std::uint64_t fraction =
+        bits & UINT64_C(0x000fffffffffffff);
+    const unsigned exponent_field =
+        static_cast<unsigned>((bits >> 52) & UINT64_C(0x7ff));
+    QC_XC_Normalized_IEEE_Double result;
+    if (exponent_field != 0u)
     {
-        case QC_METHOD::LDA:
-            return QC_Exc_Slater(rho) + QC_Ec_VWN5(rho);
-        case QC_METHOD::PBE:
-            return QC_Exc_PBE(rho, sigma) + QC_Ec_PBE(rho, sigma);
-        case QC_METHOD::BLYP:
-            return QC_Exc_B88(rho, sigma) + QC_Ec_LYP(rho, sigma);
-        case QC_METHOD::PBE0:
-            return 0.75 * QC_Exc_PBE(rho, sigma) + QC_Ec_PBE(rho, sigma);
-        case QC_METHOD::B3LYP:
-            return 0.08 * QC_Exc_Slater(rho) + 0.72 * QC_Exc_B88(rho, sigma) +
-                   0.81 * QC_Ec_LYP(rho, sigma) + 0.19 * QC_Ec_VWN5(rho);
-        default:
-            return 0.0;
+        result.significand = fraction | UINT64_C(0x0010000000000000);
+        result.exponent = static_cast<int>(exponent_field) - 1075;
+        return result;
     }
+
+    result.significand = fraction;
+    result.exponent = -1074;
+    while ((result.significand & UINT64_C(0x0010000000000000)) == 0u)
+    {
+        result.significand <<= 1;
+        --result.exponent;
+    }
+    return result;
 }
 
-static inline __host__ __device__ void QC_Local_Vrho_Vsigma_FD(
-    QC_METHOD method, double rho, double sigma, double& e, double& vrho,
-    double& vsigma)
+// Exact 53x53 -> 106-bit multiplication using only portable 64-bit integer
+// operations.  The two 32-bit cross products are accumulated separately so
+// neither limb can overflow before its carry is propagated.
+static inline __host__ __device__ QC_XC_UInt106 QC_XC_Multiply_53x53(
+    const QC_XC_Normalized_IEEE_Double& a,
+    const QC_XC_Normalized_IEEE_Double& b)
 {
-    rho = fmax(rho, 1e-14);
-    sigma = fmax(sigma, 0.0);
-    e = QC_Local_Exc_Density(method, rho, sigma);
-    // Keep finite-difference perturbations local to the current density region.
-    const double dr = fmax(1e-12, 1e-4 * rho);
-    const double ds = fmax(1e-14, 1e-4 * (sigma + 1e-12));
-    const double rp = rho + dr;
-    const double rm = fmax(1e-14, rho - dr);
-    const double sp = sigma + ds;
-    const double sm = fmax(0.0, sigma - ds);
-    const double erp = QC_Local_Exc_Density(method, rp, sigma);
-    const double erm = QC_Local_Exc_Density(method, rm, sigma);
-    const double esp = QC_Local_Exc_Density(method, rho, sp);
-    const double esm = QC_Local_Exc_Density(method, rho, sm);
-    vrho = (erp - erm) / (rp - rm);
-    vsigma = (esp - esm) / fmax(1e-16, (sp - sm));
+    const std::uint64_t mask32 = UINT64_C(0xffffffff);
+    const std::uint64_t a_low = a.significand & mask32;
+    const std::uint64_t a_high = a.significand >> 32;
+    const std::uint64_t b_low = b.significand & mask32;
+    const std::uint64_t b_high = b.significand >> 32;
+
+    QC_XC_UInt106 result;
+    result.low = a_low * b_low;
+    result.high = a_high * b_high;
+
+    const std::uint64_t cross0 = a_low * b_high;
+    const std::uint64_t add0 = cross0 << 32;
+    const std::uint64_t old0 = result.low;
+    result.low += add0;
+    result.high += (cross0 >> 32) + (result.low < old0 ? 1u : 0u);
+
+    const std::uint64_t cross1 = a_high * b_low;
+    const std::uint64_t add1 = cross1 << 32;
+    const std::uint64_t old1 = result.low;
+    result.low += add1;
+    result.high += (cross1 >> 32) + (result.low < old1 ? 1u : 0u);
+
+    result.exponent = a.exponent + b.exponent;
+    // A product of two normalized 53-bit integers has bit 104 or 105 set.
+    // Put bit 105 at a fixed position so exponent comparison is sufficient.
+    if ((result.high & (UINT64_C(1) << 41)) == 0u)
+    {
+        result.high = (result.high << 1) | (result.low >> 63);
+        result.low <<= 1;
+        --result.exponent;
+    }
+    return result;
 }
 
-static inline __host__ __device__ double QC_Clamp_Zeta(double z)
+static inline __host__ __device__ bool QC_XC_UInt106_Less_Or_Equal(
+    const QC_XC_UInt106& a, const QC_XC_UInt106& b)
 {
-    return fmax(-1.0 + 1e-12, fmin(1.0 - 1e-12, z));
+    if (a.exponent != b.exponent) return a.exponent < b.exponent;
+    if (a.high != b.high) return a.high < b.high;
+    return a.low <= b.low;
 }
 
-static inline __host__ __device__ double QC_PW92_Fzeta(double z)
+static inline __host__ __device__ bool QC_XC_Gradient_Gram_Is_PSD(
+    double sigma_aa, double sigma_ab, double sigma_bb)
 {
-    const double zc = QC_Clamp_Zeta(z);
-    const double denom = pow(2.0, 4.0 / 3.0) - 2.0;
-    const double up = pow(1.0 + zc, 4.0 / 3.0);
-    const double dn = pow(1.0 - zc, 4.0 / 3.0);
-    return (up + dn - 2.0) / denom;
+    const std::uint64_t aa_bits =
+        QC_XC_Double_Bits(sigma_aa) & UINT64_C(0x7fffffffffffffff);
+    const std::uint64_t ab_bits =
+        QC_XC_Double_Bits(sigma_ab) & UINT64_C(0x7fffffffffffffff);
+    const std::uint64_t bb_bits =
+        QC_XC_Double_Bits(sigma_bb) & UINT64_C(0x7fffffffffffffff);
+    if (ab_bits == 0u) return true;
+    if (aa_bits == 0u || bb_bits == 0u) return false;
+
+    const QC_XC_Normalized_IEEE_Double aa =
+        QC_XC_Normalize_Positive_Double_Bits(aa_bits);
+    const QC_XC_Normalized_IEEE_Double ab =
+        QC_XC_Normalize_Positive_Double_Bits(ab_bits);
+    const QC_XC_Normalized_IEEE_Double bb =
+        QC_XC_Normalize_Positive_Double_Bits(bb_bits);
+    const QC_XC_UInt106 ab_squared = QC_XC_Multiply_53x53(ab, ab);
+    const QC_XC_UInt106 aa_times_bb = QC_XC_Multiply_53x53(aa, bb);
+    return QC_XC_UInt106_Less_Or_Equal(ab_squared, aa_times_bb);
 }
 
-static inline __host__ __device__ double QC_Eps_PW92_Pol(double rho)
+struct QC_XC_Interval
 {
-    if (rho <= 1e-18) return 0.0;
-    static const double p[6] = {0.01554535, 0.20548, 14.11890,
-                                6.1977,     3.36620, 0.62517};
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    return QC_PW92_Eopt(sqrt(rs), p);
+    double lower;
+    double upper;
+};
+
+static inline __host__ __device__ bool QC_XC_Double_Is_Zero(double value)
+{
+    return (QC_XC_Double_Bits(value) & UINT64_C(0x7fffffffffffffff)) == 0u;
 }
 
-static inline __host__ __device__ double QC_Eps_PW92_Alpha(double rho)
+static inline __host__ __device__ double QC_XC_Next_Up(double value)
 {
-    if (rho <= 1e-18) return 0.0;
-    static const double p[6] = {0.01688690, 0.11125, 10.35700,
-                                3.6231,     0.88026, 0.49671};
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    return QC_PW92_Eopt(sqrt(rs), p);
+    std::uint64_t bits = QC_XC_Double_Bits(value);
+    const std::uint64_t magnitude = bits & UINT64_C(0x7fffffffffffffff);
+    if (magnitude > UINT64_C(0x7ff0000000000000)) return value;
+    if (bits == UINT64_C(0x7ff0000000000000)) return value;
+    if (bits == UINT64_C(0xfff0000000000000))
+        return QC_XC_Double_From_Bits(UINT64_C(0xffefffffffffffff));
+    if (magnitude == 0u) return QC_XC_Double_From_Bits(UINT64_C(1));
+    bits += (bits >> 63) != 0u ? UINT64_C(-1) : UINT64_C(1);
+    return QC_XC_Double_From_Bits(bits);
 }
 
-static inline __host__ __device__ double QC_Eps_PW92_Spin(double rho,
-                                                          double zeta)
+static inline __host__ __device__ double QC_XC_Next_Down(double value)
 {
-    if (rho <= 1e-18) return 0.0;
-    const double z = QC_Clamp_Zeta(zeta);
-    const double fz = QC_PW92_Fzeta(z);
-    const double z2 = z * z;
-    const double z4 = z2 * z2;
-    const double ec0 = QC_Eps_PW92_Unpol(rho);
-    const double ec1 = QC_Eps_PW92_Pol(rho);
-    // PW92 spin interpolation includes the spin-stiffness correction term.
-    static constexpr double pw92_fz20 = 1.70992093416136561756;
-    const double ec2 = QC_Eps_PW92_Alpha(rho) / pw92_fz20;
-    return ec0 + fz * (z4 * (ec1 - ec0) - (1.0 - z4) * ec2);
+    std::uint64_t bits = QC_XC_Double_Bits(value);
+    const std::uint64_t magnitude = bits & UINT64_C(0x7fffffffffffffff);
+    if (magnitude > UINT64_C(0x7ff0000000000000)) return value;
+    if (bits == UINT64_C(0xfff0000000000000)) return value;
+    if (bits == UINT64_C(0x7ff0000000000000))
+        return QC_XC_Double_From_Bits(UINT64_C(0x7fefffffffffffff));
+    if (magnitude == 0u)
+        return QC_XC_Double_From_Bits(UINT64_C(0x8000000000000001));
+    bits += (bits >> 63) != 0u ? UINT64_C(1) : UINT64_C(-1);
+    return QC_XC_Double_From_Bits(bits);
 }
 
-static inline __host__ __device__ double QC_Exc_B88_Spin(double rho_a,
-                                                         double rho_b,
-                                                         double sigma_aa,
-                                                         double sigma_bb)
+static inline __host__ __device__ QC_XC_Interval QC_XC_Product_Interval(
+    double a, double b)
 {
-    return 0.5 * QC_Exc_B88(2.0 * rho_a, 4.0 * fmax(0.0, sigma_aa)) +
-           0.5 * QC_Exc_B88(2.0 * rho_b, 4.0 * fmax(0.0, sigma_bb));
+    if (QC_XC_Double_Is_Zero(a) || QC_XC_Double_Is_Zero(b))
+        return {0.0, 0.0};
+    volatile double rounded = fma(a, b, 0.0);
+    if ((QC_XC_Double_Bits(rounded) & UINT64_C(0x7fffffffffffffff)) >
+        UINT64_C(0x7ff0000000000000))
+    {
+        return {QC_XC_Double_From_Bits(UINT64_C(0xfff0000000000000)),
+                QC_XC_Double_From_Bits(UINT64_C(0x7ff0000000000000))};
+    }
+    return {QC_XC_Next_Down(rounded), QC_XC_Next_Up(rounded)};
 }
 
-static inline __host__ __device__ double QC_Exc_PBE_Spin(double rho_a,
-                                                         double rho_b,
-                                                         double sigma_aa,
-                                                         double sigma_bb)
+static inline __host__ __device__ bool QC_XC_Interval_Is_Exact_Zero(
+    const QC_XC_Interval& interval)
 {
-    return 0.5 * QC_Exc_PBE(2.0 * rho_a, 4.0 * fmax(0.0, sigma_aa)) +
-           0.5 * QC_Exc_PBE(2.0 * rho_b, 4.0 * fmax(0.0, sigma_bb));
+    return QC_XC_Double_Is_Zero(interval.lower) &&
+           QC_XC_Double_Is_Zero(interval.upper);
 }
 
-static inline __host__ __device__ double QC_Eps_VWN5_Pol(double rho)
+static inline __host__ __device__ QC_XC_Interval QC_XC_Add_Intervals(
+    const QC_XC_Interval& a, const QC_XC_Interval& b)
 {
-    if (rho <= 1e-18) return 0.0;
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    const double s = sqrt(rs);
-    const double den = rs + 7.06042 * s + 18.0578;
-    return 0.01554535 * log(rs / den) +
-           0.052491393169780936218 *
-               atan(4.7309269095601128300 / (2.0 * s + 7.06042)) +
-           0.0022478670955426118383 *
-               log(((s + 0.32500) * (s + 0.32500)) / den);
+    if (QC_XC_Interval_Is_Exact_Zero(a)) return b;
+    if (QC_XC_Interval_Is_Exact_Zero(b)) return a;
+    volatile double lower = fma(1.0, a.lower, b.lower);
+    volatile double upper = fma(1.0, a.upper, b.upper);
+    const std::uint64_t lower_magnitude =
+        QC_XC_Double_Bits(lower) & UINT64_C(0x7fffffffffffffff);
+    const std::uint64_t upper_magnitude =
+        QC_XC_Double_Bits(upper) & UINT64_C(0x7fffffffffffffff);
+    if (lower_magnitude > UINT64_C(0x7ff0000000000000) ||
+        upper_magnitude > UINT64_C(0x7ff0000000000000))
+    {
+        return {QC_XC_Double_From_Bits(UINT64_C(0xfff0000000000000)),
+                QC_XC_Double_From_Bits(UINT64_C(0x7ff0000000000000))};
+    }
+    return {QC_XC_Next_Down(lower), QC_XC_Next_Up(upper)};
 }
 
-static inline __host__ __device__ double QC_Eps_VWN5_Alpha(double rho)
+static inline __host__ __device__ QC_XC_Interval QC_XC_Dot3_Interval(
+    double ax, double ay, double az, double bx, double by, double bz)
 {
-    if (rho <= 1e-18) return 0.0;
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    const double s = sqrt(rs);
-    const double den = rs + 1.13107 * s + 13.0045;
-    const double inv_pi2 = 1.0 / (CONSTANT_Pi * CONSTANT_Pi);
-    return inv_pi2 * (log(rs / den) +
-                      0.31770800474394146400 *
-                          atan(7.1231089178181179908 / (2.0 * s + 1.13107)) +
-                      0.00041403379428206274608 *
-                          log(((s + 0.0047584) * (s + 0.0047584)) / den));
+    const QC_XC_Interval x = QC_XC_Product_Interval(ax, bx);
+    const QC_XC_Interval y = QC_XC_Product_Interval(ay, by);
+    const QC_XC_Interval z = QC_XC_Product_Interval(az, bz);
+    return QC_XC_Add_Intervals(QC_XC_Add_Intervals(x, y), z);
 }
 
-static inline __host__ __device__ double QC_Ec_VWN5_Spin(double rho_a,
-                                                         double rho_b)
+// Construct representable spin-gradient invariants with a proof of PSD.
+// Diagonal entries are outward upper bounds on the exact squared norms.  The
+// cross entry is the endpoint of an exact-dot interval closest to zero (or
+// zero if the interval straddles it).  Cauchy-Schwarz for the exact vectors
+// then proves sigma_ab^2 <= sigma_aa*sigma_bb for the published doubles.
+static inline __host__ __device__ bool QC_XC_Build_Gradient_Gram(
+    double gax, double gay, double gaz, double gbx, double gby, double gbz,
+    double& sigma_aa, double& sigma_ab, double& sigma_bb)
 {
+    if (!QC_XC_Double_Is_Finite(gax) || !QC_XC_Double_Is_Finite(gay) ||
+        !QC_XC_Double_Is_Finite(gaz) || !QC_XC_Double_Is_Finite(gbx) ||
+        !QC_XC_Double_Is_Finite(gby) || !QC_XC_Double_Is_Finite(gbz))
+    {
+        sigma_aa = sigma_ab = sigma_bb = QC_XC_Quiet_NaN();
+        return false;
+    }
+    const QC_XC_Interval aa =
+        QC_XC_Dot3_Interval(gax, gay, gaz, gax, gay, gaz);
+    const QC_XC_Interval ab =
+        QC_XC_Dot3_Interval(gax, gay, gaz, gbx, gby, gbz);
+    const QC_XC_Interval bb =
+        QC_XC_Dot3_Interval(gbx, gby, gbz, gbx, gby, gbz);
+    sigma_aa = aa.upper;
+    sigma_bb = bb.upper;
+    sigma_ab = ab.lower > 0.0 ? ab.lower : (ab.upper < 0.0 ? ab.upper : 0.0);
+    return QC_XC_Double_Is_Finite(sigma_aa) &&
+           QC_XC_Double_Is_Finite(sigma_ab) &&
+           QC_XC_Double_Is_Finite(sigma_bb) &&
+           QC_XC_Gradient_Gram_Is_PSD(sigma_aa, sigma_ab, sigma_bb);
+}
+
+static inline __host__ __device__ bool QC_XC_Inputs_Valid_UKS(
+    double rho_a, double rho_b, double sigma_aa, double sigma_ab,
+    double sigma_bb)
+{
+    if (!QC_XC_Double_Is_Finite(rho_a) ||
+        !QC_XC_Double_Is_Finite(rho_b) ||
+        !QC_XC_Double_Is_Finite(sigma_aa) ||
+        !QC_XC_Double_Is_Finite(sigma_ab) ||
+        !QC_XC_Double_Is_Finite(sigma_bb))
+        return false;
+    if (rho_a < 0.0 || rho_b < 0.0 || sigma_aa < 0.0 || sigma_bb < 0.0)
+        return false;
+
     const double rho = rho_a + rho_b;
-    if (rho <= 1e-18) return 0.0;
-    const double z = QC_Clamp_Zeta((rho_a - rho_b) / rho);
-    const double z2 = z * z;
-    const double z4 = z2 * z2;
-    const double eps0 = QC_Eps_VWN5(rho);
-    const double eps1 = QC_Eps_VWN5_Pol(rho);
-    const double eps_alpha = QC_Eps_VWN5_Alpha(rho);
-    const double fz_num =
-        pow(1.0 + z, 4.0 / 3.0) + pow(1.0 - z, 4.0 / 3.0) - 2.0;
-    const double cbrt2 = cbrt(2.0);
-    const double eps = eps0 - eps_alpha * fz_num * (1.0 - z4) * (3.0 / 16.0) +
-                       (eps1 - eps0) * fz_num * z4 / (2.0 * (cbrt2 - 1.0));
-    return rho * eps;
+    const double sigma = sigma_aa + 2.0 * sigma_ab + sigma_bb;
+    if (!QC_XC_Double_Is_Finite(rho) ||
+        !QC_XC_Double_Is_Finite(sigma) || sigma < 0.0)
+        return false;
+
+    if (rho == 0.0)
+        return sigma_aa == 0.0 && sigma_ab == 0.0 && sigma_bb == 0.0;
+
+    // The three invariants are a 2x2 Gram matrix.  Validate positive
+    // semidefiniteness exactly in integer arithmetic: floating ratios can
+    // round an out-of-domain matrix back onto the boundary.
+    if (!QC_XC_Gradient_Gram_Is_PSD(sigma_aa, sigma_ab, sigma_bb)) return false;
+
+    // A non-negative differentiable spin density has zero gradient wherever
+    // that spin density itself is zero.  Enforcing this boundary identity
+    // avoids asking for partial derivatives outside the admissible domain.
+    if (rho_a == 0.0 && (sigma_aa != 0.0 || sigma_ab != 0.0)) return false;
+    if (rho_b == 0.0 && (sigma_bb != 0.0 || sigma_ab != 0.0)) return false;
+    return true;
 }
 
-static inline __host__ __device__ double QC_Ec_PBE_Spin(double rho_a,
-                                                        double rho_b,
-                                                        double sigma_aa,
-                                                        double sigma_ab,
-                                                        double sigma_bb)
+// Output bits used by the host-side failure plumbing.  At a fully polarized
+// PBE/PBE0 point with a non-zero total gradient, dE_c/d(rho_minority) has the
+// genuine +infinity limit caused by d[(rho_minority/rho)^(2/3)]/d rho.
+// It must not be confused with an accidental floating-point failure.
+enum QC_XC_UKS_Output_Bit : unsigned
 {
-    const double rho = rho_a + rho_b;
-    if (rho <= 1e-18) return 0.0;
-    const double zeta = (rho_a - rho_b) / rho;
-    const double z = QC_Clamp_Zeta(zeta);
-    const double sigma = fmax(0.0, sigma_aa + 2.0 * sigma_ab + sigma_bb);
+    QC_XC_UKS_VRHO_A_BIT = 1u << 0,
+    QC_XC_UKS_VRHO_B_BIT = 1u << 1,
+    QC_XC_UKS_VSIGMA_AA_BIT = 1u << 2,
+    QC_XC_UKS_VSIGMA_AB_BIT = 1u << 3,
+    QC_XC_UKS_VSIGMA_BB_BIT = 1u << 4
+};
 
-    const double eps_lsda = QC_Eps_PW92_Spin(rho, z);
-    const double phi =
-        0.5 * (pow(1.0 + z, 2.0 / 3.0) + pow(1.0 - z, 2.0 / 3.0));
-    const double gamma = (1.0 - log(2.0)) / (CONSTANT_Pi * CONSTANT_Pi);
-    const double beta = 0.06672455060314922;
-    const double beta_gamma = beta / gamma;
-    const double ph3 = phi * phi * phi;
-    const double A = beta_gamma / expm1(-eps_lsda / fmax(1e-16, gamma * ph3));
-
-    const double kf = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi * rho);
-    const double ks = sqrt(fmax(1e-20, 4.0 * kf / CONSTANT_Pi));
-    const double t = sqrt(sigma) / fmax(1e-20, 2.0 * phi * ks * rho);
-    const double t2 = t * t;
-    const double At2 = A * t2;
-    const double H =
-        gamma * ph3 *
-        log(1.0 + beta_gamma * t2 * (1.0 + At2) / (1.0 + At2 + At2 * At2));
-    return rho * (eps_lsda + H);
+static inline __host__ __device__ unsigned
+QC_XC_UKS_Expected_Infinite_Output_Mask(QC_METHOD method, double rho_a,
+                                        double rho_b, double sigma_aa,
+                                        double sigma_ab, double sigma_bb)
+{
+    if (method != QC_METHOD::PBE && method != QC_METHOD::PBE0) return 0u;
+    const double sigma = sigma_aa + 2.0 * sigma_ab + sigma_bb;
+    if (sigma == 0.0) return 0u;
+    if (rho_a == 0.0 && rho_b > 0.0) return QC_XC_UKS_VRHO_A_BIT;
+    if (rho_b == 0.0 && rho_a > 0.0) return QC_XC_UKS_VRHO_B_BIT;
+    return 0u;
 }
 
-static inline __host__ __device__ double QC_Ec_LYP_Spin(double rho_a,
-                                                        double rho_b,
-                                                        double sigma_aa,
-                                                        double sigma_ab,
-                                                        double sigma_bb)
+// Public energy-only interfaces.  Values and first derivatives deliberately
+// share the same implementation so that the SCF energy and potential cannot
+// drift apart algebraically.
+static inline __host__ __device__ double QC_Local_Exc_Density(
+    QC_METHOD method, double rho, double sigma)
 {
-    const double rho = rho_a + rho_b;
-    if (rho <= 1e-18) return 0.0;
-    const double rho_a_safe = fmax(rho_a, 1e-20);
-    const double rho_b_safe = fmax(rho_b, 1e-20);
-    const double z = QC_Clamp_Zeta((rho_a - rho_b) / rho);
-    const double z2 = z * z;
-    const double one_minus_z2 = 1.0 - z2;
-
-    const double sigma_t = fmax(0.0, sigma_aa + 2.0 * sigma_ab + sigma_bb);
-    const double sigma_a = fmax(0.0, sigma_aa);
-    const double sigma_b = fmax(0.0, sigma_bb);
-
-    const double rho43 = pow(rho, 4.0 / 3.0);
-    const double rho_a43 = pow(rho_a_safe, 4.0 / 3.0);
-    const double rho_b43 = pow(rho_b_safe, 4.0 / 3.0);
-    const double xt = sqrt(sigma_t) / fmax(1e-30, rho43);
-    const double xs_a = sqrt(sigma_a) / fmax(1e-30, rho_a43);
-    const double xs_b = sqrt(sigma_b) / fmax(1e-30, rho_b43);
-
-    const double A = 0.04918;
-    const double B = 0.132;
-    const double c = 0.2533;
-    const double d = 0.349;
-
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    const double cbrt2 = cbrt(2.0);
-    const double cbrt3 = cbrt(3.0);
-    const double cbrt4 = cbrt(4.0);
-    const double pref = cbrt3 * cbrt3 * cbrt4 * cbrt(CONSTANT_Pi);
-
-    const double den = 1.0 + d * rs * pref / 3.0;
-    const double den_inv = 1.0 / den;
-    const double damp = one_minus_z2 * den_inv;
-    const double exp_term = exp(-c * rs * pref / 3.0);
-    const double t32 = (d * den_inv + c) * rs * pref;
-    const double t34 = 47.0 - (7.0 / 3.0) * t32;
-    const double t37 = one_minus_z2 * t34 / 72.0 - 2.0 / 3.0;
-
-    const double a = 1.0 + z;
-    const double b = 1.0 - z;
-    const double a2 = a * a;
-    const double b2 = b * b;
-    const double a83 = pow(a, 8.0 / 3.0);
-    const double b83 = pow(b, 8.0 / 3.0);
-    const double ssum = a83 + b83;
-
-    const double xs_a2 = xs_a * xs_a;
-    const double xs_b2 = xs_b * xs_b;
-    const double t60 = 2.5 - t32 / 54.0;
-    const double t62 = xs_a2 * a83;
-    const double t64 = xs_b2 * b83;
-    const double t66 = t60 * (t62 + t64);
-    const double t70 = t32 / 3.0 - 11.0;
-    const double t77 = xs_a2 * a83 * a + xs_b2 * b83 * b;
-    const double t78 = t70 * t77;
-    const double t83 = a2 * xs_b2;
-    const double t86 = b2 * xs_a2;
-    const double xt2 = xt * xt;
-    const double gfac = pow(3.0 * CONSTANT_Pi * CONSTANT_Pi, 2.0 / 3.0);
-    const double t92 = -xt2 * t37 - (3.0 / 20.0) * gfac * one_minus_z2 * ssum +
-                       cbrt2 * one_minus_z2 * t66 / 32.0 +
-                       cbrt2 * one_minus_z2 * t78 / 576.0 -
-                       cbrt2 *
-                           ((2.0 / 3.0) * t62 + (2.0 / 3.0) * t64 -
-                            0.25 * t83 * b83 - 0.25 * t86 * a83) /
-                           8.0;
-    const double eps = A * (B * exp_term * den_inv * t92 - damp);
-    return rho * eps;
+    double energy, vrho, vsigma;
+    QC_VXC_Analytical_RKS(method, rho, sigma, energy, vrho, vsigma);
+    return energy;
 }
 
 static inline __host__ __device__ double QC_Local_Exc_Density_UKS(
     QC_METHOD method, double rho_a, double rho_b, double sigma_aa,
     double sigma_ab, double sigma_bb)
 {
-    const double ex_slater_spin =
-        0.5 * QC_Exc_Slater(2.0 * rho_a) + 0.5 * QC_Exc_Slater(2.0 * rho_b);
-    switch (method)
-    {
-        case QC_METHOD::LDA:
-            return ex_slater_spin + QC_Ec_VWN5_Spin(rho_a, rho_b);
-        case QC_METHOD::PBE:
-            return QC_Exc_PBE_Spin(rho_a, rho_b, sigma_aa, sigma_bb) +
-                   QC_Ec_PBE_Spin(rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb);
-        case QC_METHOD::BLYP:
-            return QC_Exc_B88_Spin(rho_a, rho_b, sigma_aa, sigma_bb) +
-                   QC_Ec_LYP_Spin(rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb);
-        case QC_METHOD::PBE0:
-            return 0.75 * QC_Exc_PBE_Spin(rho_a, rho_b, sigma_aa, sigma_bb) +
-                   QC_Ec_PBE_Spin(rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb);
-        case QC_METHOD::B3LYP:
-            return 0.08 * ex_slater_spin +
-                   0.72 * QC_Exc_B88_Spin(rho_a, rho_b, sigma_aa, sigma_bb) +
-                   0.81 * QC_Ec_LYP_Spin(rho_a, rho_b, sigma_aa, sigma_ab,
-                                         sigma_bb) +
-                   0.19 * QC_Ec_VWN5_Spin(rho_a, rho_b);
-        default:
-            return 0.0;
-    }
-}
-
-static inline __host__ __device__ void QC_Local_UKS_Derivs_FD(
-    QC_METHOD method, double rho_a, double rho_b, double sigma_aa,
-    double sigma_ab, double sigma_bb, double& e, double& v_rho_a,
-    double& v_rho_b, double& v_sigma_aa, double& v_sigma_ab, double& v_sigma_bb)
-{
-    rho_a = fmax(rho_a, 1e-14);
-    rho_b = fmax(rho_b, 1e-14);
-    sigma_aa = fmax(sigma_aa, 0.0);
-    sigma_bb = fmax(sigma_bb, 0.0);
-    e = QC_Local_Exc_Density_UKS(method, rho_a, rho_b, sigma_aa, sigma_ab,
-                                 sigma_bb);
-
-    const double dra = fmax(1e-12, 1e-4 * rho_a);
-    const double drb = fmax(1e-12, 1e-4 * rho_b);
-    const double dsaa = fmax(1e-14, 1e-4 * (sigma_aa + 1e-12));
-    const double dsab = fmax(1e-14, 1e-4 * (fabs(sigma_ab) + 1e-12));
-    const double dsbb = fmax(1e-14, 1e-4 * (sigma_bb + 1e-12));
-
-    const double rap = rho_a + dra;
-    const double ram = fmax(1e-14, rho_a - dra);
-    const double rbp = rho_b + drb;
-    const double rbm = fmax(1e-14, rho_b - drb);
-    const double saap = sigma_aa + dsaa;
-    const double saam = fmax(0.0, sigma_aa - dsaa);
-    const double sabp = sigma_ab + dsab;
-    const double sabm = sigma_ab - dsab;
-    const double sbbp = sigma_bb + dsbb;
-    const double sbbm = fmax(0.0, sigma_bb - dsbb);
-
-    const double e_rap = QC_Local_Exc_Density_UKS(method, rap, rho_b, sigma_aa,
-                                                  sigma_ab, sigma_bb);
-    const double e_ram = QC_Local_Exc_Density_UKS(method, ram, rho_b, sigma_aa,
-                                                  sigma_ab, sigma_bb);
-    const double e_rbp = QC_Local_Exc_Density_UKS(method, rho_a, rbp, sigma_aa,
-                                                  sigma_ab, sigma_bb);
-    const double e_rbm = QC_Local_Exc_Density_UKS(method, rho_a, rbm, sigma_aa,
-                                                  sigma_ab, sigma_bb);
-    const double e_saap = QC_Local_Exc_Density_UKS(method, rho_a, rho_b, saap,
-                                                   sigma_ab, sigma_bb);
-    const double e_saam = QC_Local_Exc_Density_UKS(method, rho_a, rho_b, saam,
-                                                   sigma_ab, sigma_bb);
-    const double e_sabp = QC_Local_Exc_Density_UKS(method, rho_a, rho_b,
-                                                   sigma_aa, sabp, sigma_bb);
-    const double e_sabm = QC_Local_Exc_Density_UKS(method, rho_a, rho_b,
-                                                   sigma_aa, sabm, sigma_bb);
-    const double e_sbbp = QC_Local_Exc_Density_UKS(method, rho_a, rho_b,
-                                                   sigma_aa, sigma_ab, sbbp);
-    const double e_sbbm = QC_Local_Exc_Density_UKS(method, rho_a, rho_b,
-                                                   sigma_aa, sigma_ab, sbbm);
-
-    v_rho_a = (e_rap - e_ram) / (rap - ram);
-    v_rho_b = (e_rbp - e_rbm) / (rbp - rbm);
-    v_sigma_aa = (e_saap - e_saam) / fmax(1e-16, saap - saam);
-    v_sigma_ab = (e_sabp - e_sabm) / fmax(1e-16, sabp - sabm);
-    v_sigma_bb = (e_sbbp - e_sbbm) / fmax(1e-16, sbbp - sbbm);
+    double energy, vrho_a, vrho_b, vsigma_aa, vsigma_ab, vsigma_bb;
+    QC_VXC_Analytical_UKS(method, rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb,
+                          energy, vrho_a, vrho_b, vsigma_aa, vsigma_ab,
+                          vsigma_bb);
+    return energy;
 }
 
 #include "xc_deriv.hpp"

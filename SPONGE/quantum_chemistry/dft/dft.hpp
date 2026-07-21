@@ -12,14 +12,36 @@ static inline __host__ __device__ void QC_VXC_Analytical_UKS(
     double& exc, double& vra, double& vrb, double& vsaa, double& vsab,
     double& vsbb);
 
-static inline __host__ __device__ void QC_Local_Vrho_Vsigma_FD(
-    QC_METHOD method, double rho, double sigma, double& e, double& vrho,
-    double& vsigma);
-static inline __host__ __device__ void QC_Local_UKS_Derivs_FD(
-    QC_METHOD method, double rho_a, double rho_b, double sigma_aa,
-    double sigma_ab, double sigma_bb, double& e, double& v_rho_a,
-    double& v_rho_b, double& v_sigma_aa, double& v_sigma_ab,
-    double& v_sigma_bb);
+static inline __host__ __device__ bool QC_XC_Double_Is_Finite(double value);
+static inline __host__ __device__ bool QC_XC_Inputs_Valid_RKS(double rho,
+                                                              double sigma);
+static inline __host__ __device__ bool QC_XC_Inputs_Valid_UKS(
+    double rho_a, double rho_b, double sigma_aa, double sigma_ab,
+    double sigma_bb);
+static inline __host__ __device__ bool QC_XC_Build_Gradient_Gram(
+    double gax, double gay, double gaz, double gbx, double gby, double gbz,
+    double& sigma_aa, double& sigma_ab, double& sigma_bb);
+
+enum QC_XC_FAILURE_CODE
+{
+    QC_XC_SUCCESS = 0,
+    QC_XC_INVALID_RKS_INPUT = 1,
+    QC_XC_NONFINITE_RKS_OUTPUT = 2,
+    QC_XC_INVALID_UKS_INPUT = 3,
+    QC_XC_NONFINITE_UKS_OUTPUT = 4,
+    QC_XC_DIVERGENT_UKS_ENDPOINT = 5,
+    QC_XC_INVALID_GRID_RESPONSE = 6,
+};
+
+static __device__ __forceinline__ void QC_Record_XC_Failure(
+    int* failure, int code, int global_grid_index)
+{
+    if (failure != NULL)
+    {
+        atomicExch(&failure[1], global_grid_index);
+        atomicExch(&failure[0], code);
+    }
+}
 
 // Device DFT Kernels
 // deriv_level: 0 = LDA (仅值), 1 = GGA (值+梯度), 2 = meta-GGA (预留)
@@ -163,26 +185,44 @@ static __global__ void QC_Eval_Rho_Sigma_Kernel(
 
 // Kernel 3: Evaluate local XC energy density and derivatives.
 static __global__ void QC_Eval_XC_Derivs_Kernel(
-    const int n_grid, const int method_id, const double* rho,
-    const double* sigma, double* exc, double* vrho, double* vsigma)
+    const int n_grid, const int grid_offset, const int method_id,
+    const double* rho, const double* sigma, double* exc, double* vrho,
+    double* vsigma, int* failure)
 {
     SIMPLE_DEVICE_FOR(ig, n_grid)
     {
         const double rho_val = rho[ig];
-        if (rho_val < 1e-10)
+        const double sigma_val =
+            method_id == (int)QC_METHOD::LDA ? 0.0 : sigma[ig];
+        if (!QC_XC_Inputs_Valid_RKS(rho_val, sigma_val))
         {
             exc[ig] = 0.0;
             vrho[ig] = 0.0;
             vsigma[ig] = 0.0;
+            QC_Record_XC_Failure(failure, QC_XC_INVALID_RKS_INPUT,
+                                 grid_offset + ig);
         }
         else
         {
             double e = 0.0, v_rho = 0.0, v_sigma = 0.0;
-            QC_VXC_Analytical_RKS((QC_METHOD)method_id, rho_val, sigma[ig], e,
+            QC_VXC_Analytical_RKS((QC_METHOD)method_id, rho_val, sigma_val, e,
                                   v_rho, v_sigma);
-            exc[ig] = e;
-            vrho[ig] = v_rho;
-            vsigma[ig] = v_sigma;
+            if (!QC_XC_Double_Is_Finite(e) ||
+                !QC_XC_Double_Is_Finite(v_rho) ||
+                !QC_XC_Double_Is_Finite(v_sigma))
+            {
+                exc[ig] = 0.0;
+                vrho[ig] = 0.0;
+                vsigma[ig] = 0.0;
+                QC_Record_XC_Failure(failure, QC_XC_NONFINITE_RKS_OUTPUT,
+                                     grid_offset + ig);
+            }
+            else
+            {
+                exc[ig] = e;
+                vrho[ig] = v_rho;
+                vsigma[ig] = v_sigma;
+            }
         }
     }
 }
@@ -202,7 +242,8 @@ static __global__ void QC_Build_Vxc_Kernel(
 {
     SIMPLE_DEVICE_FOR(ig, n_grid)
     {
-        if (rho[ig] >= 1e-10)  // Skip near-zero density
+        // This legacy assembly path is kept cutoff-free: the analytical
+        // zero-density limit already supplies zero contributions.
         {
             const float w = grid_weights[ig];
             const double v_rho = vrho[ig];
@@ -315,21 +356,19 @@ static __global__ void QC_Build_Vxc_UKS_Kernel(
         grb_y *= 2.0;
         grb_z *= 2.0;
 
-        if (rho_a + rho_b >= 1e-10)
+        // Evaluate every representable density; exact vacuum is handled by
+        // the analytical zero-density branch.
         {
-            const double sigma_aa =
-                gra_x * gra_x + gra_y * gra_y + gra_z * gra_z;
-            const double sigma_ab =
-                gra_x * grb_x + gra_y * grb_y + gra_z * grb_z;
-            const double sigma_bb =
-                grb_x * grb_x + grb_y * grb_y + grb_z * grb_z;
+            double sigma_aa = 0.0, sigma_ab = 0.0, sigma_bb = 0.0;
+            QC_XC_Build_Gradient_Gram(gra_x, gra_y, gra_z, grb_x, grb_y,
+                                      grb_z, sigma_aa, sigma_ab, sigma_bb);
 
             double e_loc = 0.0;
             double v_rho_a = 0.0, v_rho_b = 0.0;
             double v_sigma_aa = 0.0, v_sigma_ab = 0.0, v_sigma_bb = 0.0;
-            QC_Local_UKS_Derivs_FD((QC_METHOD)method_id, rho_a, rho_b, sigma_aa,
-                                   sigma_ab, sigma_bb, e_loc, v_rho_a, v_rho_b,
-                                   v_sigma_aa, v_sigma_ab, v_sigma_bb);
+            QC_VXC_Analytical_UKS((QC_METHOD)method_id, rho_a, rho_b, sigma_aa,
+                                  sigma_ab, sigma_bb, e_loc, v_rho_a, v_rho_b,
+                                  v_sigma_aa, v_sigma_ab, v_sigma_bb);
             atomicAdd(exc_total, (double)grid_weights[ig] * e_loc);
 
             const double gax = 2.0 * v_sigma_aa * gra_x + v_sigma_ab * grb_x;

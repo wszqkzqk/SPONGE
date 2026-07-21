@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <cstdint>
+
 #include "third_party/toml/toml_decode.hpp"
 static __global__ void MD_Atom_Ek(const int atom_numbers, float* ek,
                                   const VECTOR* atom_vel,
@@ -212,14 +214,15 @@ std::optional<std::string> Resolve_Schedule_File_Path(CONTROLLER* controller,
 {
     if (controller->Command_Exist(file_key))
     {
-        return std::string(controller->Command(file_key));
+        return std::string(controller->Original_Command(file_key));
     }
     if (!controller->Command_Exist("default_in_file_prefix"))
     {
         return std::nullopt;
     }
 
-    const std::string prefix = controller->Command("default_in_file_prefix");
+    const std::string prefix =
+        controller->Original_Command("default_in_file_prefix");
     const std::vector<std::string> candidates = {
         prefix + "." + (is_pressure ? "pres.spg.toml" : "temp.spg.toml"),
         prefix + "_" + (is_pressure ? "pres.spg.toml" : "temp.spg.toml")};
@@ -251,31 +254,105 @@ bool Load_Schedule_Values_From_TomlPoints(
     return !out->steps.empty();
 }
 
-float Evaluate_Target_Schedule(
-    const MD_INFORMATION::system_information::TARGET_SCHEDULE& schedule,
-    int current_step, float fallback_value)
+bool Target_Value_Is_Valid(float value, bool require_positive)
 {
-    if (!schedule.enabled || schedule.steps.empty()) return fallback_value;
-    if (current_step <= schedule.steps.front()) return schedule.values.front();
-    if (current_step >= schedule.steps.back()) return schedule.values.back();
+    return Float_Memory_Is_Finite(&value) &&
+           Float_Memory_Is_Zero_Or_Normal(&value) &&
+           (!require_positive || value > 0.0f);
+}
 
-    const int upper_idx =
-        (int)(std::upper_bound(schedule.steps.begin(), schedule.steps.end(),
-                               current_step) -
-              schedule.steps.begin());
-    const int left_idx = upper_idx - 1;
-    if (schedule.mode ==
-        MD_INFORMATION::system_information::TARGET_SCHEDULE::STEP)
+float Evaluate_Target_Schedule(
+    CONTROLLER* controller, const char* schedule_name,
+    const MD_INFORMATION::system_information::TARGET_SCHEDULE& schedule,
+    int current_step, float fallback_value, bool require_positive)
+{
+    if (!schedule.enabled) return fallback_value;
+    if (schedule.steps.empty() ||
+        schedule.values.size() != schedule.steps.size())
     {
-        return schedule.values[left_idx];
+        Throw_Schedule_Error(
+            controller, schedule_name,
+            "enabled schedule has empty or mismatched step/value storage");
+        return fallback_value;
     }
-    const int left_step = schedule.steps[left_idx];
-    const int right_step = schedule.steps[upper_idx];
-    const float left_value = schedule.values[left_idx];
-    const float right_value = schedule.values[upper_idx];
-    const float ratio =
-        (float)(current_step - left_step) / (float)(right_step - left_step);
-    return left_value + (right_value - left_value) * ratio;
+    if (schedule.mode !=
+            MD_INFORMATION::system_information::TARGET_SCHEDULE::STEP &&
+        schedule.mode !=
+            MD_INFORMATION::system_information::TARGET_SCHEDULE::LINEAR)
+    {
+        Throw_Schedule_Error(controller, schedule_name,
+                             "enabled schedule has an invalid mode");
+        return fallback_value;
+    }
+
+    float evaluated = fallback_value;
+    if (current_step <= schedule.steps.front())
+    {
+        evaluated = schedule.values.front();
+    }
+    else if (current_step >= schedule.steps.back())
+    {
+        evaluated = schedule.values.back();
+    }
+    else
+    {
+        const int upper_idx =
+            (int)(std::upper_bound(schedule.steps.begin(), schedule.steps.end(),
+                                   current_step) -
+                  schedule.steps.begin());
+        const int left_idx = upper_idx - 1;
+        if (schedule.mode ==
+            MD_INFORMATION::system_information::TARGET_SCHEDULE::STEP)
+        {
+            evaluated = schedule.values[left_idx];
+        }
+        else
+        {
+            const std::int64_t left_step = schedule.steps[left_idx];
+            const std::int64_t right_step = schedule.steps[upper_idx];
+            const std::int64_t step_span = right_step - left_step;
+            const std::int64_t elapsed =
+                static_cast<std::int64_t>(current_step) - left_step;
+            if (step_span <= 0 || elapsed < 0 || elapsed > step_span)
+            {
+                Throw_Schedule_Error(
+                    controller, schedule_name,
+                    "schedule interpolation encountered an invalid step "
+                    "interval");
+                return fallback_value;
+            }
+
+            const double ratio =
+                static_cast<double>(elapsed) / static_cast<double>(step_span);
+            const double left_value = schedule.values[left_idx];
+            const double right_value = schedule.values[upper_idx];
+            const double interpolated =
+                left_value + (right_value - left_value) * ratio;
+            if (!Double_Memory_Is_Finite(&interpolated) ||
+                interpolated > std::numeric_limits<float>::max() ||
+                interpolated < -std::numeric_limits<float>::max())
+            {
+                Throw_Schedule_Error(
+                    controller, schedule_name,
+                    "linear interpolation is outside the finite float "
+                    "range");
+                return fallback_value;
+            }
+            evaluated = static_cast<float>(interpolated);
+        }
+    }
+
+    if (!Target_Value_Is_Valid(evaluated, require_positive))
+    {
+        Throw_Schedule_Error(
+            controller, schedule_name,
+            require_positive
+                ? "evaluated temperature must be finite, positive, and "
+                  "normal"
+                : "evaluated pressure must be finite and zero or normal");
+        return fallback_value;
+    }
+    return evaluated;
 }
 
 void Load_Target_Schedule(
@@ -411,10 +488,11 @@ void Load_Target_Schedule(
     {
         for (float value : out->values)
         {
-            if (!(value > 0.0f))
+            if (!Target_Value_Is_Valid(value, true))
             {
                 Throw_Schedule_Error(controller, schedule_name,
-                                     "temperature values must be > 0");
+                                     "temperature values must be finite, "
+                                     "positive, and normal");
             }
         }
     }
@@ -422,7 +500,33 @@ void Load_Target_Schedule(
     {
         for (float& value : out->values)
         {
-            value *= CONSTANT_PRES_CONVERTION_INVERSE;
+            if (!Target_Value_Is_Valid(value, false))
+            {
+                Throw_Schedule_Error(controller, schedule_name,
+                                     "pressure values must be finite and "
+                                     "zero or normal");
+            }
+            const double converted =
+                static_cast<double>(value) *
+                static_cast<double>(CONSTANT_PRES_CONVERTION_INVERSE);
+            if (!Double_Memory_Is_Finite(&converted) ||
+                converted > std::numeric_limits<float>::max() ||
+                converted < -std::numeric_limits<float>::max())
+            {
+                Throw_Schedule_Error(
+                    controller, schedule_name,
+                    "pressure conversion is outside the finite float range");
+            }
+            const float stored = static_cast<float>(converted);
+            if (!Target_Value_Is_Valid(stored, false) ||
+                (value != 0.0f && stored == 0.0f))
+            {
+                Throw_Schedule_Error(
+                    controller, schedule_name,
+                    "pressure conversion produces a subnormal or "
+                    "underflowed float");
+            }
+            value = stored;
         }
     }
     out->enabled = true;
@@ -431,13 +535,15 @@ void Load_Target_Schedule(
 
 double MD_INFORMATION::system_information::Get_Current_Time(bool plus_one_step)
 {
-    current_time = start_time + (double)dt_in_ps * (steps + plus_one_step);
+    const double output_step =
+        static_cast<double>(steps) + (plus_one_step ? 1.0 : 0.0);
+    current_time = start_time + dt_in_ps * output_step;
     return current_time;
 }
 
 float MD_INFORMATION::system_information::Get_Volume()
 {
-    LTMatrix3 cell = md_info->pbc.cell;
+    const LTMatrix3 cell = md_info->pbc.reference_cell;
     volume = cell.a11 * cell.a22 * cell.a33;
     return volume;
 }
@@ -476,24 +582,46 @@ float MD_INFORMATION::system_information::Get_Atom_Temperature()
 }
 
 void MD_INFORMATION::system_information::Update_Targets_By_Schedule(
-    int current_step)
+    CONTROLLER* controller, int current_step)
 {
     if (target_temperature_schedule.enabled)
     {
-        target_temperature = Evaluate_Target_Schedule(
-            target_temperature_schedule, current_step, target_temperature);
+        target_temperature =
+            Evaluate_Target_Schedule(controller, "target_temperature_schedule",
+                                     target_temperature_schedule, current_step,
+                                     target_temperature, true);
     }
     if (target_pressure_schedule.enabled)
     {
         target_pressure = Evaluate_Target_Schedule(
-            target_pressure_schedule, current_step, target_pressure);
+            controller, "target_pressure_schedule", target_pressure_schedule,
+            current_step, target_pressure, false);
     }
 }
 
 void MD_INFORMATION::system_information::Get_Potential_to_stress(
     CONTROLLER* controller, int atom_numbers, LTMatrix3* d_atom_virial_tensor)
 {
-    float volume_inverse = 1.0f / Get_Volume();
+    const float volume = Get_Volume();
+    if (!Float_Memory_Is_Finite(&volume) || !(volume > 0.0f))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "MD_INFORMATION::system_information::Get_Potential_to_stress",
+            "Reason:\n\tthe periodic-cell volume is non-finite or "
+            "non-positive while calculating stress\n");
+        return;
+    }
+    const float volume_inverse = 1.0f / volume;
+    if (!Float_Memory_Is_Finite(&volume_inverse))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "MD_INFORMATION::system_information::Get_Potential_to_stress",
+            "Reason:\n\tthe reciprocal periodic-cell volume is outside the "
+            "finite float range while calculating stress\n");
+        return;
+    }
     dim3 blockSize = {CONTROLLER::device_warp,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
 
@@ -512,7 +640,26 @@ void MD_INFORMATION::system_information::Get_Potential_to_stress(
 void MD_INFORMATION::system_information::Get_Kinetic_to_stress(
     CONTROLLER* controller, int atom_numbers, VECTOR* vel, float* atom_mass)
 {
-    float volume_inverse = 1.0f / Get_Volume();
+    const float volume = Get_Volume();
+    if (!Float_Memory_Is_Finite(&volume) || !(volume > 0.0f))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "MD_INFORMATION::system_information::Get_Kinetic_to_stress",
+            "Reason:\n\tthe periodic-cell volume is non-finite or "
+            "non-positive while calculating stress\n");
+        return;
+    }
+    const float volume_inverse = 1.0f / volume;
+    if (!Float_Memory_Is_Finite(&volume_inverse))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "MD_INFORMATION::system_information::Get_Kinetic_to_stress",
+            "Reason:\n\tthe reciprocal periodic-cell volume is outside the "
+            "finite float range while calculating stress\n");
+        return;
+    }
     dim3 blockSize = {CONTROLLER::device_warp,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     // 计算动能贡献
@@ -550,6 +697,27 @@ void MD_INFORMATION::system_information::Initial(CONTROLLER* controller,
 {
     this->md_info = md_info;
     steps = 0;
+    // A reference temperature is also required by temperature-dependent
+    // Hamiltonians such as SITS in NVE, minimization, and rerun modes.  Keep a
+    // real default for every mode and honor an explicit value even when no
+    // thermostat is active.
+    target_temperature = 300.0f;
+    if (controller[0].Command_Exist("target_temperature"))
+    {
+        controller->Check_Float("target_temperature",
+                                "MD_INFORMATION::system_information::Initial");
+        target_temperature = atof(controller[0].Command("target_temperature"));
+    }
+    if (!Float_Memory_Is_Finite(&target_temperature) ||
+        !Float_Memory_Is_Zero_Or_Normal(&target_temperature) ||
+        !(target_temperature > 0.0f))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::system_information::Initial",
+            "Reason:\n\ttarget_temperature must be finite, positive, and "
+            "normal\n");
+    }
     if (md_info->mode != md_info->RERUN)
     {
         step_limit = 1000;
@@ -560,18 +728,7 @@ void MD_INFORMATION::system_information::Initial(CONTROLLER* controller,
             step_limit = atoi(controller[0].Command("step_limit"));
         }
 
-        target_temperature = 300.0f;
-        if (md_info->mode >= md_info->NVT &&
-            controller[0].Command_Exist("target_temperature"))
-        {
-            controller->Check_Float(
-                "target_temperature",
-                "MD_INFORMATION::system_information::Initial");
-            target_temperature =
-                atof(controller[0].Command("target_temperature"));
-        }
-
-        target_pressure = 1;
+        target_pressure = 1.0f;
         if (md_info->mode == md_info->NPT &&
             controller[0].Command_Exist("target_pressure"))
         {
@@ -580,7 +737,38 @@ void MD_INFORMATION::system_information::Initial(CONTROLLER* controller,
                 "MD_INFORMATION::system_information::Initial");
             target_pressure = atof(controller[0].Command("target_pressure"));
         }
-        target_pressure *= CONSTANT_PRES_CONVERTION_INVERSE;
+        if (!Target_Value_Is_Valid(target_pressure, false))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::system_information::Initial",
+                "Reason:\n\ttarget_pressure must be finite and zero or "
+                "normal\n");
+        }
+        const double converted_pressure =
+            static_cast<double>(target_pressure) *
+            static_cast<double>(CONSTANT_PRES_CONVERTION_INVERSE);
+        if (!Double_Memory_Is_Finite(&converted_pressure) ||
+            converted_pressure > std::numeric_limits<float>::max() ||
+            converted_pressure < -std::numeric_limits<float>::max())
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::system_information::Initial",
+                "Reason:\n\ttarget_pressure conversion is outside the "
+                "finite float range\n");
+        }
+        const float stored_pressure = static_cast<float>(converted_pressure);
+        if (!Target_Value_Is_Valid(stored_pressure, false) ||
+            (target_pressure != 0.0f && stored_pressure == 0.0f))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::system_information::Initial",
+                "Reason:\n\ttarget_pressure conversion produces a "
+                "subnormal or underflowed float\n");
+        }
+        target_pressure = stored_pressure;
         Load_Target_Schedule(controller, "target_temperature_schedule",
                              "target_temperature_schedule_mode",
                              "target_temperature_schedule_steps",
@@ -607,6 +795,15 @@ void MD_INFORMATION::system_information::Initial(CONTROLLER* controller,
                 "MD_INFORMATION::system_information::Initial");
             step_limit = atoi(controller[0].Command("rerun_frame_limit"));
         }
+    }
+    if (step_limit < 0)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::system_information::Initial",
+            "Reason:\n\tstep/frame limit must be nonnegative (received "
+            "%d)\n",
+            step_limit);
     }
     for (int i = 0; i < md_info->atom_numbers; i++)
     {

@@ -84,7 +84,8 @@ void CV_POSITION::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
 }
 
 void CV_POSITION::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                          const LTMatrix3 rcell, int need, int step)
+                          const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                          int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
@@ -165,29 +166,32 @@ void CV_BOX_LENGTH::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
 }
 
 void CV_BOX_LENGTH::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                            const LTMatrix3 rcell, int need, int step)
+                            const LTMatrix3 rcell,
+                            const LTMatrix3 reference_cell, int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
         if (strcmp(type_name, "box_length_x") == 0)
         {
-            Launch_Device_Kernel(box_length_x_get_all, 1, 1, 0, NULL, cell,
-                                 d_value, virial);
-            value = cell.a11;
+            Launch_Device_Kernel(box_length_x_get_all, 1, 1, 0, NULL,
+                                 reference_cell, d_value, virial);
+            value = reference_cell.a11;
         }
         else if (strcmp(type_name, "box_length_y") == 0)
         {
-            Launch_Device_Kernel(box_length_y_get_all, 1, 1, 0, NULL, cell,
-                                 d_value, virial);
-            value = sqrtf(cell.a21 * cell.a21 + cell.a22 * cell.a22);
+            Launch_Device_Kernel(box_length_y_get_all, 1, 1, 0, NULL,
+                                 reference_cell, d_value, virial);
+            value = sqrtf(reference_cell.a21 * reference_cell.a21 +
+                          reference_cell.a22 * reference_cell.a22);
         }
         else if (strcmp(type_name, "box_length_z") == 0)
         {
-            Launch_Device_Kernel(box_length_z_get_all, 1, 1, 0, NULL, cell,
-                                 d_value, virial);
-            value = sqrtf(cell.a31 * cell.a31 + cell.a32 * cell.a32 +
-                          cell.a33 * cell.a33);
+            Launch_Device_Kernel(box_length_z_get_all, 1, 1, 0, NULL,
+                                 reference_cell, d_value, virial);
+            value = sqrtf(reference_cell.a31 * reference_cell.a31 +
+                          reference_cell.a32 * reference_cell.a32 +
+                          reference_cell.a33 * reference_cell.a33);
         }
     }
     Record_Update_Step_Of_Fast_Computing_CV(step, need);
@@ -257,7 +261,8 @@ void CV_DISTANCE::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
 }
 
 void CV_DISTANCE::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                          const LTMatrix3 rcell, int need, int step)
+                          const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                          int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
@@ -321,7 +326,8 @@ void CV_ANGLE::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
 }
 
 void CV_ANGLE::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                       const LTMatrix3 rcell, int need, int step)
+                       const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                       int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
@@ -385,7 +391,8 @@ void CV_DIHEDRAL::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
 }
 
 void CV_DIHEDRAL::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                          const LTMatrix3 rcell, int need, int step)
+                          const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                          int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)

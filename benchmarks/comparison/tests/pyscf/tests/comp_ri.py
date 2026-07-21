@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import pytest
 
 from benchmarks.comparison.tests.pyscf.tests.utils import (
@@ -135,7 +138,23 @@ def test_ri_rks(
 RI_UHF_CASES = [
     ("no_doublet", "def2-svp"),
     ("o_triplet", "def2-svp"),
+    ("fe_quintet", "6-31++g"),
 ]
+
+
+def _assert_fe_uses_l6_universal_jkfit():
+    repository_root = Path(__file__).resolve().parents[5]
+    source = (
+        repository_root
+        / "SPONGE/quantum_chemistry/basis/jkfit/def2_universal_jkfit.h"
+    ).read_text()
+    fe_block = source.split('data["Fe"] = {', 1)[1].split("        };", 1)[0]
+    angular_momenta = [
+        int(match)
+        for match in re.findall(r"^\s*\{(\d+),", fe_block, re.MULTILINE)
+    ]
+    assert angular_momenta
+    assert max(angular_momenta) == 6
 
 
 @pytest.mark.parametrize(
@@ -144,6 +163,8 @@ RI_UHF_CASES = [
     ids=[f"{case}_{basis}" for case, basis in RI_UHF_CASES],
 )
 def test_ri_uhf(case_name, basis_name, statics_path, outputs_path, mpi_np):
+    if case_name == "fe_quintet":
+        _assert_fe_uses_l6_universal_jkfit()
     result = run_sponge_vs_pyscf(
         statics_path=statics_path,
         outputs_path=outputs_path,

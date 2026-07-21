@@ -1,4 +1,6 @@
 ﻿#pragma once
+#include <type_traits>
+
 #include "../collective_variable/collective_variable.h"
 #include "../common.h"
 #include "../control.h"
@@ -84,6 +86,7 @@ struct VIRTUAL_TYPE_2_INFROMATION
 struct VIRTUAL_TYPE_3
 {
     int virtual_atom;
+    int global_virtual_atom;
     int from_1;
     int from_2;
     int from_3;
@@ -118,6 +121,37 @@ struct VIRTUAL_TYPE_4_INFROMATION
     VIRTUAL_TYPE_4* h_virtual_type_4 = NULL;
 };
 
+// virtual atom type 5 (Amber/Sander flexible TIP4P frame)
+// r_v = r_O + d * normalize(normalize(r_H1 - r_O) +
+//                            normalize(r_H2 - r_O))
+struct VIRTUAL_TYPE_5
+{
+    int virtual_atom;
+    int global_virtual_atom;
+    int from_1;
+    int from_2;
+    int from_3;
+    float d;
+};
+
+struct VIRTUAL_TYPE_5_INFROMATION
+{
+    int virtual_numbers = 0;
+    int local_numbers = 0;
+    int* d_local_numbers = NULL;
+    VIRTUAL_TYPE_5* h_virtual_type_5 = NULL;
+    VIRTUAL_TYPE_5* d_virtual_type_5 = NULL;
+    VIRTUAL_TYPE_5* l_virtual_type_5 = NULL;
+};
+
+static_assert(std::is_trivially_copyable<VIRTUAL_TYPE_0>::value &&
+                  std::is_trivially_copyable<VIRTUAL_TYPE_1>::value &&
+                  std::is_trivially_copyable<VIRTUAL_TYPE_2>::value &&
+                  std::is_trivially_copyable<VIRTUAL_TYPE_3>::value &&
+                  std::is_trivially_copyable<VIRTUAL_TYPE_4>::value &&
+                  std::is_trivially_copyable<VIRTUAL_TYPE_5>::value,
+              "virtual-atom records must remain host/device memcpy-safe");
+
 struct VIRTUAL_LAYER_INFORMATION
 {
     VIRTUAL_TYPE_0_INFROMATION v0_info;
@@ -125,6 +159,7 @@ struct VIRTUAL_LAYER_INFORMATION
     VIRTUAL_TYPE_2_INFROMATION v2_info;
     VIRTUAL_TYPE_3_INFROMATION v3_info;
     VIRTUAL_TYPE_4_INFROMATION v4_info;
+    VIRTUAL_TYPE_5_INFROMATION v5_info;
 };
 
 struct VIRTUAL_INFORMATION
@@ -135,6 +170,12 @@ struct VIRTUAL_INFORMATION
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
     bool need_atomic = false;
+    bool has_local_layout = false;
+    CONTROLLER* controller = NULL;
+    int global_atom_numbers = 0;
+    int* d_type3_singularity = NULL;
+    int* d_type5_singularity = NULL;
+    int* d_invalid_local_layout = NULL;
 
     // 内容信息
     int max_level = 0;  // 最大的虚拟层级

@@ -13,6 +13,7 @@
 // equation 9-11
 struct GENERALIZED_BORN_INFORMATION
 {
+    CONTROLLER* controller = NULL;
     char module_name[CHAR_LENGTH_MAX];
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
@@ -32,21 +33,28 @@ struct GENERALIZED_BORN_INFORMATION
 
     float* d_GB_effective_radius = NULL;  // 有效半径
     float* d_dE_da = NULL;                // 能量对effective_radius的导数
+    int* d_pair_overlap_error = NULL;
+    int* d_effective_radius_error = NULL;
 
     float relative_dielectric_constant = 78.5;
     float radii_offset = 0.09;
-    float cutoff = 10.0;
     float radii_cutoff = 25.0;
+    float radii_cutoff_square = 625.0;
 
     // 初始化
-    void Initial(CONTROLLER* controller, float cutoff,
+    void Initial(CONTROLLER* controller, int expected_atom_numbers,
+                 float default_radii_cutoff,
                  const char* module_name = NULL);
     // 清除内存
     void Clear();
     // 分配内存
     void Malloc();
+    void Reset_Pair_Overlap_Error();
+    bool Check_Pair_Overlap_Error(const char* error_by);
+    void Reset_Effective_Radius_Error();
+    bool Check_Effective_Radius_Error(const char* error_by);
 
-    void Get_Effective_Born_Radius(const VECTOR* crd);
+    bool Get_Effective_Born_Radius(int atom_numbers, const VECTOR* crd);
 
     // 可以根据外界传入的need_atom_energ选择性计算能量
     void GB_Force_With_Atom_Energy(const int atom_numbers, const VECTOR* crd,

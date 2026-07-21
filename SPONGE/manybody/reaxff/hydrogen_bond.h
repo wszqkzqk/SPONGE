@@ -5,6 +5,7 @@
 #include "../../common.h"
 #include "../../control.h"
 #include "bond_order.h"
+#include "reaxff_geometry.h"
 
 struct REAXFF_HB_Entry
 {
@@ -23,6 +24,7 @@ struct REAXFF_HB_Info
 struct REAXFF_HYDROGEN_BOND
 {
     int is_initialized = 0;
+    CONTROLLER* controller = NULL;
     int atom_numbers = 0;
     int atom_type_numbers = 0;
 
@@ -33,8 +35,12 @@ struct REAXFF_HYDROGEN_BOND
 
     // Per-atom-type parameters
     int* h_atom_type = NULL;
+    // Immutable input-order tables. The unqualified device pointers are the
+    // current DD-local views consumed by force kernels.
+    int* d_atom_type_global = NULL;
     int* d_atom_type = NULL;
     int* h_is_hydrogen = NULL;
+    int* d_is_hydrogen_global = NULL;
     int* d_is_hydrogen = NULL;
 
     // HB parameters [acc][don][hyd]
@@ -50,6 +56,7 @@ struct REAXFF_HYDROGEN_BOND
     float* d_dE_dBO_s = NULL;
     float* d_dE_dBO_pi = NULL;
     float* d_dE_dBO_pi2 = NULL;
+    int* d_geometry_error = NULL;
 
     void Initial(CONTROLLER* controller, int atom_numbers,
                  const char* module_name);
@@ -60,6 +67,7 @@ struct REAXFF_HYDROGEN_BOND
         float* atom_energy, const int need_virial, LTMatrix3* atom_virial);
 
     void Step_Print(CONTROLLER* controller);
+    void Check_Geometry_Error();
 };
 
 #endif

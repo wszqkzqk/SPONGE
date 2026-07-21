@@ -4,7 +4,8 @@
 
 struct BOND
 {
-    char module_name[CHAR_LENGTH_MAX];
+    char module_name[CHAR_LENGTH_MAX] = "bond";
+    CONTROLLER* controller = NULL;
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
@@ -53,11 +54,15 @@ struct BOND
     int* d_atom_b_local = NULL;
     float* d_k_local = NULL;
     float* d_r0_local = NULL;
+    int* d_global_index_local = NULL;
 
     // 局部信息
     int local_atom_numbers = 0;
     int num_bond_local = 0;  // 进程内bond数
     int* d_num_bond_local = NULL;
+    int* d_invalid_local_term = NULL;
+    int* d_invalid_local_atom = NULL;
+    int* d_invalid_geometry_term = NULL;
     // 局部函数：allocated模块，查询当前进程domain内需要计算的bond序号
     void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
                    char* atom_local_label,

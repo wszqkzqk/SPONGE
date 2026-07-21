@@ -19,8 +19,9 @@ void CONSTRAIN::Initial_Constrain(CONTROLLER* controller,
     // 读文件第一个数确认constrain数量，为分配内存做准备
     if (controller->Command_Exist(this->module_name, "in_file"))
     {
-        Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
-                         "r");
+        Open_File_Safely(
+            &fp, controller->Original_Command(this->module_name, "in_file"),
+            "r");
         int scanf_ret = fscanf(fp, "%d", &extra_numbers);
     }
 

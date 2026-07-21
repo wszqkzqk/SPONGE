@@ -1,5 +1,7 @@
 ﻿#include "over_under.h"
 
+#include "reaxff_input.h"
+
 static __global__ void Calculate_Delta_Kernel(
     int atom_numbers, const int* atom_type, const float* total_corrected_bo,
     const float* valency, const float* valency_e, const float* valency_boc,
@@ -81,7 +83,7 @@ static __global__ void Calculate_Energy_Force_Prep_Kernel(
             float b_pi2 = bo_pi2[b];
             float bo_total = b_s + b_pi + b_pi2;
 
-            if (bo_total < 1e-10f) continue;
+            if (bo_total == 0.0f) continue;
 
             int type_j = atom_type[j];
             int pair_idx = type_i * atom_type_numbers + type_j;
@@ -168,7 +170,7 @@ static __global__ void Calculate_Energy_Force_Prep_Kernel(
             float b_pi2 = bo_pi2[b];
             float bo_total = b_s + b_pi + b_pi2;
 
-            if (bo_total < 1e-10f) continue;
+            if (bo_total == 0.0f) continue;
 
             int type_j = atom_type[j];
             int pair_idx = type_i * atom_type_numbers + type_j;
@@ -198,238 +200,145 @@ void REAXFF_OVER_UNDER::Initial(CONTROLLER* controller, int atom_numbers,
                                 const char* module_name)
 {
     if (module_name == NULL) module_name = "REAXFF";
-    this->atom_numbers = atom_numbers;
-
     if (!controller->Command_Exist(module_name, "in_file")) return;
 
     controller->printf("START INITIALIZING REAXFF OVER/UNDER COORD\n");
 
-    const char* parameter_in_file = controller->Command(module_name, "in_file");
-    const char* type_in_file = controller->Command(module_name, "type_in_file");
+    const char* parameter_in_file =
+        controller->Original_Command(module_name, "in_file");
+    const char* type_in_file =
+        controller->Original_Command(module_name, "type_in_file");
     if (parameter_in_file == NULL || type_in_file == NULL)
     {
         controller->printf(
             "REAXFF_OVER_UNDER IS NOT INITIALIZED (missing input files)\n\n");
         return;
     }
-    controller->Step_Print_Initial("REAXFF_ELP", "%14.7e");
-    controller->Step_Print_Initial("REAXFF_OVUN", "%14.7e");
-
-    FILE* fp;
-    Open_File_Safely(&fp, parameter_in_file, "r");
-    char line[1024];
-    auto throw_bad_format = [&](const char* file_name, const char* reason)
+    REAXFF_INPUT_ERROR input_error;
+    REAXFF_FORCE_FIELD_IR force_field;
+    if (!ReaxFF_Parse_Force_Field_File(parameter_in_file, &force_field,
+                                       &input_error))
     {
-        char error_msg[1024];
-        sprintf(error_msg, "Reason:\n\t%s in file %s\n", reason, file_name);
-        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
-                                       "REAXFF_OVER_UNDER::Initial", error_msg);
-    };
-    auto read_line_or_throw =
-        [&](FILE* file, const char* file_name, const char* stage)
-    {
-        if (fgets(line, 1024, file) == NULL)
-        {
-            char reason[512];
-            sprintf(reason, "failed to read %s", stage);
-            throw_bad_format(file_name, reason);
-        }
-    };
-
-    read_line_or_throw(fp, parameter_in_file, "parameter header line 1");
-    read_line_or_throw(fp, parameter_in_file, "general parameter count line");
-    int n_gp = 0;
-    if (sscanf(line, "%d", &n_gp) != 1 || n_gp <= 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of general parameters");
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_OVER_UNDER::Initial", "Reason:\n\t%s", reason.c_str());
+        return;
     }
-    if (n_gp <= 32)
+    std::vector<int> atom_type;
+    if (!ReaxFF_Parse_Type_File_Path(type_in_file, atom_numbers, force_field,
+                                     &atom_type, NULL, &input_error))
     {
-        throw_bad_format(parameter_in_file,
-                         "general parameter count is too small for over/under");
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_OVER_UNDER::Initial", "Reason:\n\t%s", reason.c_str());
+        return;
     }
-    float* gp = new float[n_gp];
-    for (int i = 0; i < n_gp; i++)
+    if (force_field.general_parameters.size() <= 32)
     {
-        read_line_or_throw(fp, parameter_in_file, "general parameter block");
-        if (sscanf(line, "%f", &gp[i]) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse general parameter at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_OVER_UNDER::Initial",
+            "Reason:\n\tgeneral parameter count is too small for "
+            "over/under coordination in file %s",
+            parameter_in_file);
+        return;
     }
-    p_lp1 = gp[15];
-    p_lp3 = gp[5];
-    p_ovun3 = gp[32];
-    p_ovun4 = gp[31];
-    p_ovun6 = gp[6];
-    p_ovun7 = gp[8];
-    p_ovun8 = gp[9];
-    delete[] gp;
 
-    read_line_or_throw(fp, parameter_in_file, "atom type count line");
-    int n_atom_types = 0;
-    if (sscanf(line, "%d", &n_atom_types) != 1 || n_atom_types <= 0)
+    const int n_atom_types = static_cast<int>(force_field.atom_types.size());
+    int pair_parameter_count = 0;
+    if (!ReaxFF_Checked_Dense_Table_Count(
+            n_atom_types, 2, sizeof(float), &pair_parameter_count))
     {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of atom types");
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_OVER_UNDER::Initial",
+            "Reason:\n\tatom type count %d exceeds the supported pair-table "
+            "extent in file %s",
+            n_atom_types, parameter_in_file);
+        return;
     }
-    this->atom_type_numbers = n_atom_types;
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 1");
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 2");
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 3");
 
-    Malloc_Safely((void**)&h_valency, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_valency_e, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_valency_boc, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_valency_val, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_mass, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_p_lp2, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_p_ovun2, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_p_ovun5, sizeof(float) * n_atom_types);
-
-    std::map<std::string, int> type_map;
+    std::vector<float> valency(n_atom_types);
+    std::vector<float> valency_e(n_atom_types);
+    std::vector<float> valency_boc(n_atom_types);
+    std::vector<float> valency_val(n_atom_types);
+    std::vector<float> mass(n_atom_types);
+    std::vector<float> p_lp2_values(n_atom_types);
+    std::vector<float> p_ovun2_values(n_atom_types);
+    std::vector<float> p_ovun5_values(n_atom_types);
     for (int i = 0; i < n_atom_types; i++)
     {
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 1");
-        char name[16];
-        if (sscanf(line, "%15s %*f %f %f %*f %*f %*f %*f %f", name,
-                   &h_valency[i], &h_mass[i], &h_valency_e[i]) != 4)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 1 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        type_map[name] = i;
-
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 2");
-        if (sscanf(line, "%*f %*f %f %f %*f %*f %*f %*f", &h_valency_boc[i],
-                   &h_p_ovun5[i]) != 2)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 2 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 3");
-        if (sscanf(line, "%*f %f", &h_p_lp2[i]) != 1)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 3 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 4");
-        if (sscanf(line, "%f %*f %*f %f %*f", &h_p_ovun2[i],
-                   &h_valency_val[i]) != 2)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 4 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
+        const REAXFF_ATOM_TYPE_IR& atom = force_field.atom_types[i];
+        valency[i] = atom.values[0][1];
+        mass[i] = atom.values[0][2];
+        valency_e[i] = atom.values[0][7];
+        valency_boc[i] = atom.values[1][2];
+        p_ovun5_values[i] = atom.values[1][3];
+        p_lp2_values[i] = atom.values[2][1];
+        p_ovun2_values[i] = atom.values[3][0];
+        valency_val[i] = atom.values[3][3];
     }
-
-    read_line_or_throw(fp, parameter_in_file, "bond parameter count line");
-    int n_bond_params = 0;
-    if (sscanf(line, "%d", &n_bond_params) != 1 || n_bond_params < 0)
+    std::vector<float> p_ovun1_values(pair_parameter_count, 0.0f);
+    std::vector<float> de_s_values(pair_parameter_count, 0.0f);
+    for (const REAXFF_BOND_IR& bond : force_field.bonds)
     {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of bond parameters");
+        const int idx1 = bond.type1 - 1;
+        const int idx2 = bond.type2 - 1;
+        de_s_values[idx1 * n_atom_types + idx2] =
+            de_s_values[idx2 * n_atom_types + idx1] = bond.line1[0];
+        p_ovun1_values[idx1 * n_atom_types + idx2] =
+            p_ovun1_values[idx2 * n_atom_types + idx1] = bond.line1[7];
     }
-    Malloc_Safely((void**)&h_p_ovun1,
-                  sizeof(float) * n_atom_types * n_atom_types);
-    Malloc_Safely((void**)&h_De_s, sizeof(float) * n_atom_types * n_atom_types);
-    memset(h_p_ovun1, 0, sizeof(float) * n_atom_types * n_atom_types);
-    memset(h_De_s, 0, sizeof(float) * n_atom_types * n_atom_types);
-    read_line_or_throw(fp, parameter_in_file, "bond parameter header line");
-    for (int i = 0; i < n_bond_params; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file,
-                           "bond parameter block line 1");
-        int t1, t2;
-        float de_s, povun1;
-        if (sscanf(line, "%d %d %f %*f %*f %*f %*f %*f %*f %f", &t1, &t2, &de_s,
-                   &povun1) != 4)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse bond parameter block line 1 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        int idx1 = t1 - 1;
-        int idx2 = t2 - 1;
-        if (idx1 >= 0 && idx1 < n_atom_types && idx2 >= 0 &&
-            idx2 < n_atom_types)
-        {
-            h_De_s[idx1 * n_atom_types + idx2] =
-                h_De_s[idx2 * n_atom_types + idx1] = de_s;
-            h_p_ovun1[idx1 * n_atom_types + idx2] =
-                h_p_ovun1[idx2 * n_atom_types + idx1] = povun1;
-        }
-        else
-        {
-            char reason[512];
-            sprintf(reason,
-                    "bond type index out of range at bond parameter index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        read_line_or_throw(fp, parameter_in_file,
-                           "bond parameter block line 2");
-    }
-    fclose(fp);
 
-    Open_File_Safely(&fp, type_in_file, "r");
-    int check_atom_numbers = 0;
-    read_line_or_throw(fp, type_in_file, "atom number line");
-    if (sscanf(line, "%d", &check_atom_numbers) != 1)
+    auto allocate_float_copy = [](const std::vector<float>& values)
     {
-        throw_bad_format(type_in_file, "failed to parse atom numbers");
-    }
-    if (check_atom_numbers != atom_numbers)
-    {
-        char reason[512];
-        sprintf(reason, "atom numbers (%d) does not match system (%d)",
-                check_atom_numbers, atom_numbers);
-        throw_bad_format(type_in_file, reason);
-    }
-    Malloc_Safely((void**)&h_atom_type, sizeof(int) * atom_numbers);
-    for (int i = 0; i < atom_numbers; i++)
-    {
-        read_line_or_throw(fp, type_in_file, "atom type entry line");
-        char name[16];
-        if (sscanf(line, "%15s", name) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse atom type at index %d", i + 1);
-            throw_bad_format(type_in_file, reason);
-        }
-        auto iter = type_map.find(std::string(name));
-        if (iter == type_map.end())
-        {
-            char reason[512];
-            sprintf(reason, "atom type %s not found in parameter file %s", name,
-                    parameter_in_file);
-            throw_bad_format(type_in_file, reason);
-        }
-        h_atom_type[i] = iter->second;
-    }
-    fclose(fp);
+        float* result = NULL;
+        Malloc_Safely((void**)&result, sizeof(float) * values.size());
+        memcpy(result, values.data(), sizeof(float) * values.size());
+        return result;
+    };
+    float* staged_valency = allocate_float_copy(valency);
+    float* staged_valency_e = allocate_float_copy(valency_e);
+    float* staged_valency_boc = allocate_float_copy(valency_boc);
+    float* staged_valency_val = allocate_float_copy(valency_val);
+    float* staged_mass = allocate_float_copy(mass);
+    float* staged_p_lp2 = allocate_float_copy(p_lp2_values);
+    float* staged_p_ovun2 = allocate_float_copy(p_ovun2_values);
+    float* staged_p_ovun5 = allocate_float_copy(p_ovun5_values);
+    float* staged_p_ovun1 = allocate_float_copy(p_ovun1_values);
+    float* staged_de_s = allocate_float_copy(de_s_values);
+    int* staged_atom_type = NULL;
+    Malloc_Safely((void**)&staged_atom_type, sizeof(int) * atom_numbers);
+    memcpy(staged_atom_type, atom_type.data(), sizeof(int) * atom_numbers);
 
-    Device_Malloc_And_Copy_Safely((void**)&d_atom_type, h_atom_type,
+    this->atom_numbers = atom_numbers;
+    this->atom_type_numbers = n_atom_types;
+    p_lp1 = force_field.general_parameters[15];
+    p_lp3 = force_field.general_parameters[5];
+    p_ovun3 = force_field.general_parameters[32];
+    p_ovun4 = force_field.general_parameters[31];
+    p_ovun6 = force_field.general_parameters[6];
+    p_ovun7 = force_field.general_parameters[8];
+    p_ovun8 = force_field.general_parameters[9];
+    h_valency = staged_valency;
+    h_valency_e = staged_valency_e;
+    h_valency_boc = staged_valency_boc;
+    h_valency_val = staged_valency_val;
+    h_mass = staged_mass;
+    h_p_lp2 = staged_p_lp2;
+    h_p_ovun2 = staged_p_ovun2;
+    h_p_ovun5 = staged_p_ovun5;
+    h_p_ovun1 = staged_p_ovun1;
+    h_De_s = staged_de_s;
+    h_atom_type = staged_atom_type;
+
+    Device_Malloc_And_Copy_Safely((void**)&d_atom_type_global, h_atom_type,
                                   sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_atom_type, sizeof(int) * atom_numbers);
     Device_Malloc_And_Copy_Safely((void**)&d_p_lp2, h_p_lp2,
                                   sizeof(float) * n_atom_types);
     Device_Malloc_And_Copy_Safely((void**)&d_p_ovun2, h_p_ovun2,
@@ -466,6 +375,8 @@ void REAXFF_OVER_UNDER::Initial(CONTROLLER* controller, int atom_numbers,
     Device_Malloc_Safely((void**)&d_energy_ovun_sum, sizeof(float));
     Device_Malloc_Safely((void**)&d_energy_atom, sizeof(float) * atom_numbers);
 
+    controller->Step_Print_Initial("REAXFF_ELP", "%14.7e");
+    controller->Step_Print_Initial("REAXFF_OVUN", "%14.7e");
     is_initialized = 1;
     controller->printf("END INITIALIZING REAXFF OVER/UNDER COORD\n\n");
 }

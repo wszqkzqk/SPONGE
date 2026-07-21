@@ -102,16 +102,28 @@ Dihedral_14_LJ_CF_Force_With_Atom_Energy_And_Virial_Device(
 
 void NON_BOND_14::Initial(CONTROLLER* controller, const float* LJ_type_A,
                           const float* LJ_type_B, const int* lj_atom_type,
+                          int atom_numbers, int atom_type_numbers,
                           const char* module_name)
 {
-    if (module_name == NULL)
+    const char* requested_module_name =
+        module_name == NULL ? "nb14" : module_name;
+    if (strlen(requested_module_name) >= sizeof(this->module_name))
     {
-        strcpy(this->module_name, "nb14");
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "NON_BOND_14::Initial",
+            "Reason:\n\tthe NB14 module name exceeds the supported length\n");
+        return;
     }
-    else
+    strcpy(this->module_name, requested_module_name);
+    if (atom_numbers < 0 || atom_type_numbers < 0)
     {
-        strcpy(this->module_name, module_name);
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat, "NON_BOND_14::Initial",
+            "Reason:\n\tthe runtime atom and LJ atom-type counts supplied to "
+            "NB14 must be nonnegative\n");
+        return;
     }
+    nb14_numbers = 0;
 
     print_lj_name = this->module_name;
     print_lj_name += "_LJ";
@@ -129,16 +141,97 @@ void NON_BOND_14::Initial(CONTROLLER* controller, const float* LJ_type_A,
         nb14_to_use = &nb14;
         init_source = "Xponge::system";
     }
-    else if (controller->Command_Exist(this->module_name, file_name_suffix))
+    else if (controller->Command_Exist(this->module_name, file_name_suffix) ||
+             controller->Command_Exist(this->module_name, "extra_in_file"))
     {
         Xponge::Native_Load_NB14(&local_nb14, lj_atom_type, LJ_type_A,
-                                 LJ_type_B, controller, this->module_name);
+                                 LJ_type_B, atom_numbers, atom_type_numbers,
+                                 controller, this->module_name);
         nb14_to_use = &local_nb14;
+        init_source = "checked native input";
     }
 
     if (nb14_to_use != NULL)
     {
-        nb14_numbers = static_cast<int>(nb14_to_use->atom_a.size());
+        const std::size_t count = nb14_to_use->atom_a.size();
+        if (nb14_to_use->atom_b.size() != count ||
+            nb14_to_use->A.size() != count ||
+            nb14_to_use->B.size() != count ||
+            nb14_to_use->cf_scale_factor.size() != count ||
+            count >
+                static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorBadFileFormat, "NON_BOND_14::Initial",
+                "Reason:\n\tthe NB14 system accumulator arrays have "
+                "inconsistent or unsupported sizes\n");
+            return;
+        }
+        std::set<std::pair<int, int>> seen_pairs;
+        for (std::size_t i = 0; i < count; i++)
+        {
+            const int atom_a = nb14_to_use->atom_a[i];
+            const int atom_b = nb14_to_use->atom_b[i];
+            const float coefficient_a = nb14_to_use->A[i];
+            const float coefficient_b = nb14_to_use->B[i];
+            const float charge_scale = nb14_to_use->cf_scale_factor[i];
+            if (atom_a < 0 || atom_a >= atom_numbers || atom_b < 0 ||
+                atom_b >= atom_numbers || atom_a == atom_b)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "NON_BOND_14::Initial",
+                    "Reason:\n\tNB14 interaction %zu has invalid atom IDs "
+                    "(%d, %d) for %d atoms\n",
+                    i, atom_a, atom_b, atom_numbers);
+                return;
+            }
+            const std::pair<int, int> pair =
+                atom_a < atom_b ? std::make_pair(atom_a, atom_b)
+                                : std::make_pair(atom_b, atom_a);
+            try
+            {
+                if (!seen_pairs.insert(pair).second)
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorBadFileFormat, "NON_BOND_14::Initial",
+                        "Reason:\n\tNB14 interaction %zu duplicates atom pair "
+                        "(%d, %d)\n",
+                        i, pair.first, pair.second);
+                    return;
+                }
+            }
+            catch (const std::length_error&)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat, "NON_BOND_14::Initial",
+                    "Reason:\n\tNB14 pair identity storage exceeds its "
+                    "supported size\n");
+                return;
+            }
+            catch (const std::bad_alloc&)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorMallocFailed, "NON_BOND_14::Initial",
+                    "Reason:\n\tcould not allocate NB14 pair identity "
+                    "storage\n");
+                return;
+            }
+            if (!Float_Memory_Is_Finite(&coefficient_a) ||
+                !Float_Memory_Is_Zero_Or_Normal(&coefficient_a) ||
+                !Float_Memory_Is_Finite(&coefficient_b) ||
+                !Float_Memory_Is_Zero_Or_Normal(&coefficient_b) ||
+                !Float_Memory_Is_Finite(&charge_scale) ||
+                !Float_Memory_Is_Zero_Or_Normal(&charge_scale))
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "NON_BOND_14::Initial",
+                    "Reason:\n\tNB14 interaction %zu contains a non-finite "
+                    "or subnormal coefficient\n",
+                    i);
+                return;
+            }
+        }
+        nb14_numbers = static_cast<int>(count);
     }
     if (nb14_numbers > 0)
     {

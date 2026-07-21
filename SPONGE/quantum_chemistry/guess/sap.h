@@ -9,7 +9,7 @@
 //
 // SAP 通过对核吸引积分的 Boys 函数施加修正来实现，无需显式三中心积分。
 // 修正公式（Eq. 11）:
-//   F_m(T) → F_m(T) - Σ_k c̃_k (α_k/(ζ+α_k))^(m+1/2) F_m(T·α_k/(ζ+α_k))
+//   F_m(T) → F_m(T) + Σ_k c̃_k (α_k/(ζ+α_k))^(m+1/2) F_m(T·α_k/(ζ+α_k))
 // 其中 c̃_k = c_k / Z_C, ζ = p (basis pair exponent), T = p * |P-C|²
 //
 // SAP 拟合参数来自 sap_helfem_large（Psi4/BSE），

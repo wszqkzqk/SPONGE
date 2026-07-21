@@ -56,23 +56,36 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
             write_restart_file_interval =
                 atoi(controller[0].Command("write_restart_file_interval"));
         }
+        if (write_trajectory_interval < 0 || write_mdout_interval < 0 ||
+            write_restart_file_interval < 0)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial",
+                "Reason:\n\toutput intervals must be nonnegative "
+                "(trajectory=%d, mdout=%d, restart=%d); zero disables the "
+                "corresponding output\n",
+                write_trajectory_interval, write_mdout_interval,
+                write_restart_file_interval);
+        }
         if (controller->Command_Exist(RESTART_COMMAND))
         {
-            strcpy(restart_name, controller->Command(RESTART_COMMAND));
+            restart_name = controller->Original_Command(RESTART_COMMAND);
         }
         else if (controller->Command_Exist("default_out_file_prefix"))
         {
-            strcpy(restart_name,
-                   controller->Command("default_out_file_prefix"));
+            restart_name =
+                controller->Original_Command("default_out_file_prefix");
         }
         else
         {
-            strcpy(restart_name, RESTART_DEFAULT_FILENAME);
+            restart_name = RESTART_DEFAULT_FILENAME;
         }
         if (controller->Command_Exist(FRC_TRAJ_COMMAND))
         {
             is_frc_traj = 1;
-            Open_File_Safely(&frc_traj, controller->Command(FRC_TRAJ_COMMAND),
+            Open_File_Safely(&frc_traj,
+                             controller->Original_Command(FRC_TRAJ_COMMAND),
                              "wb");
             controller->Set_File_Buffer(frc_traj,
                                         sizeof(VECTOR) * md_info->atom_numbers);
@@ -80,7 +93,8 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
         if (controller->Command_Exist(VEL_TRAJ_COMMAND))
         {
             is_vel_traj = 1;
-            Open_File_Safely(&vel_traj, controller->Command(VEL_TRAJ_COMMAND),
+            Open_File_Safely(&vel_traj,
+                             controller->Original_Command(VEL_TRAJ_COMMAND),
                              "wb");
             controller->Set_File_Buffer(vel_traj,
                                         sizeof(VECTOR) * md_info->atom_numbers);
@@ -99,6 +113,15 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
             max_restart_export_count =
                 atoi(controller->Command("max_restart_export_count"));
         }
+        if (max_restart_export_count <= 0)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial",
+                "Reason:\n\tmax_restart_export_count must be positive; got "
+                "%d\n",
+                max_restart_export_count);
+        }
     }
     else
     {
@@ -109,7 +132,8 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
         if (controller->Command_Exist(FRC_TRAJ_COMMAND))
         {
             is_frc_traj = 1;
-            Open_File_Safely(&frc_traj, controller->Command(FRC_TRAJ_COMMAND),
+            Open_File_Safely(&frc_traj,
+                             controller->Original_Command(FRC_TRAJ_COMMAND),
                              "wb");
             controller->Set_File_Buffer(frc_traj,
                                         sizeof(VECTOR) * md_info->atom_numbers);
@@ -206,23 +230,21 @@ void MD_INFORMATION::trajectory_output::Export_Restart_File(
 {
     if (!md_info->is_initialized || CONTROLLER::MPI_rank) return;
 
-    char filename[CHAR_LENGTH_MAX];
-    if (rst7_name == NULL)
-        strcpy(filename, restart_name);
-    else
-        strcpy(filename, rst7_name);
+    const std::string filename = rst7_name == NULL ? restart_name : rst7_name;
     md_info->Crd_Vel_Device_To_Host();
-    int export_index = restart_export_count % max_restart_export_count;
-    restart_export_count = restart_export_count + 1;
+    const int export_index = restart_export_count;
+    restart_export_count =
+        restart_export_count == max_restart_export_count - 1
+            ? 0
+            : restart_export_count + 1;
     std::string prefix =
         export_index ? std::to_string(export_index) + "_" + filename : filename;
     if (Xponge::system.source == Xponge::InputSource::kAmber)
     {
-        strcpy(filename, prefix.c_str());
-        strcat(filename, ".rst7");
-        const char* sys_name = md_info->md_name;
+        const std::string amber_filename = prefix + ".rst7";
+        const char* sys_name = md_info->md_name.c_str();
         FILE* lin = NULL;
-        Open_File_Safely(&lin, filename, "w");
+        Open_File_Safely(&lin, amber_filename.c_str(), "w");
         fprintf(lin, "%s step=%d\n", sys_name, md_info->sys.steps);
         fprintf(lin, "%8d %.10lf\n", md_info->atom_numbers,
                 md_info->sys.Get_Current_Time());
@@ -298,33 +320,37 @@ void MD_INFORMATION::trajectory_output::Export_Restart_File(
 
 bool MD_INFORMATION::trajectory_output::Check_Mdout_Step()
 {
-    return (print_zeroth_frame || md_info->sys.steps) &&
+    return write_mdout_interval > 0 &&
+           (print_zeroth_frame || md_info->sys.steps) &&
            md_info->sys.steps % write_mdout_interval == 0;
 }
 
 bool MD_INFORMATION::trajectory_output::Check_Force_Step()
 {
-    return md_info->mode == md_info->RERUN ||
-           md_info->output.write_trajectory_interval &&
-               (md_info->output.print_zeroth_frame || md_info->sys.steps) &&
-               md_info->sys.steps % md_info->output.write_trajectory_interval ==
-                   0;
+    // Every rerun frame is a requested force evaluation.  Rerun deliberately
+    // disables coordinate trajectory output, so its force stream must not be
+    // gated by write_trajectory_interval.  In ordinary dynamics the positive
+    // interval guard remains ahead of the modulo operation.
+    if (md_info->mode == md_info->RERUN) return true;
+    return md_info->output.write_trajectory_interval > 0 &&
+           (md_info->output.print_zeroth_frame || md_info->sys.steps) &&
+           md_info->sys.steps % md_info->output.write_trajectory_interval == 0;
 }
 
 bool MD_INFORMATION::trajectory_output::Check_Trajectory_Step()
 {
-    return md_info->output.write_trajectory_interval &&
-           (md_info->sys.steps + 1) %
-                   md_info->output.write_trajectory_interval ==
-               0 &&
+    return md_info->output.write_trajectory_interval > 0 &&
+           Next_Step_Is_Interval_Boundary(
+               md_info->sys.steps,
+               md_info->output.write_trajectory_interval) &&
            md_info->sys.steps != md_info->sys.step_limit;
 }
 
 bool MD_INFORMATION::trajectory_output::Check_Restart_Step()
 {
-    return md_info->output.write_restart_file_interval &&
-           (md_info->sys.steps + 1) %
-                   md_info->output.write_restart_file_interval ==
-               0 &&
+    return md_info->output.write_restart_file_interval > 0 &&
+           Next_Step_Is_Interval_Boundary(
+               md_info->sys.steps,
+               md_info->output.write_restart_file_interval) &&
            md_info->sys.steps != md_info->sys.step_limit;
 }

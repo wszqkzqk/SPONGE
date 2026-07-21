@@ -66,14 +66,24 @@ struct QC_RI_WORKSPACE
     // 每轮迭代 scratch
     double* d_d_vec = NULL;  // [naux] 密度拟合向量
     double* d_g_vec = NULL;  // [naux] 求解后的拟合系数
-    float* d_B_occ = NULL;   // [naux × nao × nocc] B 与 MO 系数收缩
+    // RI-K is a functional of the current spin density, not of whichever
+    // integer-occupation orbitals happened to be diagonalized most recently.
+    // Each density is therefore factored as P_sigma = L_sigma L_sigma^T;
+    // B_occ below is contracted with L and its last dimension is the
+    // numerical density rank (at most nao).
+    float* d_density_factor_alpha = NULL;  // [nao × nao], row-major
+    float* d_density_factor_beta = NULL;   // [nao × nao], row-major
+    int density_factor_rank_alpha = 0;
+    int density_factor_rank_beta = 0;
+    double* d_density_factor_accum = NULL;
+    int* d_density_factor_failure = NULL;
+    float* d_B_occ = NULL;  // [naux × nao × density rank]
 
     // ---- 持久化 scratch（消除每轮 malloc/free）----
     double* d_P_double = NULL;  // [nao²] RI-J 密度矩阵 double 缓冲
     double* d_J_double = NULL;  // [nao²] RI-J Coulomb double 缓冲
-    float* d_J_float = NULL;    // [nao²] RI-J Coulomb float 缓冲
     float* d_K_scratch = NULL;  // [nao²] RI-K exchange 累加缓冲
-    float* d_B_flat = NULL;     // [nao × naux × nocc] RI-K 重排缓冲
+    float* d_B_flat = NULL;  // [nao × naux × density rank] RI-K reorder
 
     // 辅助基 cart2sph（host，用于在线变换）
     std::vector<float> h_U_aux;  // [naux_cart × naux] 行优先

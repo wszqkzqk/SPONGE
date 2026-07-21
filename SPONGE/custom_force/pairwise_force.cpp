@@ -54,7 +54,7 @@ void PAIRWISE_FORCE::Initial(CONTROLLER* controller, const char* module_name)
 void PAIRWISE_FORCE::Read_Configuration(CONTROLLER* controller)
 {
     Configuration_Reader cfg;
-    cfg.Open(controller->Command(this->module_name, "in_file"));
+    cfg.Open(controller->Original_Command(this->module_name, "in_file"));
     cfg.Close();
     if (!cfg.error_reason.empty())
     {
@@ -388,7 +388,9 @@ void PAIRWISE_FORCE::Real_Initial(CONTROLLER* controller)
     }
     controller->printf("    Initializing %s\n", this->force_name.c_str());
     Open_File_Safely(
-        &fp, controller->Command(this->force_name.c_str(), "in_file"), "r");
+        &fp,
+        controller->Original_Command(this->force_name.c_str(), "in_file"),
+        "r");
     if (fscanf(fp, "%d %d", &atom_numbers, &type_numbers) != 2)
     {
         std::string error_reason =

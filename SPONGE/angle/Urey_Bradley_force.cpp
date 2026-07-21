@@ -2,6 +2,7 @@
 
 #include "../xponge/load/native/urey_bradley.hpp"
 #include "../xponge/xponge.h"
+#include "angle_validation.h"
 
 void UREY_BRADLEY::Initial(CONTROLLER* controller, char* module_name)
 {
@@ -31,9 +32,22 @@ void UREY_BRADLEY::Initial(CONTROLLER* controller, char* module_name)
         Xponge::Native_Load_Urey_Bradley(&local_urey_bradley, controller,
                                          this->module_name);
         urey_bradley_to_use = &local_urey_bradley;
+        init_source =
+            controller->Original_Command(this->module_name, file_name_suffix);
     }
+    Urey_Bradley_numbers = 0;
     if (urey_bradley_to_use != NULL)
     {
+        const std::string validation_error = Validate_Urey_Bradley(
+            *urey_bradley_to_use, Xponge::system.atoms.mass.size());
+        if (!validation_error.empty())
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat, "UREY_BRADLEY::Initial",
+                "Reason:\n\tinvalid Urey-Bradley data: %s\n\tSource: %s\n",
+                validation_error.c_str(), init_source);
+            return;
+        }
         Urey_Bradley_numbers =
             static_cast<int>(urey_bradley_to_use->atom_a.size());
     }
@@ -55,6 +69,12 @@ void UREY_BRADLEY::Initial(CONTROLLER* controller, char* module_name)
 
         bond.bond_numbers = Urey_Bradley_numbers;
         angle.angle_numbers = Urey_Bradley_numbers;
+        bond.controller = controller;
+        angle.controller = controller;
+        snprintf(bond.module_name, sizeof(bond.module_name), "%s_bond",
+                 this->module_name);
+        snprintf(angle.module_name, sizeof(angle.module_name), "%s_angle",
+                 this->module_name);
 
         bond.Memory_Allocate();
         angle.Memory_Allocate();
@@ -143,10 +163,29 @@ void UREY_BRADLEY::Step_Print(CONTROLLER* controller)
                   CONTROLLER::pp_comm);
 #endif
 
+    if (!Float_Memory_Is_Finite(angle.h_sigma_of_angle_ene) ||
+        !Float_Memory_Is_Finite(bond.h_sigma_of_bond_ene))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "UREY_BRADLEY::Step_Print",
+            "Reason:\n\t%s angle/bond energy is non-finite after local/MPI "
+            "reduction\n",
+            module_name);
+        return;
+    }
+    const float total_energy =
+        bond.h_sigma_of_bond_ene[0] + angle.h_sigma_of_angle_ene[0];
+    if (!Float_Memory_Is_Finite(&total_energy))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "UREY_BRADLEY::Step_Print",
+            "Reason:\n\t%s finite angle/bond energies overflow when added\n",
+            module_name);
+        return;
+    }
+
     if (CONTROLLER::MPI_rank == 0)
     {
-        controller->Step_Print(
-            this->module_name,
-            bond.h_sigma_of_bond_ene[0] + angle.h_sigma_of_angle_ene[0], true);
+        controller->Step_Print(this->module_name, total_energy, true);
     }
 }

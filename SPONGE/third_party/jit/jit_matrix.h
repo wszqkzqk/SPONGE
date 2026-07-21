@@ -4,6 +4,11 @@
 struct LTMatrix3
 {
     float a11, a21, a22, a31, a32, a33;
+    __host__ __device__ __forceinline__ bool Is_Direct_Boundary() const
+    {
+        return a11 == 0.0f && a21 == 0.0f && a22 == 0.0f &&
+               a31 == 0.0f && a32 == 0.0f && a33 == 0.0f;
+    }
     friend __host__ __device__ __forceinline__ LTMatrix3 operator+(LTMatrix3 m1, LTMatrix3 m2)
     {
         return { m1.a11 + m2.a11, 
@@ -38,6 +43,7 @@ struct LTMatrix3
         VECTOR Get_Periodic_Displacement(VECTOR a, VECTOR b, LTMatrix3 cell, LTMatrix3 rcell)
     {
         VECTOR dr = a - b;
+        if (cell.Is_Direct_Boundary()) return dr;
         return dr - floorf(dr * rcell + 0.5f) * cell;
     }
     friend __device__ __host__ __forceinline__ LTMatrix3 Get_Virial_From_Force_Dis(const VECTOR& veca, const VECTOR& vecb)

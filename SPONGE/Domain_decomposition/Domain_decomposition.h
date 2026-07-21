@@ -1,10 +1,10 @@
 ﻿#pragma once
 #include "../MD_core/MD_core.h"
+#include "../PM_force/pme_exclusion_dependency.h"
 #include "../common.h"
 #include "../control.h"
 
 #define MAX_NEIGHBOR_NUM 9  // 每个区域一个方向上最大的邻居数，用于负载均衡
-#define MAX_RANK_NUM 16     // 最大的进程数
 
 struct DOMAIN_INFORMATION
 {
@@ -41,7 +41,17 @@ struct DOMAIN_INFORMATION
     VECTOR* vel = NULL;  // 存储粒子速度
     VECTOR* crd = NULL;  // 存储粒子坐标
     // VECTOR *last_crd = NULL;//存储上次的粒子坐标
-    VECTOR* acc = NULL;               // 存储粒子的加速度
+    VECTOR* acc = NULL;  // 存储粒子的加速度
+    // Adam minimization state is neither physical velocity nor acceleration.
+    // It follows owned atoms during domain migration and is never exposed to
+    // constraints, kinetic observables, or trajectory/restart output.
+    VECTOR* min_first_moment = NULL;
+    VECTOR* min_root_second_moment = NULL;
+    // Transient Adam coordinate moves are kept separate so frc always retains
+    // its physical meaning for force trajectories and downstream consumers.
+    // Unlike the moments, this buffer is recomputed before every integration
+    // step and therefore does not migrate with atoms.
+    VECTOR* min_move = NULL;
     VECTOR* frc = NULL;               // 存储粒子的受力
     VECTOR* frc_buffer = NULL;        // 用于分发ghost力信息的buffer
     float* d_mass = NULL;             // 存储粒子的质量
@@ -69,6 +79,22 @@ struct DOMAIN_INFORMATION
     int* d_excluded_list_start = NULL;  // 局域粒子的排除表开端
     int* d_excluded_list = NULL;        // 局域粒子的排除表
     int* d_excluded_numbers = NULL;     // 局域粒子的排除表长度
+
+    // PME exclusion corrections are not cutoff limited.  A negative entry in
+    // d_excluded_list encodes a dependency slot as -slot-1; non-negative
+    // entries remain ordinary local/spatial-ghost atom indices.
+    int exclusion_dependency_numbers = 0;
+    int exclusion_supply_numbers = 0;
+    int exclusion_supply_capacity = 0;
+    int* d_exclusion_supply_local_indices = NULL;
+    PME_EXCLUSION_DEPENDENCY_STATE* d_exclusion_supply_state = NULL;
+    PME_EXCLUSION_DEPENDENCY_STATE* d_exclusion_dependency_state = NULL;
+    std::vector<int> exclusion_request_counts;
+    std::vector<int> exclusion_request_displacements;
+    std::vector<int> exclusion_supply_counts;
+    std::vector<int> exclusion_supply_displacements;
+    std::vector<PME_EXCLUSION_DEPENDENCY_STATE> h_exclusion_supply_state;
+    std::vector<PME_EXCLUSION_DEPENDENCY_STATE> h_exclusion_dependency_state;
     // ---------------------- END ON DEVICE ---------------------------------
 
     void Get_Atoms(
@@ -79,6 +105,7 @@ struct DOMAIN_INFORMATION
                        md_info);  // 获取Ghost区域粒子信息，主要是粒子编号，坐标
     void Get_Excluded(CONTROLLER* controller,
                       MD_INFORMATION* md_info);  // 获取区域内粒子的排除表
+    void Update_Exclusion_Dependencies(CONTROLLER* controller);
     void Update_Ghost(CONTROLLER* controller);  // 更新Ghost粒子信息，主要是坐标
     void Update_Ghost_Tensor(
         CONTROLLER* controller, float* atom_tensor,
@@ -124,10 +151,12 @@ struct DOMAIN_INFORMATION
     // pp子通信域的rank_id
     int pp_rank;
 
-    // rank 0存储全局分解信息
-    INT_VECTOR dom_dec_split_num;         // host
-    VECTOR min_corner_set[MAX_RANK_NUM];  // host
-    VECTOR max_corner_set[MAX_RANK_NUM];  // host
+    // Domain corners are sized from PP_MPI_size.  A fixed rank limit corrupts
+    // the DOMAIN_INFORMATION object as soon as a valid decomposition exceeds
+    // that compile-time capacity.
+    INT_VECTOR dom_dec_split_num;        // host
+    std::vector<VECTOR> min_corner_set;  // host
+    std::vector<VECTOR> max_corner_set;  // host
 
     void Domain_Decomposition(CONTROLLER* controller,
                               MD_INFORMATION* md_info);  // 区域分解信息

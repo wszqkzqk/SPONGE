@@ -23,7 +23,7 @@ struct MetaGrid
     std::vector<float> spacing;
     float* d_spacing = NULL;
     // 网格步长倒数（仅 host 使用）
-    std::vector<float> inv_spacing;
+    std::vector<double> inv_spacing;
 
     std::vector<float> potential;
     float* d_potential = NULL;
@@ -36,12 +36,15 @@ struct MetaGrid
 
     void Initial(const std::vector<int>& npts, const std::vector<float>& lo,
                  const std::vector<float>& up,
-                 const std::vector<bool>& periodic);
+                 const std::vector<bool>& periodic,
+                 const std::vector<float>& validated_spacing,
+                 const std::vector<double>& validated_inverse_spacing);
     void Alloc_Device();
     void Sync_To_Device();
     void Sync_To_Host();
     int Get_Flat_Index(const std::vector<float>& values) const;
     std::vector<float> Get_Coordinates(int flat_index) const;
+    void Get_Coordinates(int flat_index, float* coordinates) const;
 };
 
 struct MetaScatter
@@ -83,11 +86,13 @@ struct META
 
     void Initial(CONTROLLER* controller,
                  COLLECTIVE_VARIABLE_CONTROLLER* cv_controller,
-                 char* module_name = NULL);
+                 char* module_name = NULL, float sys_temperature = 300.0f);
     void Do_Metadynamics(int atom_numbers, VECTOR* crd, LTMatrix3 cell,
-                         LTMatrix3 rcell, int step, int need_potential,
-                         int need_pressure, VECTOR* frc, float* d_potential,
-                         LTMatrix3* d_virial, float sys_temp);
+                         LTMatrix3 rcell, LTMatrix3 reference_cell, int step,
+                         int need_potential, int need_pressure, VECTOR* frc,
+                         float* d_potential, LTMatrix3* d_virial,
+                         float sys_temp, bool commit_history = true);
+    bool Will_Add_Potential(int step) const;
     void Step_Print(CONTROLLER* controller);
     void Write_Potential(void);
     void Write_Directly(void);
@@ -97,6 +102,10 @@ struct META
     {
         Hill(const Axis& centers, const Axis& inv_w, const Axis& period,
              const float& theight);
+        Hill(const Hill&) = default;
+        Hill& operator=(const Hill&) = default;
+        Hill(Hill&&) noexcept = default;
+        Hill& operator=(Hill&&) noexcept = default;
         const Gdata& Calc_Hill(const Axis& values);
         Axis centers_;
         Axis inv_w_;
@@ -166,9 +175,11 @@ struct META
     float* Dpotential_local = NULL;
     float sum_max = 0.0;
     float new_max = 0.;
-    int max_index;
+    double normalization_base_factor = 0.0;
+    float normalization_reference_lse = 0.0f;
+    int max_index = 0;
     float max_force = 0.1;
-    float exit_tag;
+    float exit_tag = 0.0f;
     Axis est_values_;
     Gdata est_sum_force_;
 
@@ -186,12 +197,12 @@ struct META
     float* d_cutoff = NULL;
 
     // ---- IO ----
-    char read_potential_file_name[256];
-    char write_potential_file_name[256];
-    char write_directly_file_name[256];
-    char edge_file_name[256];
-    int potential_update_interval;
-    int write_information_interval;
+    std::string read_potential_file_name;
+    std::string write_potential_file_name;
+    std::string write_directly_file_name;
+    std::string edge_file_name;
+    int potential_update_interval = 0;
+    int write_information_interval = 0;
 
     // ---- internal methods ----
     void Meta_Force_With_Energy_And_Virial(int atom_numbers, VECTOR* frc,
@@ -206,6 +217,8 @@ struct META
     void Estimate(const Axis& values, const bool need_potential,
                   const bool need_force);
     void Add_Potential(float sys_temp, int steps);
+    void Validate_Runtime_Temperature(const char* error_by) const;
+    float Update_Reweighting_Factors(const char* error_by);
     void Get_Height(const Axis& values);
     void Get_Reweighting_Bias(float temp);
     float Calc_V_Shift(const Axis& values);

@@ -5,6 +5,7 @@
 #include "../../common.h"
 #include "../../control.h"
 #include "bond_order.h"
+#include "reaxff_geometry.h"
 
 struct REAXFF_THBP_Entry
 {
@@ -31,6 +32,7 @@ struct REAXFF_VALENCE_ANGLE_PARAMS
 struct REAXFF_VALENCE_ANGLE
 {
     int is_initialized = 0;
+    CONTROLLER* controller = NULL;
     int atom_numbers = 0;
     int atom_type_numbers = 0;
 
@@ -59,6 +61,8 @@ struct REAXFF_VALENCE_ANGLE
     REAXFF_THBP_Entry* d_thbp_entries = NULL;
 
     int* h_atom_type = NULL;
+    // Immutable input-order table. d_atom_type is the current DD-local view.
+    int* d_atom_type_global = NULL;
     int* d_atom_type = NULL;
 
     // Energy variables
@@ -84,6 +88,7 @@ struct REAXFF_VALENCE_ANGLE
     float* d_dbo_pi_dDelta_j = NULL;
     float* d_dbo_pi2_dDelta_j = NULL;
     float* d_dbo_raw_total_dr = NULL;
+    int* d_geometry_error = NULL;
 
     void Initial(CONTROLLER* controller, int atom_numbers,
                  const char* module_name);
@@ -97,6 +102,7 @@ struct REAXFF_VALENCE_ANGLE
         LTMatrix3* atom_virial);
 
     void Step_Print(CONTROLLER* controller);
+    void Check_Geometry_Error();
 };
 
 #endif

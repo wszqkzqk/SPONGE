@@ -1,5 +1,12 @@
 ﻿#pragma once
 
+#include <atomic>
+#include <cerrno>
+#include <cstdlib>
+#include <new>
+#include <stdexcept>
+#include <thread>
+
 #include "common.h"
 #include "utils/control/string.hpp"
 #include "utils/control/time_recorder.hpp"
@@ -61,11 +68,14 @@ struct CONTROLLER
     std::string mdin_toml_source_path;
     std::string mdin_toml_content;
     void Get_Command(
-        char* line,
-        char* prefix);  // 内部解析argument时专用，设置命令，不外部调用
-    void Set_Command(const char* Flag, const char* Value, int Check = 1,
-                     const char* prefix =
-                         NULL);  // 内部解析argument时专用，设置命令，不外部调用
+        const std::string& line,
+        const std::string&
+            prefix);  // 内部解析argument时专用，设置命令，不外部调用
+    void Set_Command(
+        const char* Flag, const char* Value, int Check = 1,
+        const char* prefix = NULL,
+        bool preserve_full_value =
+            false);  // 内部解析argument时专用，设置命令，不外部调用
     void Arguments_Parse(int argc, char** argv);  // 对终端输入进行分析
     void Commands_From_In_File(
         int argc, char** argv,
@@ -162,8 +172,34 @@ struct CONTROLLER
                      const char* error_by);
     bool Get_Bool(const char* prefix, const char* command,
                   const char* error_by);
+    // Fixed-capacity fatal cleanup stack shared by one linked SPONGE core
+    // image. A callback/context pair must remain valid until successful
+    // unregistration or callback return.
+    // Successful unregistration guarantees that the callback is no longer
+    // running. The sole exception is a callback unregistering itself: that
+    // operation returns false rather than deadlocking or granting a false
+    // lifetime guarantee. Registration returns false for a null callback, a
+    // duplicate pair, a full stack, or a registry whose fatal path has begun.
+    using Fatal_Cleanup_Callback = void (*)(void*);
+    static constexpr std::size_t FATAL_CLEANUP_CAPACITY = 32;
+    static constexpr std::size_t FATAL_DIAGNOSTIC_FALLBACK_CAPACITY = 8192;
+    static bool Register_Fatal_Cleanup(Fatal_Cleanup_Callback callback,
+                                       void* context) noexcept;
+    static bool Unregister_Fatal_Cleanup(Fatal_Cleanup_Callback callback,
+                                         void* context) noexcept;
+#ifdef SPONGE_FATAL_CLEANUP_TESTING
+    static std::size_t Fatal_Sequence_Waiter_Count_For_Test() noexcept
+    {
+        return fatal_sequence_waiters_.load(std::memory_order_acquire);
+    }
+#endif
     void Throw_SPONGE_Error(const int error_number, const char* error_by = NULL,
                             const char* extra_error_string = NULL);
+#ifdef GPU_ARCH_NAME
+    void Throw_Device_Error(deviceError_t error_number,
+                            const char* error_by = NULL,
+                            const char* extra_error_string = NULL);
+#endif
     void Throw_Formatted_SPONGE_Error(const int error_number,
                                       const char* error_by, const char* format,
                                       ...);
@@ -183,6 +219,63 @@ struct CONTROLLER
     FILE* Get_Output_File(bool binary, const char* prefix, const char* command,
                           const char* default_suffix,
                           const char* default_filename);
+
+   private:
+    static void Begin_Fatal_Sequence() noexcept;
+    static void Run_Fatal_Cleanups() noexcept;
+    static void Resolve_Fatal_Base(int error_number, const char** error_name,
+                                   const char** error_reason) noexcept;
+    static bool Capture_Fatal_Diagnostic_From_Base(
+        const char* error_name, const char* error_reason, const char* error_by,
+        const char* extra_error_string, std::vector<char>* diagnostic) noexcept;
+    static std::size_t Capture_Fatal_Diagnostic_Fixed_From_Base(
+        const char* error_name, const char* error_reason, const char* error_by,
+        const char* extra_error_string, char* diagnostic,
+        std::size_t capacity) noexcept;
+    static bool Capture_Fatal_Diagnostic(
+        int error_number, const char* error_by, const char* extra_error_string,
+        std::vector<char>* diagnostic) noexcept;
+    static void Write_Fatal_Bytes(const char* text,
+                                  std::size_t length) noexcept;
+    static void Write_Fatal_Text(const char* text) noexcept;
+    [[noreturn]] static void Finish_Fatal_Sequence(
+        int error_number, const char* captured_diagnostic,
+        std::size_t captured_length) noexcept;
+    [[noreturn]] static void Finish_Uncaptured_Fatal_Sequence(
+        int error_number, const char* error_name, const char* error_reason,
+        const char* error_by, const char* extra_error_string) noexcept;
+    [[noreturn]] static void Terminate_Fatal_Sequence(
+        int error_number) noexcept;
+    [[noreturn]] static void Wait_For_Fatal_Termination() noexcept;
+    static void Lock_Fatal_Cleanup_Registry() noexcept;
+    static void Unlock_Fatal_Cleanup_Registry() noexcept;
+
+    enum Fatal_Cleanup_Entry_State : unsigned char
+    {
+        FATAL_CLEANUP_EMPTY = 0,
+        FATAL_CLEANUP_REGISTERED = 1,
+        FATAL_CLEANUP_RUNNING = 2,
+        FATAL_CLEANUP_DONE = 3,
+    };
+
+    struct Fatal_Cleanup_Entry
+    {
+        Fatal_Cleanup_Callback callback;
+        void* context;
+        Fatal_Cleanup_Entry_State state;
+    };
+
+    inline static Fatal_Cleanup_Entry
+        fatal_cleanup_entries_[FATAL_CLEANUP_CAPACITY] = {};
+    inline static std::size_t fatal_cleanup_count_ = 0;
+    // The spin lock protects only short registry state transitions. Cleanup
+    // callbacks always execute with it released. The fatal-sequence claim is
+    // separate so exactly one thread owns cleanup, diagnostics, and process
+    // termination; all other fatal callers wait for that termination.
+    inline static std::atomic_flag fatal_cleanup_lock_ = ATOMIC_FLAG_INIT;
+    inline static std::atomic<bool> fatal_sequence_claimed_{false};
+    inline static std::atomic<std::size_t> fatal_sequence_waiters_{0};
+    inline static thread_local bool fatal_sequence_owner_ = false;
 };
 
 // 一些常用的控制函数

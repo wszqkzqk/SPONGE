@@ -7,6 +7,7 @@
 struct RESTRAIN_INFORMATION
 {
     char module_name[CHAR_LENGTH_MAX];
+    CONTROLLER* controller = NULL;
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
@@ -40,6 +41,7 @@ struct RESTRAIN_INFORMATION
 
     VECTOR* crd_ref = NULL;        // 限制的参考坐标(在GPU上)
     VECTOR* d_ref_crd_all = NULL;  // 全局参考坐标(在GPU上)
+    VECTOR* d_ref_crd_all_transaction_backup = NULL;
 
     int refcoord_scaling = REFCOORD_SCALING_NO;
     bool calc_virial = true;
@@ -52,6 +54,11 @@ struct RESTRAIN_INFORMATION
                                  float dt, int* atom_local,
                                  int local_atom_numbers, char* atom_local_label,
                                  int* atom_local_id);
+    void Save_Refcoord_Transaction_State();
+    void Restore_Refcoord_Transaction_State(int* atom_local,
+                                            int local_atom_numbers,
+                                            char* atom_local_label,
+                                            int* atom_local_id);
 
     void Init_Com_Cache_If_Needed(const int atom_numbers,
                                   const MD_INFORMATION& md_info);

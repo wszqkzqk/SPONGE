@@ -33,18 +33,26 @@ static void Native_Load_Classical_Force_Field(System* system,
 
 void Load_Native_Inputs(System* system, CONTROLLER* controller)
 {
-    system->source = InputSource::kNative;
-    Native_Load_Mass(system, controller);
-    Native_Load_Charge(system, controller);
-    Native_Load_Coordinate_And_Velocity(system, controller);
-    Native_Load_Residues(system, controller);
-    Native_Load_Exclusions(system, controller);
-    system->generalized_born = GeneralizedBorn{};
-    system->virtual_atoms = VirtualAtoms{};
-    Load_Reset_Classical_Force_Field(&system->classical_force_field);
-    Native_Load_Classical_Force_Field(system, controller);
-    Native_Load_Generalized_Born(system, controller);
-    Native_Load_Virtual_Atoms(system, controller);
+    Load_System_Transaction(
+        system, controller, "Xponge::Load_Native_Inputs",
+        Load_System_Seed::kEmpty,
+        [&](System* staged)
+        {
+            // Native input is a complete source selection: coordinate input
+            // is mandatory and omitted mass/charge/residue/exclusion fields
+            // receive native defaults rather than inheriting prior values.
+            // Build from an empty System so a previous source cannot impose a
+            // stale atom count or leak fields that this load did not publish.
+            staged->source = InputSource::kNative;
+            Native_Load_Mass(staged, controller);
+            Native_Load_Charge(staged, controller);
+            Native_Load_Coordinate_And_Velocity(staged, controller);
+            Native_Load_Residues(staged, controller);
+            Native_Load_Exclusions(staged, controller);
+            Native_Load_Classical_Force_Field(staged, controller);
+            Native_Load_Generalized_Born(staged, controller);
+            Native_Load_Virtual_Atoms(staged, controller);
+        });
 }
 
 }  // namespace Xponge

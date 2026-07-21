@@ -135,16 +135,11 @@ static __global__ void QC_Build_W_Pao_Kernel(
     {
         const int g = idx % n_grid;
         const int mu = idx / n_grid;
-        float val = 0.0f;
-        if (rho[g] >= 1e-20)
+        float val = (float)(weights[g] * vrho[g]) * Pao[idx];
+        if (deriv_level >= 1 && vsigma != nullptr)
         {
-            float w_vrho = (float)(weights[g] * vrho[g]);
-            val = w_vrho * Pao[idx];
-            if (deriv_level >= 1 && vsigma != nullptr)
-            {
-                float w_vsigma2 = (float)(2.0 * weights[g] * vsigma[g]);
-                val += w_vsigma2 * GPao_scratch[idx];
-            }
+            float w_vsigma2 = (float)(2.0 * weights[g] * vsigma[g]);
+            val += w_vsigma2 * GPao_scratch[idx];
         }
         W_pao[idx] = val;
     }
@@ -152,12 +147,16 @@ static __global__ void QC_Build_W_Pao_Kernel(
 
 // 累加到原子梯度
 static __global__ void QC_XC_Grad_Accumulate_Kernel(
-    const int n_grid, const int nao, const int nbas, const int* shell_atom,
+    const int n_grid, const int grid_offset, const int points_per_atom,
+    const int natm, const int nao, const int nbas, const int* shell_atom,
     const int* ao_offsets, const float* gx_norm, const float* gy_norm,
-    const float* gz_norm, const float* W_pao, double* grad)
+    const float* gz_norm, const float* W_pao, double* grad, int* failure)
 {
     SIMPLE_DEVICE_FOR(ig, n_grid)
     {
+        double point_grad_x = 0.0;
+        double point_grad_y = 0.0;
+        double point_grad_z = 0.0;
         for (int ish = 0; ish < nbas; ish++)
         {
             const int atom = shell_atom[ish];
@@ -166,13 +165,303 @@ static __global__ void QC_XC_Grad_Accumulate_Kernel(
             for (int mu = ao0; mu < ao1; mu++)
             {
                 const float wp = W_pao[mu * n_grid + ig];
-                if (fabsf(wp) < 1e-30f) continue;
-                atomicAdd(&grad[atom * 3 + 0],
-                          (double)(-2.0f * gx_norm[ig * nao + mu] * wp));
-                atomicAdd(&grad[atom * 3 + 1],
-                          (double)(-2.0f * gy_norm[ig * nao + mu] * wp));
-                atomicAdd(&grad[atom * 3 + 2],
-                          (double)(-2.0f * gz_norm[ig * nao + mu] * wp));
+                if (wp == 0.0f) continue;
+                const double contribution_x =
+                    (double)(-2.0f * gx_norm[ig * nao + mu] * wp);
+                const double contribution_y =
+                    (double)(-2.0f * gy_norm[ig * nao + mu] * wp);
+                const double contribution_z =
+                    (double)(-2.0f * gz_norm[ig * nao + mu] * wp);
+                atomicAdd(&grad[atom * 3 + 0], contribution_x);
+                atomicAdd(&grad[atom * 3 + 1], contribution_y);
+                atomicAdd(&grad[atom * 3 + 2], contribution_z);
+                point_grad_x += contribution_x;
+                point_grad_y += contribution_y;
+                point_grad_z += contribution_z;
+            }
+        }
+
+        // Each quadrature point translates with the atom whose radial grid
+        // generated it.  At fixed density matrix, translational invariance
+        // gives dF/dx_g = -sum_A dF/dR_A|x_g, so publish that missing moving-
+        // grid coordinate response on the owning atom.
+        const int owner = (grid_offset + ig) / points_per_atom;
+        if (owner < 0 || owner >= natm)
+        {
+            QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
+                                 grid_offset + ig);
+        }
+        else
+        {
+            atomicAdd(&grad[owner * 3 + 0], -point_grad_x);
+            atomicAdd(&grad[owner * 3 + 1], -point_grad_y);
+            atomicAdd(&grad[owner * 3 + 2], -point_grad_z);
+        }
+    }
+}
+
+// Rebuild every atom's normalized Becke partition weight at each grid point.
+// Products are accumulated in logarithmic form so a legitimate tiny product
+// is not confused with an inactive (exactly zero) partition channel.
+static __global__ void QC_Build_Becke_Atom_Weights_Kernel(
+    const int n_grid, const int grid_offset, const int natm,
+    const float* grid_coords, const VECTOR* atom_coords,
+    const double* covalent_radii, double* atom_weights, int* failure)
+{
+    SIMPLE_DEVICE_FOR(ig, n_grid)
+    {
+        const double x = (double)grid_coords[ig * 3 + 0];
+        const double y = (double)grid_coords[ig * 3 + 1];
+        const double z = (double)grid_coords[ig * 3 + 2];
+        const double inactive = 1.7976931348623157e308;
+        double max_log = -inactive;
+        bool has_active_atom = false;
+        bool valid = true;
+
+        for (int a = 0; a < natm; ++a)
+        {
+            const VECTOR atom_a = atom_coords[a];
+            const double dax = x - (double)atom_a.x;
+            const double day = y - (double)atom_a.y;
+            const double daz = z - (double)atom_a.z;
+            const double ra = sqrt(dax * dax + day * day + daz * daz);
+            double log_product = 0.0;
+            bool active = true;
+
+            for (int b = 0; b < natm; ++b)
+            {
+                if (a == b) continue;
+                const VECTOR atom_b = atom_coords[b];
+                const double dbx = x - (double)atom_b.x;
+                const double dby = y - (double)atom_b.y;
+                const double dbz = z - (double)atom_b.z;
+                const double rb = sqrt(dbx * dbx + dby * dby + dbz * dbz);
+                const double abx = (double)atom_a.x - (double)atom_b.x;
+                const double aby = (double)atom_a.y - (double)atom_b.y;
+                const double abz = (double)atom_a.z - (double)atom_b.z;
+                const double rab = sqrt(abx * abx + aby * aby + abz * abz);
+                if (rab == 0.0 || !QC_XC_Double_Is_Finite(rab))
+                {
+                    valid = false;
+                    active = false;
+                    break;
+                }
+                const double mu = (ra - rb) / rab;
+                const double adjusted_mu = QC_Becke_Size_Adjusted_Mu(
+                    mu, covalent_radii[a], covalent_radii[b]);
+                const double shape = QC_Becke_Shape(adjusted_mu);
+                if (shape == 0.0)
+                {
+                    active = false;
+                    break;
+                }
+                if (!(shape > 0.0) || !QC_XC_Double_Is_Finite(shape))
+                {
+                    valid = false;
+                    active = false;
+                    break;
+                }
+                log_product += log(shape);
+                if (!QC_XC_Double_Is_Finite(log_product))
+                {
+                    valid = false;
+                    active = false;
+                    break;
+                }
+            }
+
+            atom_weights[(size_t)ig * natm + a] =
+                active ? log_product : inactive;
+            if (active)
+            {
+                has_active_atom = true;
+                if (log_product > max_log) max_log = log_product;
+            }
+        }
+
+        double denominator = 0.0;
+        if (valid && has_active_atom)
+        {
+            for (int a = 0; a < natm; ++a)
+            {
+                const size_t index = (size_t)ig * natm + a;
+                const double log_product = atom_weights[index];
+                if (log_product == inactive)
+                {
+                    atom_weights[index] = 0.0;
+                    continue;
+                }
+                const double scaled = exp(log_product - max_log);
+                atom_weights[index] = scaled;
+                denominator += scaled;
+            }
+        }
+        if (!valid || !has_active_atom || !(denominator > 0.0) ||
+            !QC_XC_Double_Is_Finite(denominator))
+        {
+            for (int a = 0; a < natm; ++a)
+                atom_weights[(size_t)ig * natm + a] = 0.0;
+            QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
+                                 grid_offset + ig);
+            continue;
+        }
+        const double inverse_denominator = 1.0 / denominator;
+        for (int a = 0; a < natm; ++a)
+            atom_weights[(size_t)ig * natm + a] *= inverse_denominator;
+    }
+}
+
+// Analytic response of the normalized Becke partition for atom-centred grid
+// points.  For p_a = product_{b!=a} s_ab and w_i = p_i/sum_a p_a,
+//
+//   d log(w_i) = sum_a (delta_ai - w_a) d log(p_a).
+//
+// Each directed (a,b) factor affects nuclei a and b directly, while the grid
+// coordinate itself follows owner i.  Accumulating all three contributions
+// makes the response exactly translation invariant by construction.
+static __global__ void QC_Accumulate_Becke_Grid_Response_Kernel(
+    const int n_grid, const int grid_offset, const int points_per_atom,
+    const int natm, const float* grid_coords, const float* grid_weights,
+    const double* exc, const VECTOR* atom_coords,
+    const double* covalent_radii, const double* atom_weights, double* grad,
+    int* failure)
+{
+    SIMPLE_DEVICE_FOR(ig, n_grid)
+    {
+        const double weighted_energy =
+            (double)grid_weights[ig] * exc[ig];
+        if (weighted_energy == 0.0) continue;
+
+        const int owner = (grid_offset + ig) / points_per_atom;
+        if (owner < 0 || owner >= natm ||
+            !QC_XC_Double_Is_Finite(weighted_energy))
+        {
+            QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
+                                 grid_offset + ig);
+            continue;
+        }
+
+        const double x = (double)grid_coords[ig * 3 + 0];
+        const double y = (double)grid_coords[ig * 3 + 1];
+        const double z = (double)grid_coords[ig * 3 + 2];
+        bool valid = true;
+
+        for (int a = 0; a < natm && valid; ++a)
+        {
+            const double coefficient =
+                (a == owner ? 1.0 : 0.0) -
+                atom_weights[(size_t)ig * natm + a];
+            if (coefficient == 0.0) continue;
+
+            const VECTOR atom_a = atom_coords[a];
+            const double dax = x - (double)atom_a.x;
+            const double day = y - (double)atom_a.y;
+            const double daz = z - (double)atom_a.z;
+            const double ra = sqrt(dax * dax + day * day + daz * daz);
+
+            for (int b = 0; b < natm; ++b)
+            {
+                if (a == b) continue;
+                const VECTOR atom_b = atom_coords[b];
+                const double dbx = x - (double)atom_b.x;
+                const double dby = y - (double)atom_b.y;
+                const double dbz = z - (double)atom_b.z;
+                const double rb = sqrt(dbx * dbx + dby * dby + dbz * dbz);
+                const double abx = (double)atom_a.x - (double)atom_b.x;
+                const double aby = (double)atom_a.y - (double)atom_b.y;
+                const double abz = (double)atom_a.z - (double)atom_b.z;
+                const double rab = sqrt(abx * abx + aby * aby + abz * abz);
+                if (rab == 0.0 || !QC_XC_Double_Is_Finite(rab))
+                {
+                    QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
+                                         grid_offset + ig);
+                    valid = false;
+                    break;
+                }
+
+                const double mu = (ra - rb) / rab;
+                const double size_adjustment =
+                    QC_Becke_Size_Adjustment_Coefficient(
+                        covalent_radii[a], covalent_radii[b]);
+                const double adjusted_mu =
+                    mu + size_adjustment * (1.0 - mu * mu);
+                double shape = 0.0, shape_derivative = 0.0;
+                QC_Becke_Shape_And_Derivative(adjusted_mu, shape,
+                                              shape_derivative);
+                if (shape_derivative == 0.0) continue;
+                if (!(shape > 0.0) || ra == 0.0 || rb == 0.0 ||
+                    !QC_XC_Double_Is_Finite(ra) ||
+                    !QC_XC_Double_Is_Finite(rb))
+                {
+                    QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
+                                         grid_offset + ig);
+                    valid = false;
+                    break;
+                }
+
+                const double dlog_shape_dmu =
+                    (shape_derivative / shape) *
+                    (1.0 - 2.0 * size_adjustment * mu);
+                const double inverse_rab = 1.0 / rab;
+                const double uax = dax / ra, uay = day / ra, uaz = daz / ra;
+                const double ubx = dbx / rb, uby = dby / rb, ubz = dbz / rb;
+                const double hx = abx * inverse_rab;
+                const double hy = aby * inverse_rab;
+                const double hz = abz * inverse_rab;
+                const double scale =
+                    weighted_energy * coefficient * dlog_shape_dmu;
+                if (!QC_XC_Double_Is_Finite(scale))
+                {
+                    QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
+                                         grid_offset + ig);
+                    valid = false;
+                    break;
+                }
+
+                double response_a[3], response_b[3], response_grid[3];
+                QC_Becke_Pair_Response(
+                    scale, mu, inverse_rab, uax, uay, uaz, ubx, uby, ubz,
+                    hx, hy, hz, response_a, response_b, response_grid);
+                if (!QC_XC_Double_Is_Finite(response_a[0]) ||
+                    !QC_XC_Double_Is_Finite(response_a[1]) ||
+                    !QC_XC_Double_Is_Finite(response_a[2]) ||
+                    !QC_XC_Double_Is_Finite(response_b[0]) ||
+                    !QC_XC_Double_Is_Finite(response_b[1]) ||
+                    !QC_XC_Double_Is_Finite(response_b[2]) ||
+                    !QC_XC_Double_Is_Finite(response_grid[0]) ||
+                    !QC_XC_Double_Is_Finite(response_grid[1]) ||
+                    !QC_XC_Double_Is_Finite(response_grid[2]))
+                {
+                    QC_Record_XC_Failure(failure,
+                                         QC_XC_INVALID_GRID_RESPONSE,
+                                         grid_offset + ig);
+                    valid = false;
+                    break;
+                }
+
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    // Combining coincident targets avoids an unnecessary
+                    // extra atomic addition when the moving grid belongs to
+                    // one of the pair's nuclei.
+                    if (owner == a)
+                    {
+                        atomicAdd(&grad[a * 3 + axis], -response_b[axis]);
+                        atomicAdd(&grad[b * 3 + axis], response_b[axis]);
+                    }
+                    else if (owner == b)
+                    {
+                        atomicAdd(&grad[a * 3 + axis], response_a[axis]);
+                        atomicAdd(&grad[b * 3 + axis], -response_a[axis]);
+                    }
+                    else
+                    {
+                        atomicAdd(&grad[a * 3 + axis], response_a[axis]);
+                        atomicAdd(&grad[b * 3 + axis], response_b[axis]);
+                        atomicAdd(&grad[owner * 3 + axis],
+                                  response_grid[axis]);
+                    }
+                }
             }
         }
     }
@@ -186,10 +475,8 @@ static __global__ void QC_Build_W_Pao_TermA_Kernel(
     SIMPLE_DEVICE_FOR(idx, n_grid * nao)
     {
         const int g = idx % n_grid;
-        float val = 0.0f;
-        if (rho[g] >= 1e-20)
-            val = (float)(2.0 * weights[g] * vsigma[g]) * Pao[idx];
-        W_pao[idx] = val;
+        W_pao[idx] =
+            (float)(2.0 * weights[g] * vsigma[g]) * Pao[idx];
     }
 }
 
@@ -226,7 +513,10 @@ static void QC_Build_DFT_XC_Gradient_RKS_Impl(
     const int nao_c = mol.nao_cart;
     const int nao_s = mol.nao;
     const int nao = nao_s;
+    const int natm = mol.natm;
     const int nbas = mol.nbas;
+    const int points_per_atom =
+        dft.dft_radial_points * dft.dft_angular_points;
     const VECTOR* d_centers = mol.d_centers;
     const int* d_l_list = mol.d_l_list;
     const float* d_exps = mol.d_exps;
@@ -356,8 +646,23 @@ static void QC_Build_DFT_XC_Gradient_RKS_Impl(
         // 4. XC 泛函求值
         Launch_Device_Kernel(QC_Eval_XC_Derivs_Kernel,
                              (n_batch + threads - 1) / threads, threads, 0, 0,
-                             n_batch, (int)method, d_rho, d_sigma, d_exc,
-                             d_vrho, d_vsigma);
+                             n_batch, g0, (int)method, d_rho, d_sigma, d_exc,
+                             d_vrho, d_vsigma, dft.d_xc_failure);
+
+        // The molecular quadrature is atom-centred.  Its partition weights
+        // depend on every nuclear position, so this response is part of the
+        // same analytical XC derivative as the AO-centre terms below.
+        Launch_Device_Kernel(
+            QC_Build_Becke_Atom_Weights_Kernel,
+            (n_batch + threads - 1) / threads, threads, 0, 0, n_batch, g0,
+            natm, d_coords_batch, mol.d_atom_coords, dft.d_covalent_radii,
+            dft.d_becke_atom_weights, dft.d_xc_failure);
+        Launch_Device_Kernel(
+            QC_Accumulate_Becke_Grid_Response_Kernel,
+            (n_batch + threads - 1) / threads, threads, 0, 0, n_batch, g0,
+            points_per_atom, natm, d_coords_batch, d_weights_batch, d_exc,
+            mol.d_atom_coords, dft.d_covalent_radii,
+            dft.d_becke_atom_weights, d_grad, dft.d_xc_failure);
 
         // 步骤 5-6: XC 梯度特有
 
@@ -406,8 +711,9 @@ static void QC_Build_DFT_XC_Gradient_RKS_Impl(
         // 6. 累加到原子梯度 (主项: v_ρ + GGA term b)
         Launch_Device_Kernel(
             QC_XC_Grad_Accumulate_Kernel, (n_batch + threads - 1) / threads,
-            threads, 0, 0, n_batch, nao, nbas, d_shell_atom, d_ao_offsets_grad,
-            d_gx_norm, d_gy_norm, d_gz_norm, d_W_pao, d_grad);
+            threads, 0, 0, n_batch, g0, points_per_atom, natm, nao, nbas,
+            d_shell_atom, d_ao_offsets_grad, d_gx_norm, d_gy_norm, d_gz_norm,
+            d_W_pao, d_grad, dft.d_xc_failure);
 
         // 7. GGA term(a): AO Hessian · ∇ρ 贡献
         if (is_gga)
@@ -468,9 +774,10 @@ static void QC_Build_DFT_XC_Gradient_RKS_Impl(
             // 7d. 累加到原子梯度
             Launch_Device_Kernel(QC_XC_Grad_Accumulate_Kernel,
                                  (n_batch + threads - 1) / threads, threads, 0,
-                                 0, n_batch, nao, nbas, d_shell_atom,
-                                 d_ao_offsets_grad, d_gx_norm, d_gy_norm,
-                                 d_gz_norm, d_W_pao, d_grad);
+                                 0, n_batch, g0, points_per_atom, natm, nao,
+                                 nbas, d_shell_atom, d_ao_offsets_grad,
+                                 d_gx_norm, d_gy_norm, d_gz_norm, d_W_pao,
+                                 d_grad, dft.d_xc_failure);
         }
     }
 }
@@ -483,6 +790,7 @@ static void QC_Build_DFT_XC_Gradient_RKS(
     const int* d_ao_offsets_grad, float* d_W_pao, float* d_GPao_scratch,
     double* d_grad)
 {
+    deviceMemset(dft.d_xc_failure, 0, 2 * sizeof(int));
     QC_Build_DFT_XC_Gradient_RKS_Impl<1>(
         blas_handle, method, mol, dft, cart2sph, d_norms, d_P, d_shell_atom,
         d_ao_offsets_grad, d_W_pao, d_GPao_scratch, d_grad);
@@ -515,12 +823,8 @@ static __global__ void QC_Build_W_Pao_UKS_Kernel(
     SIMPLE_DEVICE_FOR(idx, n_grid * nao)
     {
         const int g = idx % n_grid;
-        float val = 0.0f;
-        if (rho_total[g] >= 1e-20)
-        {
-            val = (float)(weights[g] * vrho_spin[g]) * Pao_spin[idx];
-            if (is_gga) val += (float)weights[g] * GPao_scratch[idx];
-        }
+        float val = (float)(weights[g] * vrho_spin[g]) * Pao_spin[idx];
+        if (is_gga) val += (float)weights[g] * GPao_scratch[idx];
         W_pao[idx] = val;
     }
 }
@@ -533,8 +837,7 @@ static __global__ void QC_Build_W_Pao_TermA_UKS_Kernel(
     SIMPLE_DEVICE_FOR(idx, n_grid * nao)
     {
         const int g = idx % n_grid;
-        W_pao[idx] =
-            (rho_total[g] >= 1e-20) ? (float)weights[g] * Pao_spin[idx] : 0.0f;
+        W_pao[idx] = (float)weights[g] * Pao_spin[idx];
     }
 }
 
@@ -543,18 +846,23 @@ static void QC_Build_DFT_XC_Gradient_UKS(
     QC_DFT& dft, const QC_CARTESIAN_TO_SPHERICAL& cart2sph,
     const float* d_norms, const float* d_Pa, const float* d_Pb,
     const int* d_shell_atom, const int* d_ao_offsets_grad, float* d_W_pao,
-    float* d_GPao_scratch, double* d_grad)
+    float* d_GPao_scratch, double* d_grad, int alpha_active,
+    int beta_active)
 {
     const int nao = mol.nao;
     if (dft.max_grid_size <= 0) return;
     const int batch_size = std::max(1, dft.grid_batch_size);
     const int threads = 128;
     const bool is_gga = (method != QC_METHOD::LDA);
+    deviceMemset(dft.d_xc_failure, 0, 2 * sizeof(int));
 
     // 局部别名简化内核调用
     const int is_spherical = mol.is_spherical;
     const int nao_c = mol.nao_cart, nao_s = mol.nao;
+    const int natm = mol.natm;
     const int nbas = mol.nbas;
+    const int points_per_atom =
+        dft.dft_radial_points * dft.dft_angular_points;
     const float* d_grid_coords = dft.d_grid_coords;
     const float* d_grid_weights = dft.d_grid_weights;
     const float* d_cart2sph_mat = cart2sph.d_cart2sph_mat;
@@ -678,9 +986,22 @@ static void QC_Build_DFT_XC_Gradient_UKS(
         // 4. UKS XC 泛函求值
         Launch_Device_Kernel(QC_Eval_XC_UKS_Kernel,
                              (n_batch + threads - 1) / threads, threads, 0, 0,
-                             n_batch, (int)method, d_rho_a, d_rho_b, d_sigma_aa,
-                             d_sigma_ab, d_sigma_bb, d_exc, d_vra, d_vrb,
-                             d_vsaa, d_vsab, d_vsbb);
+                             n_batch, g0, (int)method, alpha_active, beta_active,
+                             d_rho_a, d_rho_b, d_sigma_aa, d_sigma_ab,
+                             d_sigma_bb, d_exc, d_vra, d_vrb, d_vsaa, d_vsab,
+                             d_vsbb, dft.d_xc_failure);
+
+        Launch_Device_Kernel(
+            QC_Build_Becke_Atom_Weights_Kernel,
+            (n_batch + threads - 1) / threads, threads, 0, 0, n_batch, g0,
+            natm, d_coords_batch, mol.d_atom_coords, dft.d_covalent_radii,
+            dft.d_becke_atom_weights, dft.d_xc_failure);
+        Launch_Device_Kernel(
+            QC_Accumulate_Becke_Grid_Response_Kernel,
+            (n_batch + threads - 1) / threads, threads, 0, 0, n_batch, g0,
+            points_per_atom, natm, d_coords_batch, d_weights_batch, d_exc,
+            mol.d_atom_coords, dft.d_covalent_radii,
+            dft.d_becke_atom_weights, d_grad, dft.d_xc_failure);
 
         // 用 d_rho_a 临时存储 rho_total = rho_a + rho_b (用于密度截断)
         // 注意：这会覆盖 d_rho_a，但后面不再使用 rho_a 的值
@@ -759,9 +1080,10 @@ static void QC_Build_DFT_XC_Gradient_UKS(
             // 7. 累加主项 + term b
             Launch_Device_Kernel(QC_XC_Grad_Accumulate_Kernel,
                                  (n_batch + threads - 1) / threads, threads, 0,
-                                 0, n_batch, nao, nbas, d_shell_atom,
-                                 d_ao_offsets_grad, d_gx_norm, d_gy_norm,
-                                 d_gz_norm, d_W_pao, d_grad);
+                                 0, n_batch, g0, points_per_atom, natm, nao,
+                                 nbas, d_shell_atom, d_ao_offsets_grad,
+                                 d_gx_norm, d_gy_norm, d_gz_norm, d_W_pao,
+                                 d_grad, dft.d_xc_failure);
 
             // 8. GGA term a: Hessian with eff_grad
             if (is_gga)
@@ -824,9 +1146,11 @@ static void QC_Build_DFT_XC_Gradient_UKS(
 
                 Launch_Device_Kernel(QC_XC_Grad_Accumulate_Kernel,
                                      (n_batch + threads - 1) / threads, threads,
-                                     0, 0, n_batch, nao, nbas, d_shell_atom,
+                                     0, 0, n_batch, g0, points_per_atom, natm,
+                                     nao, nbas, d_shell_atom,
                                      d_ao_offsets_grad, d_hx_norm, d_hy_norm,
-                                     d_hz_norm, d_W_pao, d_grad);
+                                     d_hz_norm, d_W_pao, d_grad,
+                                     dft.d_xc_failure);
             }
         }
     }

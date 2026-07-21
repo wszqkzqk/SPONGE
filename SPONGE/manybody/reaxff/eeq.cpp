@@ -1,6 +1,9 @@
 ﻿#include "eeq.h"
 
-#define COULOMB_CONSTANT (332.05221729f)
+#include "atom_identity.h"
+#include "reaxff_geometry.h"
+#include "reaxff_input.h"
+
 #ifdef USE_CPU
 #define EEQ_SIMPLE_DEVICE_FOR(i, N)                           \
     PRAGMA(omp parallel for schedule(static) if ((N) >= 512)) \
@@ -26,151 +29,120 @@ void REAXFF_EEQ::Initial(CONTROLLER* controller, int atom_numbers,
         return;
     }
 
-    this->atom_numbers = atom_numbers;
     controller->printf("START INITIALIZING REAXFF_EEQ\n");
-
-    FILE* fp_p;
-    Open_File_Safely(&fp_p, parameter_in_file, "r");
-    char line[1024];
-    auto throw_bad_format = [&](const char* file_name, const char* reason)
+    REAXFF_INPUT_ERROR input_error;
+    REAXFF_FORCE_FIELD_IR force_field;
+    if (!ReaxFF_Parse_Force_Field_File(parameter_in_file, &force_field,
+                                       &input_error))
     {
-        char error_msg[1024];
-        sprintf(error_msg, "Reason:\n\t%s in file %s\n", reason, file_name);
-        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
-                                       "REAXFF_EEQ::Initial", error_msg);
-    };
-    auto read_line_or_throw =
-        [&](FILE* file, const char* file_name, const char* stage)
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_EEQ::Initial", "Reason:\n\t%s", reason.c_str());
+        return;
+    }
+    std::vector<int> atom_type;
+    if (!ReaxFF_Parse_Type_File_Path(type_in_file, atom_numbers, force_field,
+                                     &atom_type, NULL, &input_error))
     {
-        if (fgets(line, 1024, file) == NULL)
-        {
-            char reason[512];
-            sprintf(reason, "failed to read %s", stage);
-            throw_bad_format(file_name, reason);
-        }
-    };
-
-    read_line_or_throw(fp_p, parameter_in_file, "parameter header line 1");
-    read_line_or_throw(fp_p, parameter_in_file, "general parameter count line");
-    int n_gen_params = 0;
-    if (sscanf(line, "%d", &n_gen_params) != 1)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of general parameters");
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_EEQ::Initial", "Reason:\n\t%s", reason.c_str());
+        return;
     }
 
-    for (int i = 0; i < n_gen_params; i++)
+    const int n_atom_types = static_cast<int>(force_field.atom_types.size());
+    int pair_parameter_count = 0;
+    if (!ReaxFF_Checked_Dense_Table_Count(
+            n_atom_types, 2, sizeof(float), &pair_parameter_count))
     {
-        read_line_or_throw(fp_p, parameter_in_file, "general parameter block");
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_EEQ::Initial",
+            "Reason:\n\tatom type count %d exceeds the supported EEQ pair "
+            "table extent in file %s",
+            n_atom_types, parameter_in_file);
+        return;
     }
 
-    read_line_or_throw(fp_p, parameter_in_file, "atom type count line");
-    int n_atom_types = 0;
-    if (sscanf(line, "%d", &n_atom_types) != 1)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of atom types");
-    }
-    this->atom_type_numbers = n_atom_types;
-
-    read_line_or_throw(fp_p, parameter_in_file, "atom type header line 1");
-    read_line_or_throw(fp_p, parameter_in_file, "atom type header line 2");
-    read_line_or_throw(fp_p, parameter_in_file, "atom type header line 3");
-
-    std::map<std::string, int> type_map;
-    Malloc_Safely((void**)&h_chi, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_eta, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_gamma, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_shield,
-                  sizeof(float) * n_atom_types * n_atom_types);
-
+    std::vector<float> chi(n_atom_types);
+    std::vector<float> eta(n_atom_types);
+    std::vector<float> gamma(n_atom_types);
+    std::vector<float> shield(pair_parameter_count);
     for (int i = 0; i < n_atom_types; i++)
     {
-        char atom_name[16];
-        float dummy;
-
-        read_line_or_throw(fp_p, parameter_in_file,
-                           "atom type parameter line 1");
-        if (sscanf(line, "%s %f %f %f %f %f %f %f %f", atom_name, &dummy,
-                   &dummy, &dummy, &dummy, &dummy, &h_gamma[i], &dummy,
-                   &dummy) != 9)
+        const REAXFF_ATOM_TYPE_IR& atom = force_field.atom_types[i];
+        gamma[i] = atom.values[0][5];
+        chi[i] = atom.values[1][5] * CONSTANT_EV_TO_KCAL_MOL;
+        eta[i] = atom.values[1][6] * CONSTANT_EV_TO_KCAL_MOL * 2.0f;
+        if (!Float_Memory_Is_Finite(&chi[i]) ||
+            !Float_Memory_Is_Finite(&eta[i]) || !(eta[i] > 0.0f) ||
+            !Float_Memory_Is_Finite(&gamma[i]) || !(gamma[i] > 0.0f))
         {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 1 for type index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat, "REAXFF_EEQ::Initial",
+                "Reason:\n\tEEQ parameters for atom type %d must remain "
+                "finite and eta/gamma must be positive in file %s",
+                i + 1, parameter_in_file);
+            return;
         }
-        type_map[std::string(atom_name)] = i;
-
-        read_line_or_throw(fp_p, parameter_in_file,
-                           "atom type parameter line 2");
-        if (sscanf(line, "%f %f %f %f %f %f %f", &dummy, &dummy, &dummy, &dummy,
-                   &dummy, &h_chi[i], &h_eta[i]) != 7)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 2 for type index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-
-        h_chi[i] *= CONSTANT_EV_TO_KCAL_MOL;
-        h_eta[i] *= CONSTANT_EV_TO_KCAL_MOL * 2.0f;
-
-        read_line_or_throw(fp_p, parameter_in_file,
-                           "atom type parameter line 3");
-        read_line_or_throw(fp_p, parameter_in_file,
-                           "atom type parameter line 4");
     }
-    fclose(fp_p);
-
-    FILE* fp_t;
-    Open_File_Safely(&fp_t, type_in_file, "r");
-    int check_atom_numbers = 0;
-    read_line_or_throw(fp_t, type_in_file, "atom number line");
-    if (sscanf(line, "%d", &check_atom_numbers) != 1)
-    {
-        throw_bad_format(type_in_file, "failed to parse atom numbers");
-    }
-    if (check_atom_numbers != atom_numbers)
-    {
-        char reason[512];
-        sprintf(reason, "atom numbers (%d) does not match system (%d)",
-                check_atom_numbers, atom_numbers);
-        throw_bad_format(type_in_file, reason);
-    }
-
-    Malloc_Safely((void**)&h_atom_type, sizeof(int) * atom_numbers);
-    for (int i = 0; i < atom_numbers; i++)
-    {
-        char type_name[16];
-        read_line_or_throw(fp_t, type_in_file, "atom type entry line");
-        if (sscanf(line, "%s", type_name) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse atom type at index %d", i + 1);
-            throw_bad_format(type_in_file, reason);
-        }
-        if (type_map.find(std::string(type_name)) == type_map.end())
-        {
-            char reason[512];
-            sprintf(reason, "atom type %s not found in parameter file %s",
-                    type_name, parameter_in_file);
-            throw_bad_format(type_in_file, reason);
-        }
-        h_atom_type[i] = type_map[std::string(type_name)];
-    }
-    fclose(fp_t);
-
     for (int i = 0; i < n_atom_types; i++)
     {
         for (int j = 0; j < n_atom_types; j++)
         {
-            h_shield[i * n_atom_types + j] =
-                powf(h_gamma[i] * h_gamma[j], -1.5f);
+            const double gamma_product =
+                static_cast<double>(gamma[i]) * static_cast<double>(gamma[j]);
+            const double shield_double = pow(gamma_product, -1.5);
+            const float shield_value = static_cast<float>(shield_double);
+            if (!(gamma_product > 0.0) ||
+                !Double_Memory_Is_Finite(&gamma_product) ||
+                !(shield_double > 0.0) ||
+                !Double_Memory_Is_Finite(&shield_double) ||
+                !(shield_value > 0.0f) ||
+                !Float_Memory_Is_Finite(&shield_value))
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "REAXFF_EEQ::Initial",
+                    "Reason:\n\tEEQ shielding parameters produce a "
+                    "non-positive or unrepresentable value in file %s",
+                    parameter_in_file);
+                return;
+            }
+            shield[i * n_atom_types + j] = shield_value;
         }
     }
+
+    float* staged_chi = NULL;
+    float* staged_eta = NULL;
+    float* staged_gamma = NULL;
+    float* staged_shield = NULL;
+    int* staged_atom_type = NULL;
+    Malloc_Safely((void**)&staged_chi, sizeof(float) * n_atom_types);
+    Malloc_Safely((void**)&staged_eta, sizeof(float) * n_atom_types);
+    Malloc_Safely((void**)&staged_gamma, sizeof(float) * n_atom_types);
+    Malloc_Safely((void**)&staged_shield,
+                  sizeof(float) * pair_parameter_count);
+    Malloc_Safely((void**)&staged_atom_type, sizeof(int) * atom_numbers);
+    memcpy(staged_chi, chi.data(), sizeof(float) * n_atom_types);
+    memcpy(staged_eta, eta.data(), sizeof(float) * n_atom_types);
+    memcpy(staged_gamma, gamma.data(), sizeof(float) * n_atom_types);
+    memcpy(staged_shield, shield.data(),
+           sizeof(float) * pair_parameter_count);
+    memcpy(staged_atom_type, atom_type.data(), sizeof(int) * atom_numbers);
+
+    this->controller = controller;
+    this->atom_numbers = atom_numbers;
+    this->atom_type_numbers = n_atom_types;
+    h_chi = staged_chi;
+    h_eta = staged_eta;
+    h_gamma = staged_gamma;
+    h_shield = staged_shield;
+    h_atom_type = staged_atom_type;
 
     Device_Malloc_And_Copy_Safely((void**)&d_chi, h_chi,
                                   sizeof(float) * n_atom_types);
@@ -179,9 +151,10 @@ void REAXFF_EEQ::Initial(CONTROLLER* controller, int atom_numbers,
     Device_Malloc_And_Copy_Safely((void**)&d_gamma, h_gamma,
                                   sizeof(float) * n_atom_types);
     Device_Malloc_And_Copy_Safely((void**)&d_shield, h_shield,
-                                  sizeof(float) * n_atom_types * n_atom_types);
-    Device_Malloc_And_Copy_Safely((void**)&d_atom_type, h_atom_type,
+                                  sizeof(float) * pair_parameter_count);
+    Device_Malloc_And_Copy_Safely((void**)&d_atom_type_global, h_atom_type,
                                   sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_atom_type, sizeof(int) * atom_numbers);
 
     Device_Malloc_Safely((void**)&d_b, sizeof(float) * atom_numbers);
     Device_Malloc_Safely((void**)&d_r, sizeof(float) * atom_numbers);
@@ -207,6 +180,7 @@ void REAXFF_EEQ::Initial(CONTROLLER* controller, int atom_numbers,
     Device_Malloc_Safely((void**)&d_pAp_buf, sizeof(float));
     Device_Malloc_Safely((void**)&d_cg_alpha, sizeof(float));
     Device_Malloc_Safely((void**)&d_cg_beta, sizeof(float));
+    Device_Malloc_Safely((void**)&d_solver_error, sizeof(int));
 
     // Charge history for extrapolation
     Device_Malloc_Safely((void**)&d_s_hist,
@@ -306,8 +280,8 @@ static __global__ void EEQ_Fill_H_Matrix(
                     20.0f * x7 - 70.0f * x6 + 84.0f * x5 - 35.0f * x4 + 1.0f;
                 float shield_ij = shield[type_i * atom_type_numbers + type_j];
                 jlist[write_idx] = atom_j;
-                h_val[write_idx] =
-                    taper * (COULOMB_CONSTANT / cbrtf(r2 * r + shield_ij));
+                h_val[write_idx] = taper * (ReaxFFEEQ::COULOMB_CONSTANT /
+                                            cbrtf(r2 * r + shield_ij));
                 write_idx++;
             }
         }
@@ -465,22 +439,6 @@ static const float EXTRAP_COEFFS[5][5] = {
     {1.0f, -5.0f, 10.0f, -10.0f, 5.0f},
 };
 
-static __global__ void Extrapolate_Vector_Kernel(int n, float* out,
-                                                 const float* hist, int stride,
-                                                 int nprev, float c0, float c1,
-                                                 float c2, float c3, float c4)
-{
-    EEQ_SIMPLE_DEVICE_FOR(i, n)
-    {
-        float val = c0 * hist[i];
-        if (nprev >= 2) val += c1 * hist[stride + i];
-        if (nprev >= 3) val += c2 * hist[2 * stride + i];
-        if (nprev >= 4) val += c3 * hist[3 * stride + i];
-        if (nprev >= 5) val += c4 * hist[4 * stride + i];
-        out[i] = val;
-    }
-}
-
 // Jacobi preconditioner: z[i] = r[i] / eta[type_i]
 static __global__ void Jacobi_Precondition(int n, float* z, const float* r,
                                            const float* eta,
@@ -518,7 +476,10 @@ static __global__ void EEQ_Calculate_Force_Kernel(
     {
         int type_i = atom_types[i];
         float qi = d_charge[i];
-        if (fabsf(qi) >= 1e-10f)
+        // An exactly neutral site has no pair force.  Tiny nonzero EEQ
+        // charges are still part of the Hamiltonian and must not be silently
+        // truncated.
+        if (qi != 0.0f)
         {
             ATOM_GROUP nl_i = nl[i];
             VECTOR ri = crd[i];
@@ -529,63 +490,29 @@ static __global__ void EEQ_Calculate_Force_Kernel(
                 if (atom_j <= i) continue;
 
                 float qj = d_charge[atom_j];
-                if (fabsf(qj) < 1e-10f) continue;
+                if (qj == 0.0f) continue;
 
                 int type_j = atom_types[atom_j];
 
                 VECTOR rj = crd[atom_j];
                 VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-                float r2 = drij.x * drij.x + drij.y * drij.y + drij.z * drij.z;
-                float r = sqrtf(r2);
+                const float shield_ij =
+                    shield[type_i * atom_type_numbers + type_j];
+                const ReaxFFEEQ::Pair_Force_Result pair =
+                    ReaxFFEEQ::Evaluate_Pair_Force(drij, qi, qj, shield_ij,
+                                                   cutoff);
+                const VECTOR fij = pair.force;
 
-                if (r < cutoff)
+                atomicAdd(&frc[i].x, fij.x);
+                atomicAdd(&frc[i].y, fij.y);
+                atomicAdd(&frc[i].z, fij.z);
+                atomicAdd(&frc[atom_j].x, -fij.x);
+                atomicAdd(&frc[atom_j].y, -fij.y);
+                atomicAdd(&frc[atom_j].z, -fij.z);
+                if (atom_virial)
                 {
-                    float inv_cutoff = 1.0f / cutoff;
-                    float x = r * inv_cutoff;
-                    float x2 = x * x;
-                    float x4 = x2 * x2;
-                    float x5 = x4 * x;
-                    float x6 = x5 * x;
-                    float x7 = x6 * x;
-
-                    // Taper: T(x) = 20x^7 - 70x^6 + 84x^5 - 35x^4 + 1
-                    float taper_val = 20.0f * x7 - 70.0f * x6 + 84.0f * x5 -
-                                      35.0f * x4 + 1.0f;
-                    // dT/dr = (1/cutoff) * (140x^6 - 420x^5 + 420x^4 - 140x^3)
-                    float x3 = x2 * x;
-                    float dtaper_dr = inv_cutoff * (140.0f * x6 - 420.0f * x5 +
-                                                    420.0f * x4 - 140.0f * x3);
-
-                    float shield_ij =
-                        shield[type_i * atom_type_numbers + type_j];
-                    float u = r2 * r + shield_ij;  // r^3 + shield
-                    float u_cbrt = cbrtf(u);       // u^(1/3)
-                    float inv_u_cbrt = 1.0f / u_cbrt;
-
-                    // H = taper * C / u^(1/3)
-                    // dH/dr = C * (dtaper/dr / u^(1/3) - taper * r^2 / u^(4/3))
-                    float dH_dr =
-                        COULOMB_CONSTANT * (dtaper_dr * inv_u_cbrt -
-                                            taper_val * r2 * inv_u_cbrt / u);
-
-                    float force_mag = -qi * qj * dH_dr / r;
-
-                    float fx = force_mag * drij.x;
-                    float fy = force_mag * drij.y;
-                    float fz = force_mag * drij.z;
-
-                    atomicAdd(&frc[i].x, fx);
-                    atomicAdd(&frc[i].y, fy);
-                    atomicAdd(&frc[i].z, fz);
-                    atomicAdd(&frc[atom_j].x, -fx);
-                    atomicAdd(&frc[atom_j].y, -fy);
-                    atomicAdd(&frc[atom_j].z, -fz);
-                    if (atom_virial)
-                    {
-                        VECTOR fij = {fx, fy, fz};
-                        atomicAdd(atom_virial + i,
-                                  Get_Virial_From_Force_Dis(fij, drij));
-                    }
+                    atomicAdd(atom_virial + i,
+                              Get_Virial_From_Force_Dis(fij, drij));
                 }
             }
         }
@@ -622,24 +549,90 @@ static __global__ void EEQ_Calculate_Eele_Kernel(int n, float* out,
 // =====================================================================
 #ifndef USE_CPU
 
+enum EEQ_SOLVER_ERROR
+{
+    EEQ_SOLVER_OK = 0,
+    EEQ_SOLVER_NONFINITE = 1,
+    EEQ_SOLVER_BREAKDOWN = 2
+};
+
 static __global__ void CG_Compute_Alpha_Kernel(const float* rr_old,
-                                               const float* pAp, float* alpha)
+                                               const float* pAp, float* alpha,
+                                               float tolerance_squared,
+                                               int* solver_error)
 {
     if (threadIdx.x == 0 && blockIdx.x == 0)
     {
-        float b = *pAp;
-        *alpha = (b != 0.0f) ? *rr_old / b : 0.0f;
+        const float numerator = *rr_old;
+        const float denominator = *pAp;
+        if (!ReaxFF_Float_Is_Finite(numerator) ||
+            !ReaxFF_Float_Is_Finite(denominator))
+        {
+            *solver_error = EEQ_SOLVER_NONFINITE;
+            *alpha = 0.0f;
+        }
+        else if (fabsf(numerator) <= tolerance_squared)
+        {
+            *alpha = 0.0f;
+        }
+        else if (!(denominator > 0.0f))
+        {
+            *solver_error = EEQ_SOLVER_BREAKDOWN;
+            *alpha = 0.0f;
+        }
+        else
+        {
+            const float value = numerator / denominator;
+            if (!ReaxFF_Float_Is_Finite(value))
+            {
+                *solver_error = EEQ_SOLVER_NONFINITE;
+                *alpha = 0.0f;
+            }
+            else
+            {
+                *alpha = value;
+            }
+        }
     }
 }
 
 static __global__ void CG_Compute_Beta_Kernel(float* rr_old,
-                                              const float* rr_new, float* beta)
+                                              const float* rr_new, float* beta,
+                                              float tolerance_squared,
+                                              int* solver_error)
 {
     if (threadIdx.x == 0 && blockIdx.x == 0)
     {
-        float old_val = *rr_old;
-        float new_val = *rr_new;
-        *beta = (old_val != 0.0f) ? new_val / old_val : 0.0f;
+        const float old_val = *rr_old;
+        const float new_val = *rr_new;
+        if (!ReaxFF_Float_Is_Finite(old_val) ||
+            !ReaxFF_Float_Is_Finite(new_val))
+        {
+            *solver_error = EEQ_SOLVER_NONFINITE;
+            *beta = 0.0f;
+        }
+        else if (fabsf(new_val) <= tolerance_squared)
+        {
+            *beta = 0.0f;
+        }
+        else if (!(old_val > 0.0f) || !(new_val >= 0.0f))
+        {
+            *solver_error = EEQ_SOLVER_BREAKDOWN;
+            *beta = 0.0f;
+        }
+        else
+        {
+            const float value = new_val / old_val;
+            if (!ReaxFF_Float_Is_Finite(value))
+            {
+                *solver_error = EEQ_SOLVER_NONFINITE;
+                *beta = 0.0f;
+            }
+            else
+            {
+                *beta = value;
+            }
+        }
         *rr_old = new_val;
     }
 }
@@ -674,17 +667,42 @@ static __global__ void CG_Update_P_Kernel(int n, float* p, const float* r,
 // Calculate_Charges implementation
 // =====================================================================
 
-void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
-                                   const VECTOR* d_crd, const LTMatrix3 cell,
+void REAXFF_EEQ::Calculate_Charges(int atom_numbers, const int* atom_local,
+                                   float* d_charge, const VECTOR* d_crd,
+                                   const LTMatrix3 cell,
                                    const LTMatrix3 rcell,
                                    const ATOM_GROUP* fnl_d_nl, float cutoff,
                                    float* d_energy, VECTOR* frc,
                                    int need_virial, LTMatrix3* atom_virial)
 {
     if (!is_initialized || fnl_d_nl == NULL) return;
+    if (atom_numbers != this->atom_numbers || atom_numbers <= 0 ||
+        atom_local == NULL || d_charge == NULL || d_crd == NULL ||
+        !(cutoff > 0.0f) || !Float_Memory_Is_Finite(&cutoff))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "REAXFF_EEQ::Calculate_Charges",
+            "Invalid staged EEQ evaluation: local/global atom counts are "
+            "%d/%d, local-to-global map=%p, staged charge=%p, coordinates=%p, "
+            "and cutoff=%g.",
+            atom_numbers, this->atom_numbers,
+            static_cast<const void*>(atom_local), static_cast<void*>(d_charge),
+            static_cast<const void*>(d_crd), cutoff);
+        return;
+    }
 
     dim3 blockSize = {std::min(160u, CONTROLLER::device_max_thread)};
     dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
+    const float tolerance_squared = tolerance * tolerance;
+    if (!(tolerance > 0.0f) || !Float_Memory_Is_Finite(&tolerance) ||
+        !(tolerance_squared > 0.0f) ||
+        !Float_Memory_Is_Finite(&tolerance_squared) || max_iter <= 0)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "REAXFF_EEQ::Calculate_Charges",
+            "Invalid EEQ solver controls: tolerance=%g and max_iter=%d.",
+            tolerance, max_iter);
+    }
 
     // ---- Build H matrix CSR ----
     Launch_Device_Kernel(EEQ_Count_H_Matrix_Entries, gridSize, blockSize, 0,
@@ -697,19 +715,40 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     {
         thrust::device_ptr<int> d_numnbrs_ptr(d_h_numnbrs);
         thrust::device_ptr<int> d_firstnbrs_ptr(d_h_firstnbrs);
+        const long long total_nnz_wide = thrust::reduce(
+            d_numnbrs_ptr, d_numnbrs_ptr + atom_numbers, 0LL,
+            thrust::plus<long long>());
+        if (total_nnz_wide < 0 || total_nnz_wide > INT_MAX)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorOverflow, "REAXFF_EEQ::Calculate_Charges",
+                "EEQ sparse matrix requires %lld entries, exceeding the "
+                "signed-int CSR limit.",
+                total_nnz_wide);
+        }
+        total_nnz = static_cast<int>(total_nnz_wide);
         thrust::exclusive_scan(d_numnbrs_ptr, d_numnbrs_ptr + atom_numbers,
                                d_firstnbrs_ptr);
-        total_nnz =
-            (int)thrust::reduce(d_numnbrs_ptr, d_numnbrs_ptr + atom_numbers);
     }
 #else
     deviceMemcpy(h_h_numnbrs, d_h_numnbrs, sizeof(int) * atom_numbers,
                  deviceMemcpyDeviceToHost);
+    long long total_nnz_wide = 0;
     for (int i = 0; i < atom_numbers; i++)
     {
-        h_h_firstnbrs[i] = total_nnz;
-        total_nnz += h_h_numnbrs[i];
+        if (h_h_numnbrs[i] < 0 ||
+            total_nnz_wide > INT_MAX - h_h_numnbrs[i])
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorOverflow, "REAXFF_EEQ::Calculate_Charges",
+                "EEQ sparse-matrix row %d makes the signed-int CSR count "
+                "unrepresentable (prefix=%lld, row=%d).",
+                i, total_nnz_wide, h_h_numnbrs[i]);
+        }
+        h_h_firstnbrs[i] = static_cast<int>(total_nnz_wide);
+        total_nnz_wide += h_h_numnbrs[i];
     }
+    total_nnz = static_cast<int>(total_nnz_wide);
     deviceMemcpy(d_h_firstnbrs, h_h_firstnbrs, sizeof(int) * atom_numbers,
                  deviceMemcpyHostToDevice);
 #endif
@@ -738,7 +777,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     // ---- CG solver ----
 #ifndef USE_CPU
     // GPU path: Jacobi-preconditioned CG, device-side scalars
-    auto solve = [&](float* x, float* b_in, bool warm)
+    auto solve = [&](float* x, float* b_in, bool warm, const char* system_name)
     {
         if (!warm)
         {
@@ -757,11 +796,13 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
         }
 
         deviceMemset(d_rr_old, 0, sizeof(float));
+        deviceMemset(d_solver_error, 0, sizeof(int));
         Initialize_Preconditioned_CG_State<<<gridSize, blockSize>>>(
             atom_numbers, d_r, d_z, d_p, d_eta, d_atom_type, d_rr_old);
 
         const int check_interval = 5;
         float h_rz = 0;
+        bool converged = false;
 
         for (int iter = 0; iter < max_iter; iter++)
         {
@@ -770,7 +811,12 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
             {
                 deviceMemcpy(&h_rz, d_rr_old, sizeof(float),
                              deviceMemcpyDeviceToHost);
-                if (fabsf(h_rz) < tolerance * tolerance) break;
+                if (!Float_Memory_Is_Finite(&h_rz) || !(h_rz >= 0.0f)) break;
+                if (h_rz <= tolerance_squared)
+                {
+                    converged = true;
+                    break;
+                }
             }
 
             Launch_Device_Kernel(EEQ_Matrix_Vector_Multiply, gridSize,
@@ -783,7 +829,9 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                 atom_numbers, d_p, d_Ap, d_pAp_buf);
 
             // alpha = rz_old / pAp (on device)
-            CG_Compute_Alpha_Kernel<<<1, 1>>>(d_rr_old, d_pAp_buf, d_cg_alpha);
+            CG_Compute_Alpha_Kernel<<<1, 1>>>(
+                d_rr_old, d_pAp_buf, d_cg_alpha, tolerance_squared,
+                d_solver_error);
 
             deviceMemset(d_rr_new, 0, sizeof(float));
             Update_X_R_Precondition_Dot_Kernel<<<gridSize, blockSize>>>(
@@ -791,16 +839,37 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                 d_cg_alpha, d_rr_new);
 
             // beta = rz_new/rz_old, rz_old = rz_new (on device)
-            CG_Compute_Beta_Kernel<<<1, 1>>>(d_rr_old, d_rr_new, d_cg_beta);
+            CG_Compute_Beta_Kernel<<<1, 1>>>(
+                d_rr_old, d_rr_new, d_cg_beta, tolerance_squared,
+                d_solver_error);
 
             // p = z + beta*p
             CG_Update_P_Kernel<<<gridSize, blockSize>>>(atom_numbers, d_p, d_z,
                                                         d_cg_beta);
         }
+
+        int solver_error = EEQ_SOLVER_OK;
+        deviceMemcpy(&h_rz, d_rr_old, sizeof(float), deviceMemcpyDeviceToHost);
+        deviceMemcpy(&solver_error, d_solver_error, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        converged = converged ||
+                    (solver_error == EEQ_SOLVER_OK &&
+                     Float_Memory_Is_Finite(&h_rz) && h_rz >= 0.0f &&
+                     h_rz <= tolerance_squared);
+        if (!converged || solver_error != EEQ_SOLVER_OK)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorSimulationBreakDown,
+                "REAXFF_EEQ::Calculate_Charges",
+                "EEQ %s solve failed to converge to a finite residual: "
+                "rM^-1r=%g, tolerance^2=%g, solver_error=%d, max_iter=%d. "
+                "No staged result was published.",
+                system_name, h_rz, tolerance_squared, solver_error, max_iter);
+        }
     };
 #else
     // CPU path: Jacobi-preconditioned CG with host-side scalars
-    auto solve = [&](float* x, float* b_in, bool warm)
+    auto solve = [&](float* x, float* b_in, bool warm, const char* system_name)
     {
         if (!warm)
         {
@@ -831,10 +900,12 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
         Sum_Of_List(d_q, d_temp_sum, atom_numbers);
         deviceMemcpy(&rz_old, d_temp_sum, sizeof(float),
                      deviceMemcpyDeviceToHost);
+        bool converged = Float_Memory_Is_Finite(&rz_old) && rz_old >= 0.0f &&
+                         rz_old <= tolerance_squared;
 
-        for (int iter = 0; iter < max_iter; iter++)
+        for (int iter = 0; iter < max_iter && !converged; iter++)
         {
-            if (fabsf(rz_old) < tolerance * tolerance) break;
+            if (!Float_Memory_Is_Finite(&rz_old) || !(rz_old >= 0.0f)) break;
 
             Launch_Device_Kernel(EEQ_Matrix_Vector_Multiply, gridSize,
                                  blockSize, 0, NULL, atom_numbers,
@@ -848,7 +919,10 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
             deviceMemcpy(&p_dot_Ap, d_temp_sum, sizeof(float),
                          deviceMemcpyDeviceToHost);
 
-            float alpha = rz_old / p_dot_Ap;
+            if (!Float_Memory_Is_Finite(&p_dot_Ap) || !(p_dot_Ap > 0.0f))
+                break;
+            const float alpha = rz_old / p_dot_Ap;
+            if (!Float_Memory_Is_Finite(&alpha)) break;
             Launch_Device_Kernel(Vector_Update_X_R, gridSize, blockSize, 0,
                                  NULL, atom_numbers, x, d_r, d_p, d_Ap, alpha);
 
@@ -863,12 +937,29 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
             deviceMemcpy(&rz_new, d_temp_sum, sizeof(float),
                          deviceMemcpyDeviceToHost);
 
-            if (fabsf(rz_new) < tolerance * tolerance) break;
+            if (!Float_Memory_Is_Finite(&rz_new) || !(rz_new >= 0.0f)) break;
+            if (rz_new <= tolerance_squared)
+            {
+                rz_old = rz_new;
+                converged = true;
+                break;
+            }
 
-            float beta = rz_new / rz_old;
+            const float beta = rz_new / rz_old;
+            if (!Float_Memory_Is_Finite(&beta)) break;
             Launch_Device_Kernel(Vector_Update_P, gridSize, blockSize, 0, NULL,
                                  atom_numbers, d_p, d_z, beta);
             rz_old = rz_new;
+        }
+        if (!converged)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorSimulationBreakDown,
+                "REAXFF_EEQ::Calculate_Charges",
+                "EEQ %s solve failed to converge to a finite residual: "
+                "rM^-1r=%g, tolerance^2=%g, max_iter=%d. No staged result "
+                "was published.",
+                system_name, rz_old, tolerance_squared, max_iter);
         }
     };
 #endif
@@ -879,48 +970,26 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     if (warm)
     {
         const float* c = EXTRAP_COEFFS[nprev - 1];
-        Launch_Device_Kernel(Extrapolate_Vector_Kernel, gridSize, blockSize, 0,
-                             NULL, atom_numbers, d_t, d_t_hist, atom_numbers,
-                             nprev, c[0], c[1], c[2], c[3], c[4]);
+        ReaxFFAtomIdentity::Gather_Float_History_By_Global_Id(
+            atom_numbers, atom_local, d_t, d_t_hist, this->atom_numbers, nprev,
+            c);
     }
-    solve(d_t, d_b, warm);
+    solve(d_t, d_b, warm, "electronegativity");
 
     Launch_Device_Kernel(Setup_B_One, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_b);
     if (warm)
     {
         const float* c = EXTRAP_COEFFS[nprev - 1];
-        Launch_Device_Kernel(Extrapolate_Vector_Kernel, gridSize, blockSize, 0,
-                             NULL, atom_numbers, d_s, d_s_hist, atom_numbers,
-                             nprev, c[0], c[1], c[2], c[3], c[4]);
+        ReaxFFAtomIdentity::Gather_Float_History_By_Global_Id(
+            atom_numbers, atom_local, d_s, d_s_hist, this->atom_numbers, nprev,
+            c);
     }
-    solve(d_s, d_b, warm);
+    solve(d_s, d_b, warm, "charge-constraint");
 
-    // Update extrapolation history
-    if (nprev < HIST_SIZE)
-    {
-        deviceMemcpy(d_t_hist + nprev * atom_numbers, d_t,
-                     sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
-        deviceMemcpy(d_s_hist + nprev * atom_numbers, d_s,
-                     sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
-        nprev++;
-    }
-    else
-    {
-        for (int k = 0; k < HIST_SIZE - 1; k++)
-        {
-            deviceMemcpy(
-                d_t_hist + k * atom_numbers, d_t_hist + (k + 1) * atom_numbers,
-                sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
-            deviceMemcpy(
-                d_s_hist + k * atom_numbers, d_s_hist + (k + 1) * atom_numbers,
-                sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
-        }
-        deviceMemcpy(d_t_hist + (HIST_SIZE - 1) * atom_numbers, d_t,
-                     sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
-        deviceMemcpy(d_s_hist + (HIST_SIZE - 1) * atom_numbers, d_s,
-                     sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
-    }
+    // d_s/d_t remain private candidate frames.  The REAXFF owner publishes
+    // them in the same final kernel as force/energy/virial/charge, and only
+    // when commit_sampling_state is true.
 
     float sum_t = 0, sum_s = 0;
     Sum_Of_List(d_t, d_temp_sum, atom_numbers);
@@ -928,8 +997,26 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     Sum_Of_List(d_s, d_temp_sum, atom_numbers);
     deviceMemcpy(&sum_s, d_temp_sum, sizeof(float), deviceMemcpyDeviceToHost);
 
-    float Qtot = 0;
-    float mu = (Qtot - sum_t) / sum_s;
+    if (!Float_Memory_Is_Finite(&sum_t) ||
+        !Float_Memory_Is_Finite(&sum_s) || !(sum_s > 0.0f))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "REAXFF_EEQ::Calculate_Charges",
+            "EEQ charge constraint is singular or non-finite "
+            "(sum_t=%g, sum_s=%g). No staged result was published.",
+            sum_t, sum_s);
+    }
+
+    const float Qtot = 0.0f;
+    const float mu = (Qtot - sum_t) / sum_s;
+    if (!Float_Memory_Is_Finite(&mu))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "REAXFF_EEQ::Calculate_Charges",
+            "EEQ charge-constraint multiplier is non-finite (mu=%g). No "
+            "staged result was published.",
+            mu);
+    }
 
     Launch_Device_Kernel(Vector_Scale_Add, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_q, d_t, d_s, mu);
@@ -956,7 +1043,17 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     deviceMemcpy(&sum_eele, d_temp_sum, sizeof(float),
                  deviceMemcpyDeviceToHost);
 
-    h_energy = sum_epol + sum_eele;
+    pending_energy = sum_epol + sum_eele;
+    if (!Float_Memory_Is_Finite(&sum_epol) ||
+        !Float_Memory_Is_Finite(&sum_eele) ||
+        !Float_Memory_Is_Finite(&pending_energy))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "REAXFF_EEQ::Calculate_Charges",
+            "EEQ produced non-finite staged energies (polarization=%g, "
+            "electrostatic=%g, total=%g).",
+            sum_epol, sum_eele, pending_energy);
+    }
     if (d_energy != NULL)
     {
         Launch_Device_Kernel(EEQ_Distribute_Energy_Kernel, gridSize, blockSize,

@@ -62,12 +62,13 @@ bool CONTROLLER::Command_Exist(const char* key)
             std::string buffer, buffer2;
             buffer = key;
             buffer = buffer.substr(0, strlen(key) - strlen(temp) - 1);
-            buffer2 =
-                Command("default_in_file_prefix") + ("_" + buffer + ".txt");
+            buffer2 = std::string(Original_Command("default_in_file_prefix")) +
+                      ("_" + buffer + ".txt");
             FILE* ftemp = fopen(buffer2.c_str(), "r");
             if (ftemp != NULL)
             {
                 commands[key] = buffer2;
+                original_commands[key] = buffer2;
                 fclose(ftemp);
                 return true;
             }
@@ -86,11 +87,8 @@ bool CONTROLLER::Command_Exist(const char* key)
 
 bool CONTROLLER::Command_Exist(const char* prefix, const char* key)
 {
-    char temp[CHAR_LENGTH_MAX];
-    strcpy(temp, prefix);
-    strcat(temp, "_");
-    strcat(temp, key);
-    return Command_Exist(temp);
+    const std::string full_key = std::string(prefix) + "_" + key;
+    return Command_Exist(full_key.c_str());
 }
 
 bool CONTROLLER::Command_Choice(const char* key, const char* value,
@@ -121,11 +119,8 @@ bool CONTROLLER::Command_Choice(const char* key, const char* value,
 bool CONTROLLER::Command_Choice(const char* prefix, const char* key,
                                 const char* value, bool case_sensitive)
 {
-    char temp[CHAR_LENGTH_MAX];
-    strcpy(temp, prefix);
-    strcat(temp, "_");
-    strcat(temp, key);
-    return Command_Choice(temp, value, case_sensitive);
+    const std::string full_key = std::string(prefix) + "_" + key;
+    return Command_Choice(full_key.c_str(), value, case_sensitive);
 }
 
 const char* CONTROLLER::Command(const char* key)
@@ -136,12 +131,9 @@ const char* CONTROLLER::Command(const char* key)
 
 const char* CONTROLLER::Command(const char* prefix, const char* key)
 {
-    char temp[CHAR_LENGTH_MAX];
-    strcpy(temp, prefix);
-    strcat(temp, "_");
-    strcat(temp, key);
-    command_check[temp] = 0;
-    return commands[temp].c_str();
+    const std::string full_key = std::string(prefix) + "_" + key;
+    command_check[full_key] = 0;
+    return commands[full_key].c_str();
 }
 
 const char* CONTROLLER::Original_Command(const char* key)
@@ -152,12 +144,9 @@ const char* CONTROLLER::Original_Command(const char* key)
 
 const char* CONTROLLER::Original_Command(const char* prefix, const char* key)
 {
-    char temp[CHAR_LENGTH_MAX];
-    strcpy(temp, prefix);
-    strcat(temp, "_");
-    strcat(temp, key);
-    command_check[temp] = 0;
-    return original_commands[temp].c_str();
+    const std::string full_key = std::string(prefix) + "_" + key;
+    command_check[full_key] = 0;
+    return original_commands[full_key].c_str();
 }
 
 static int judge_if_flag(const char* str)
@@ -170,91 +159,85 @@ static int judge_if_flag(const char* str)
 
 void CONTROLLER::Arguments_Parse(int argc, char** argv)
 {
-    char temp1[CHAR_LENGTH_MAX];
-    char temp2[CHAR_LENGTH_MAX];
-    char temp3[CHAR_LENGTH_MAX];
-    int j = 1;
     for (int i = 1; i < argc; i++)
     {
-        temp1[0] = 0;
-        strcat(temp1, argv[i]);
-        if (judge_if_flag(temp1))
+        if (judge_if_flag(argv[i]))
         {
-            temp2[0] = ' ';
-            temp2[1] = 0;
-            j = 1;
+            std::string value;
+            int j = 1;
             while (i + j < argc)
             {
-                strcpy(temp3, argv[i + j]);
-                if (!judge_if_flag(temp3))
+                if (!judge_if_flag(argv[i + j]))
                 {
-                    strcat(temp2, " ");
-                    strcat(temp2, temp3);
+                    value += " ";
+                    value += argv[i + j];
                     j++;
                 }
                 else
                     break;
             }
-            Set_Command(temp1 + 1, temp2);
-            if (is_str_equal(temp1 + 1, "workspace", 1))
+            Set_Command(argv[i] + 1, value.c_str());
+            if (is_str_equal(argv[i] + 1, "workspace", 1))
             {
                 workspace_from_cli = true;
             }
+            i += j - 1;
         }
     }
 }
 
-void CONTROLLER::Get_Command(char* line, char* prefix)
+void CONTROLLER::Get_Command(const std::string& line,
+                             const std::string& prefix)
 {
-    if ((prefix[0] == '#' && prefix[1] == '#') || prefix[0] == ' ' ||
-        prefix[0] == '\t')
+    if (prefix.rfind("##", 0) == 0 ||
+        (!prefix.empty() && (prefix[0] == ' ' || prefix[0] == '\t')))
     {
         return;
     }
-    char Flag[CHAR_LENGTH_MAX];
-    char Value[CHAR_LENGTH_MAX];
-    char* flag = strtok(line, "=");
-    char* command = strtok(NULL, "=");
+    const std::size_t equals = line.find('=');
+    if (equals == std::string::npos) return;
 
-    if (flag == NULL || command == NULL)
-    {
-        return;
-    }
+    std::istringstream flag_stream(line.substr(0, equals));
+    std::string flag;
+    if (!(flag_stream >> flag)) return;
 
-    sscanf(flag, "%s", Flag);
+    std::string value = line.substr(equals + 1);
+    const std::size_t comment = value.find('#');
+    if (comment != std::string::npos) value.resize(comment);
+    const std::size_t first = value.find_first_not_of(" \t");
+    if (first == std::string::npos)
+        value.clear();
+    else
+        value.erase(0, first);
+    const std::size_t last = value.find_last_not_of(" \t\r\n");
+    if (last == std::string::npos)
+        value.clear();
+    else
+        value.erase(last + 1);
 
-    // Trim leading/trailing spaces in command/Value
-    char* v_ptr = command;
-    while (*v_ptr == ' ' || *v_ptr == '\t') v_ptr++;
-    char* v_end = v_ptr + strlen(v_ptr) - 1;
-    while (v_end > v_ptr && (*v_end == ' ' || *v_end == '\t' ||
-                             *v_end == '\r' || *v_end == '\n'))
-        *v_end-- = '\0';
-
-    strcpy(Value, v_ptr);
-    Set_Command(Flag, Value, 1, prefix);
+    Set_Command(flag.c_str(), value.c_str(), 1,
+                prefix.empty() ? NULL : prefix.c_str());
 }
 
-static int read_one_line(FILE* In_File, char* line, char* ender)
+static int read_one_line(FILE* In_File, std::string* line,
+                         std::string* ender)
 {
-    int line_count = 0;
-    int ender_count = 0;
-    signed char c;
+    line->clear();
+    ender->clear();
+    int c;
     while ((c = getc(In_File)) != EOF)
     {
-        if (line_count == 0 && (c == '\t' || c == ' '))
+        if (line->empty() && (c == '\t' || c == ' '))
         {
             continue;
         }
         else if (c != '\n' && c != ',' && c != '{' && c != '}' && c != '\r')
         {
-            line[line_count] = c;
-            line_count += 1;
+            line->push_back(static_cast<char>(c));
         }
         else
         {
-            ender[ender_count] = c;
-            ender_count += 1;
+            ender->push_back(static_cast<char>(c));
             break;
         }
     }
@@ -266,22 +249,40 @@ static int read_one_line(FILE* In_File, char* line, char* ender)
         }
         else if (c != '\n' && c != ',' && c != '{' && c != '}' && c != '\r')
         {
-            fseek(In_File, -1, SEEK_CUR);
+            if (ungetc(c, In_File) == EOF) return 0;
             break;
         }
         else
         {
-            ender[ender_count] = c;
-            ender_count += 1;
+            ender->push_back(static_cast<char>(c));
         }
     }
-    line[line_count] = 0;
-    ender[ender_count] = 0;
-    if (line_count == 0 && ender_count == 0)
+    if (ferror(In_File)) return 0;
+    if (line->empty() && ender->empty())
     {
         return EOF;
     }
     return 1;
+}
+
+static bool read_full_line(FILE* input, std::string* line)
+{
+    line->clear();
+    int c = EOF;
+    while ((c = getc(input)) != EOF && c != '\n')
+    {
+        if (c != '\r') line->push_back(static_cast<char>(c));
+    }
+    if (ferror(input)) return false;
+    return c != EOF || !line->empty();
+}
+
+static std::string first_whitespace_delimited_token(const std::string& value)
+{
+    std::istringstream stream(value);
+    std::string token;
+    stream >> token;
+    return token;
 }
 
 static fs::path Resolve_Path_With_Base(const std::string& raw_path,
@@ -326,6 +327,7 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
             if (In_File == NULL)
             {
                 commands["md_name"] = "Default SPONGE MD Task Name";
+                original_commands["md_name"] = "Default SPONGE MD Task Name";
             }
             else
             {
@@ -378,61 +380,83 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
             mdin_dir = resolved_mdin_path.parent_path();
             mdin_found = true;
             mdin_path = resolved_mdin_path.string();
-            char line[CHAR_LENGTH_MAX];
-            char prefix[CHAR_LENGTH_MAX] = {0};
-            char ender[CHAR_LENGTH_MAX];
-            char* get_ret = fgets(line, CHAR_LENGTH_MAX, In_File);
-            line[strlen(line) - 1] = 0;
-            commands["md_name"] = line;
-            int while_count = 0;
-            while (true)
+            std::string line;
+            std::string prefix;
+            std::string ender;
+            if (!read_full_line(In_File, &line))
             {
-                while_count += 1;
-                if (while_count > 100000)
+                if (ferror(In_File))
                 {
                     Throw_SPONGE_Error(
                         spongeErrorBadFileFormat,
                         "CONTROLLER::Commands_From_In_File",
-                        "Possible reasons : \n\t1.The coding of the format is "
-                        "not ASCII\n\t2.The file is created in one OS but used "
-                        "in another OS(Windows / Unix / MacOS)");
+                        "Reason:\n\tI/O error while reading the text mdin "
+                        "task name\n");
                 }
-                int t = read_one_line(In_File, line, ender);
-                if (t == EOF)
+                Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat,
+                    "CONTROLLER::Commands_From_In_File",
+                    "Reason:\n\tthe text mdin file is empty\n");
+            }
+            commands["md_name"] = line;
+            original_commands["md_name"] = line;
+            while (true)
+            {
+                const int status = read_one_line(In_File, &line, &ender);
+                if (status == 0)
+                {
+                    Throw_SPONGE_Error(
+                        spongeErrorBadFileFormat,
+                        "CONTROLLER::Commands_From_In_File",
+                        "Reason:\n\tI/O error while reading the text mdin "
+                        "file\n");
+                }
+                if (status == EOF)
                 {
                     break;
                 }
-                if (line[0] == '#')
+                if (!line.empty() && line[0] == '#')
                 {
-                    if (line[1] == '#')
+                    if (line.size() > 1 && line[1] == '#')
                     {
-                        if (strchr(ender, '{') != NULL)
+                        if (ender.find('{') != std::string::npos)
                         {
-                            int scanf_ret = sscanf(line, "%s", prefix);
+                            prefix = first_whitespace_delimited_token(line);
                         }
-                        if (strchr(ender, '}') != NULL)
+                        if (ender.find('}') != std::string::npos)
                         {
-                            prefix[0] = 0;
+                            prefix.clear();
                         }
                     }
-                    if (strchr(ender, '\n') == NULL)
+                    if (ender.find('\n') == std::string::npos)
                     {
-                        int scanf_ret = fscanf(In_File, "%*[^\n]%*[\n]");
-                        fseek(In_File, -1, SEEK_CUR);
+                        while (true)
+                        {
+                            const int c = getc(In_File);
+                            if (c == EOF || c == '\n') break;
+                        }
+                        if (ferror(In_File))
+                        {
+                            Throw_SPONGE_Error(
+                                spongeErrorBadFileFormat,
+                                "CONTROLLER::Commands_From_In_File",
+                                "Reason:\n\tI/O error while skipping a text "
+                                "mdin comment\n");
+                        }
                     }
                 }
-                else if (strchr(ender, '{') != NULL)
+                else if (ender.find('{') != std::string::npos)
                 {
-                    int scanf_ret = sscanf(line, "%s", prefix);
+                    prefix = first_whitespace_delimited_token(line);
                 }
                 else
                 {
                     Get_Command(line, prefix);
-                    line[0] = 0;
+                    line.clear();
                 }
-                if (strchr(ender, '}') != NULL)
+                if (ender.find('}') != std::string::npos)
                 {
-                    prefix[0] = 0;
+                    prefix.clear();
                 }
             }
         }
@@ -441,6 +465,7 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
     if (!commands.count("md_name"))
     {
         commands["md_name"] = "Default SPONGE MD Task Name";
+        original_commands["md_name"] = "Default SPONGE MD Task Name";
     }
 
     // Resolve workspace after mdin has been parsed so mdin-provided workspace
@@ -453,7 +478,8 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
         const fs::path workspace_base =
             (workspace_from_cli || !mdin_found) ? startup_cwd : mdin_dir;
         workspace_dir =
-            Resolve_Path_With_Base(Command("workspace"), workspace_base);
+            Resolve_Path_With_Base(Original_Command("workspace"),
+                                   workspace_base);
         workspace_set = true;
     }
 
@@ -504,7 +530,8 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
            Get_Current_Working_Directory().c_str());
     printf("SPONGE Path:\n    %s\n\n", Get_SPONGE_Directory().c_str());
     printf("Start Wall Time:\n    %s\n", Get_Wall_Time().c_str());
-    printf("MD TASK NAME:\n    %s\n\n", commands["md_name"].c_str());
+    printf("MD TASK NAME:\n    %s\n\n",
+           original_commands["md_name"].c_str());
     int scanf_ret = fprintf(mdinfo, "Terminal Commands:\n    ");
     for (int i = 0; i < argc; i++)
     {
@@ -537,37 +564,67 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
         {
             scanf_ret = fprintf(mdinfo, "    %s", temp);
         }
+        if (ferror(In_File))
+        {
+            Throw_SPONGE_Error(
+                spongeErrorBadFileFormat,
+                "CONTROLLER::Commands_From_In_File",
+                "Reason:\n\tI/O error while replaying the text mdin file\n");
+        }
         scanf_ret = fprintf(mdinfo, "\n\n");
-        fclose(In_File);
+        if (fclose(In_File) != 0)
+        {
+            Throw_SPONGE_Error(
+                spongeErrorBadFileFormat,
+                "CONTROLLER::Commands_From_In_File",
+                "Reason:\n\tI/O error while closing the text mdin file\n");
+        }
     }
 }
 
 void CONTROLLER::Set_Command(const char* Flag, const char* Value, int Check,
-                             const char* prefix)
+                             const char* prefix, bool preserve_full_value)
 {
     if (prefix && strcmp(prefix, "comments") == 0) return;
-    char temp[CHAR_LENGTH_MAX] = {0}, temp2[CHAR_LENGTH_MAX];
+    if (Flag == NULL || Value == NULL)
+    {
+        Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "CONTROLLER::Set_Command",
+            "Reason:\n\ta command key and value must both be non-null\n");
+    }
+
+    std::string full_key;
     if (prefix && prefix[0] != 0 && strcmp(prefix, "main") != 0)
     {
-        strcpy(temp, prefix);
-        strcat(temp, "_");
+        full_key = prefix;
+        full_key += "_";
     }
-    strcat(temp, Flag);
-    if (commands.count(temp))
+    full_key += Flag;
+    if (commands.count(full_key))
     {
-        sprintf(temp2, "Reason:\n\t'%s' is set more than once\n", temp);
-        Throw_SPONGE_Error(spongeErrorConflictingCommand,
-                           "CONTROLLER::Set_Command", temp2);
+        Throw_Formatted_SPONGE_Error(
+            spongeErrorConflictingCommand, "CONTROLLER::Set_Command",
+            "Reason:\n\t'%s' is set more than once\n", full_key.c_str());
     }
-    strcpy(temp2, Value);
-    char* real_value = strtok(temp2, "#");
-    original_commands[temp] = real_value;
-    if (sscanf(real_value, "%s", temp2))
-        commands[temp] = temp2;
-    else
-        commands[temp] = "";
 
-    command_check[temp] = Check;
+    const std::string real_value = Value;
+    original_commands[full_key] = real_value;
+
+    if (preserve_full_value)
+    {
+        commands[full_key] = real_value;
+    }
+    else
+    {
+        std::istringstream value_stream(real_value);
+        std::string first_token;
+        if (value_stream >> first_token)
+            commands[full_key] = first_token;
+        else
+            commands[full_key].clear();
+    }
+
+    command_check[full_key] = Check;
 }
 
 void CONTROLLER::Default_Set()
@@ -576,8 +633,20 @@ void CONTROLLER::Default_Set()
     buffer_frame = 10;
     if (Command_Exist("buffer_frame"))
     {
-        Check_Int("buffer_frame", "CONTROLLER::Default_Set");
-        buffer_frame = atoi(Command("buffer_frame"));
+        const char* token = Command("buffer_frame");
+        char* end = NULL;
+        errno = 0;
+        const long parsed = strtol(token, &end, 10);
+        if (end == token || end == NULL || *end != '\0' || errno == ERANGE ||
+            parsed <= 0 || parsed > INT_MAX)
+        {
+            Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand, "CONTROLLER::Default_Set",
+                "Reason:\n\tbuffer_frame must be a positive base-10 int; "
+                "got '%s'\n",
+                token);
+        }
+        buffer_frame = static_cast<int>(parsed);
     }
 }
 
@@ -767,10 +836,36 @@ neither equal to the size of MPI ranks (%d) nor 1\n",
 void CONTROLLER::Init_Host_MPI()
 {
 #ifdef USE_MPI
-    int provided;
-    MPI_Init_thread(nullptr, nullptr, MPI_THREAD_MULTIPLE, &provided);
-    MPI_Comm_size(MPI_COMM_WORLD, &MPI_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &MPI_rank);
+    int provided = 0;
+    const int initialization_status =
+        MPI_Init_thread(nullptr, nullptr, MPI_THREAD_MULTIPLE, &provided);
+    if (initialization_status != MPI_SUCCESS)
+    {
+        Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "CONTROLLER::Init_Host_MPI",
+            "Reason:\n\tMPI_Init_thread failed with status %d; MPI is not "
+            "available\n",
+            initialization_status);
+    }
+    if (provided != MPI_THREAD_MULTIPLE)
+    {
+        Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "CONTROLLER::Init_Host_MPI",
+            "Reason:\n\tMPI provided thread-support level %d, but SPONGE "
+            "requires MPI_THREAD_MULTIPLE (%d)\n",
+            provided, MPI_THREAD_MULTIPLE);
+    }
+
+    const int size_status = MPI_Comm_size(MPI_COMM_WORLD, &MPI_size);
+    const int rank_status = MPI_Comm_rank(MPI_COMM_WORLD, &MPI_rank);
+    if (size_status != MPI_SUCCESS || rank_status != MPI_SUCCESS)
+    {
+        Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "CONTROLLER::Init_Host_MPI",
+            "Reason:\n\tfailed to query MPI_COMM_WORLD (size status %d, "
+            "rank status %d)\n",
+            size_status, rank_status);
+    }
 #endif
 }
 

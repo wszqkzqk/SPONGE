@@ -26,11 +26,34 @@ from prips import Sponge
 Sponge.set_backend("jax")
 
 def Calculate_Force():
-    print(Sponge.md_info.frc[:, 2])
+    force = Sponge.dd.frc.at[:, 2].add(1.0)
+    return Sponge.force_result(force)
 ```
 """
 
-from typing import Literal
+from typing import Any, Literal
+
+_backend: int
+"DLPack device type used by the active SPONGE backend"
+_device_id: int
+"Logical device ordinal used by the active SPONGE process"
+
+FORCE_ENERGY_COMPLETE: int
+"Calculate_Force writes its complete contribution to dd.energy when requested"
+FORCE_VIRIAL_COMPLETE: int
+"Calculate_Force writes its complete contribution to dd.virial when requested"
+FORCE_PURE: int
+"Calculate_Force has no mutable state that can affect force results"
+FORCE_TRANSACTIONAL: int
+"Calculate_Force isolates mutable state with transaction lifecycle hooks"
+
+"""
+Python force plugins used with the Monte Carlo barostat must define an integer
+``SPONGE_FORCE_CAPABILITIES`` in their own script. Exactly one of
+``FORCE_PURE`` and ``FORCE_TRANSACTIONAL`` is required. Transactional scripts
+must also define callable ``Begin_Force_Transaction()``,
+``Commit_Force_Transaction()``, and ``Rollback_Force_Transaction()`` hooks.
+"""
 
 def set_backend(backend: Literal["numpy", "jax", "cupy", "pytorch"]) -> None:
     """
@@ -40,8 +63,51 @@ def set_backend(backend: Literal["numpy", "jax", "cupy", "pytorch"]) -> None:
     -----------
     backend : Literal["numpy", "jax", "cupy", "pytorch"]
         Backend name used to convert DLPack tensors to framework tensors.
-        The ``jax`` backend is read-only in PRIPS.
+        Because JAX arrays are immutable, a JAX ``Calculate_Force`` callback
+        must return :func:`force_result` so PRIPS can synchronously write the
+        complete updated local buffers back to SPONGE.
     """
+
+class FORCE_RESULT:
+    """Complete updated local buffers returned by a functional force hook."""
+
+    force: Any
+    energy: Any | None
+    virial: Any | None
+
+def force_result(
+    force: Any, *, energy: Any | None = None, virial: Any | None = None
+) -> FORCE_RESULT:
+    """
+    Build the result of a functional ``Calculate_Force`` callback.
+
+    ``force`` is the complete updated ``Sponge.dd.frc`` buffer, not an
+    isolated contribution. ``energy`` and ``virial``, when supplied, likewise
+    replace the complete updated local buffers. This replacement contract is
+    exactly equivalent to mutating the exposed buffers in place and preserves
+    force contributions already accumulated by the SPONGE core.
+    """
+
+class FORCE_EVALUATION_CONTEXT:
+    "Read-only context for the currently executing force callback"
+    @property
+    def commits_sampling_state(self) -> bool:
+        "Whether this callback may advance adaptive or history state"
+
+    @property
+    def is_exact(self) -> bool:
+        "Whether this callback evaluates the current state exactly"
+
+    @property
+    def needs_energy(self) -> bool:
+        "Whether this callback requires a complete energy contribution"
+
+    @property
+    def needs_virial(self) -> bool:
+        "Whether this callback requires a complete virial contribution"
+
+force_evaluation = FORCE_EVALUATION_CONTEXT()
+" Context for the currently executing Calculate_Force callback "
 
 class MD_INFORMATION:
     "Basic information class for MD"
@@ -114,8 +180,16 @@ class DOMAIN_INFORMATION:
     def frc(self) -> SpongeDLPackTensor | None:
         "Local plus ghost forces with shape (atom_numbers + ghost_numbers, 3)"
 
+    @property
+    def energy(self) -> SpongeDLPackTensor | None:
+        "Authoritative owned-atom energy buffer with shape (atom_numbers,)"
+
+    @property
+    def virial(self) -> SpongeDLPackTensor | None:
+        "Authoritative owned-atom virial with shape (atom_numbers, 6) in a11, a21, a22, a31, a32, a33 order"
+
 dd: DOMAIN_INFORMATION | None
-" Domain decomposition interface, available after SPONGE finishes DD initialization "
+" Current domain interface; it is rebound after DD remeshing, so do not cache its tensors across callbacks "
 
 class CONTROLLER:
     "IO controller"

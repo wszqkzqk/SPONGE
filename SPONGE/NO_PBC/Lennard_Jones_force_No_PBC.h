@@ -5,6 +5,7 @@
 // 用于记录与计算LJ相关的信息
 struct LENNARD_JONES_NO_PBC_INFORMATION
 {
+    CONTROLLER* controller = NULL;
     char module_name[CHAR_LENGTH_MAX];
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
@@ -30,20 +31,18 @@ struct LENNARD_JONES_NO_PBC_INFORMATION
     float h_LJ_energy_sum = 0;       // 所有原子的LJ能量和
     float* d_LJ_energy_atom = NULL;  // 每个原子的LJ的能量
     float* d_LJ_energy_sum = NULL;   // 所有原子的LJ能量和
+    int* d_pair_overlap_error = NULL;
 
     // 初始化
-    void Initial(CONTROLLER* controller, float cutoff,
-                 const char* module_name = NULL);
-    // 从amber的parm文件里读取
-    void Initial_From_AMBER_Parm(const char* file_name, CONTROLLER controller);
+    void Initial(CONTROLLER* controller, const char* module_name = NULL);
     // 清除内存
     void Clear();
     // 分配内存
     void LJ_Malloc();
     // 参数传到GPU上
     void Parameter_Host_To_Device();
-
-    float cutoff = 10.0;
+    void Reset_Pair_Overlap_Error();
+    bool Check_Pair_Overlap_Error(const char* error_by);
 
     // 可以根据外界传入的need_atom_energ选择性计算能量
     void LJ_Force_With_Atom_Energy(const int atom_numbers, const VECTOR* crd,

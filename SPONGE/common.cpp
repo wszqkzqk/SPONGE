@@ -2,6 +2,114 @@
 
 #include "control.h"
 
+bool Float_Memory_Is_Finite(const void* address)
+{
+    unsigned int bits = 0;
+    static_assert(
+        sizeof(bits) == sizeof(float) && std::numeric_limits<float>::is_iec559,
+        "SPONGE requires 32-bit IEEE-754 floats");
+    memcpy(&bits, address, sizeof(bits));
+    return (bits & 0x7f800000U) != 0x7f800000U;
+}
+
+bool Float_Memory_Is_Normal(const void* address)
+{
+    unsigned int bits = 0;
+    static_assert(
+        sizeof(bits) == sizeof(float) && std::numeric_limits<float>::is_iec559,
+        "SPONGE requires 32-bit IEEE-754 floats");
+    memcpy(&bits, address, sizeof(bits));
+    const unsigned int exponent = bits & 0x7f800000U;
+    return exponent != 0U && exponent != 0x7f800000U;
+}
+
+bool Float_Memory_Is_Zero_Or_Normal(const void* address)
+{
+    unsigned int bits = 0;
+    static_assert(
+        sizeof(bits) == sizeof(float) && std::numeric_limits<float>::is_iec559,
+        "SPONGE requires 32-bit IEEE-754 floats");
+    memcpy(&bits, address, sizeof(bits));
+    const unsigned int magnitude = bits & 0x7fffffffU;
+    const unsigned int exponent = magnitude & 0x7f800000U;
+    return magnitude == 0U || (exponent != 0U && exponent != 0x7f800000U);
+}
+
+bool Double_Memory_Is_Finite(const void* address)
+{
+    unsigned long long bits = 0;
+    static_assert(sizeof(bits) == sizeof(double) &&
+                      std::numeric_limits<double>::is_iec559,
+                  "SPONGE requires 64-bit IEEE-754 doubles");
+    memcpy(&bits, address, sizeof(bits));
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
+
+#ifndef GPU_ARCH_NAME
+static bool Common_Float_Bits_Are_Finite(unsigned int bits)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("" : "+r"(bits));
+#endif
+    return (bits & 0x7f800000U) != 0x7f800000U;
+}
+
+bool Finite_Atomic_Add(float* address, float value)
+{
+    unsigned int value_bits = 0;
+    static_assert(sizeof(value_bits) == sizeof(value));
+    memcpy(&value_bits, &value, sizeof(value));
+    if (!Common_Float_Bits_Are_Finite(value_bits))
+    {
+        return false;
+    }
+
+#if defined(__GNUC__) || defined(__clang__)
+    // Use the generic builtins on the float object itself.  Treating a float
+    // object as an unsigned-int object for the atomic operation violates the
+    // C++ strict-aliasing rules even though both representations are 32 bits.
+    float observed = 0.0f;
+    __atomic_load(address, &observed, __ATOMIC_RELAXED);
+    while (true)
+    {
+        unsigned int observed_bits = 0;
+        memcpy(&observed_bits, &observed, sizeof(observed_bits));
+        if (!Common_Float_Bits_Are_Finite(observed_bits))
+        {
+            return false;
+        }
+        float updated = observed + value;
+        unsigned int updated_bits = 0;
+        memcpy(&updated_bits, &updated, sizeof(updated));
+        if (!Common_Float_Bits_Are_Finite(updated_bits))
+        {
+            return false;
+        }
+        if (__atomic_compare_exchange(address, &observed, &updated, false,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        {
+            return true;
+        }
+    }
+#else
+    bool success = false;
+#pragma omp critical(sponge_finite_atomic_add_float)
+    {
+        if (Float_Memory_Is_Finite(address))
+        {
+            const float updated = *address + value;
+            if (Float_Memory_Is_Finite(&updated))
+            {
+                *address = updated;
+                success = true;
+            }
+        }
+    }
+    return success;
+#endif
+}
+#endif
+
 #ifdef USE_CPU
 #define COMMON_SIMPLE_DEVICE_FOR(i, N)                        \
     PRAGMA(omp parallel for schedule(static) if ((N) >= 512)) \
@@ -57,6 +165,21 @@ int atomicAdd(int* x, int y)
     int x0;
 #ifdef _WIN32
 #pragma omp critical(sponge_atomic_add_int)
+#else
+#pragma omp atomic capture
+#endif
+    {
+        x0 = *x;
+        *x += y;
+    }
+    return x0;
+}
+
+unsigned long long atomicAdd(unsigned long long* x, unsigned long long y)
+{
+    unsigned long long x0;
+#ifdef _WIN32
+#pragma omp critical(sponge_atomic_add_unsigned_long_long)
 #else
 #pragma omp atomic capture
 #endif
@@ -383,11 +506,14 @@ static __global__ void Sum_Of_List_Float_Final(const double* block_sums,
     __syncthreads();
 
     int warp_numbers = (blockDim.x + warpSize - 1) / warpSize;
-    partial = (lane < warp_numbers) ? warp_buf[lane] : 0.0;
-    partial = LaneGroup::Reduce_Sum(partial);
-    if (lane == 0)
+    if (warp_id == 0)
     {
-        sum[0] = static_cast<float>(partial);
+        partial = (lane < warp_numbers) ? warp_buf[lane] : 0.0;
+        partial = LaneGroup::Reduce_Sum(partial);
+        if (lane == 0)
+        {
+            sum[0] = static_cast<float>(partial);
+        }
     }
 }
 #endif

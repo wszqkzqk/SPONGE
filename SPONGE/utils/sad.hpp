@@ -611,6 +611,7 @@ struct SADvector
                               const LTMatrix3 cell, const LTMatrix3 rcell)
     {
         SADvector<N> dr = a - b;
+        if (cell.Is_Direct_Boundary()) return dr;
         SADvector<N> scaled_dr;
         scaled_dr.x = dr.x * rcell.a11 + dr.y * rcell.a21 + dr.z * rcell.a31;
         scaled_dr.y = dr.y * rcell.a22 + dr.z * rcell.a32;

@@ -38,7 +38,7 @@ void SOFT_WALLS::Initial(CONTROLLER* controller, int atom_numbers,
     {
         controller->printf("START INITIALIZING SOFT WALLS:\n");
         Configuration_Reader cfg;
-        cfg.Open(controller->Command(this->module_name, "in_file"));
+        cfg.Open(controller->Original_Command(this->module_name, "in_file"));
         cfg.Close();
         if (!cfg.error_reason.empty())
         {

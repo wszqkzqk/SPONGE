@@ -134,14 +134,16 @@ extern "C" __global__ void cv_combine_second_step(const int atom_numbers, const 
 }
 
 void CV_COMBINE::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                         const LTMatrix3 rcell, int need, int step)
+                         const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                         int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need)
     {
         for (auto cv : cv_lists)
         {
-            cv->Compute(atom_numbers, crd, cell, rcell, CV_NEED_ALL, step);
+            cv->Compute(atom_numbers, crd, cell, rcell, reference_cell,
+                        CV_NEED_ALL, step);
         }
         for (auto cv : cv_lists)
         {

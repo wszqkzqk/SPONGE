@@ -12,7 +12,7 @@ struct trajectory_output
     int write_restart_file_interval = 1000;  // restart文件重新创建的所隔步数
     FILE* crd_traj = NULL;
     FILE* box_traj = NULL;
-    char restart_name[CHAR_LENGTH_MAX];
+    std::string restart_name;
     void Initial(CONTROLLER* controller, MD_INFORMATION* md_info);
     void Export_Restart_File(const char* rst7_name = NULL);
     void Append_Crd_Traj_File(FILE* fp = NULL);

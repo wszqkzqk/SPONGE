@@ -32,6 +32,50 @@
 #include <vector>
 namespace fs = std::filesystem;
 
+// Return whether the step immediately after current_step lies on an interval
+// boundary.  Writing this as (current_step + 1) % interval overflows when a
+// valid int-valued step reaches INT_MAX.  The remainder form is equivalent for
+// nonnegative steps and never evaluates an overflowing addition.
+inline constexpr bool Next_Step_Is_Interval_Boundary(int current_step,
+                                                     int interval) noexcept
+{
+    return current_step >= 0 && interval > 0 &&
+           current_step % interval == interval - 1;
+}
+
+// Compute ceil(item_count / block_size) without the overflowing
+// item_count + block_size - 1 idiom.  Callers use nonnegative counts and a
+// positive launch block size; invalid inputs produce no launch blocks so the
+// owning module can report its contextual validation error.
+inline constexpr int Positive_Int_Ceil_Div(int item_count,
+                                           int block_size) noexcept
+{
+    return item_count > 0 && block_size > 0
+               ? 1 + (item_count - 1) / block_size
+               : 0;
+}
+
+// Read through an opaque pointer so -ffast-math cannot assume that the input
+// floating-point value is finite and optimize away IEEE-754 validation at the
+// call site.
+#if defined(_MSC_VER)
+__declspec(noinline) bool Float_Memory_Is_Finite(const void* address);
+__declspec(noinline) bool Float_Memory_Is_Normal(const void* address);
+__declspec(noinline) bool Float_Memory_Is_Zero_Or_Normal(const void* address);
+__declspec(noinline) bool Double_Memory_Is_Finite(const void* address);
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline)) bool Float_Memory_Is_Finite(const void* address);
+__attribute__((noinline)) bool Float_Memory_Is_Normal(const void* address);
+__attribute__((noinline)) bool Float_Memory_Is_Zero_Or_Normal(
+    const void* address);
+__attribute__((noinline)) bool Double_Memory_Is_Finite(const void* address);
+#else
+bool Float_Memory_Is_Finite(const void* address);
+bool Float_Memory_Is_Normal(const void* address);
+bool Float_Memory_Is_Zero_Or_Normal(const void* address);
+bool Double_Memory_Is_Finite(const void* address);
+#endif
+
 static auto quote_path(const fs::path& path)
 {
     std::string value = path.string();
@@ -94,6 +138,44 @@ typedef void* HMODULE;
 #include "third_party/device_backend/cpu_api.h"
 #endif
 #undef FFT_BACKEND_H
+
+// Atomically add only when both the existing value and the resulting sum are
+// finite.  A false return leaves the accumulator unchanged.
+#ifdef GPU_ARCH_NAME
+static __device__ __forceinline__ bool Finite_Atomic_Add(float* address,
+                                                         float value)
+{
+    const unsigned int value_bits = __float_as_uint(value);
+    if ((value_bits & 0x7f800000U) == 0x7f800000U)
+    {
+        return false;
+    }
+    auto* bits_address = reinterpret_cast<unsigned int*>(address);
+    unsigned int observed = atomicCAS(bits_address, 0U, 0U);
+    while (true)
+    {
+        const unsigned int assumed = observed;
+        if ((assumed & 0x7f800000U) == 0x7f800000U)
+        {
+            return false;
+        }
+        const float current = __uint_as_float(assumed);
+        const float updated = current + value;
+        const unsigned int updated_bits = __float_as_uint(updated);
+        if ((updated_bits & 0x7f800000U) == 0x7f800000U)
+        {
+            return false;
+        }
+        observed = atomicCAS(bits_address, assumed, updated_bits);
+        if (observed == assumed)
+        {
+            return true;
+        }
+    }
+}
+#else
+bool Finite_Atomic_Add(float* address, float value);
+#endif
 
 // lane-group 抽象
 #include "third_party/lane_group/backend.h"

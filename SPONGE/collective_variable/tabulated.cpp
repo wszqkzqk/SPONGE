@@ -113,12 +113,14 @@ void CV_TABULATED::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
 }
 
 void CV_TABULATED::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                           const LTMatrix3 rcell, int need, int step)
+                           const LTMatrix3 rcell,
+                           const LTMatrix3 reference_cell, int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need)
     {
-        cv->Compute(atom_numbers, crd, cell, rcell, CV_NEED_ALL, step);
+        cv->Compute(atom_numbers, crd, cell, rcell, reference_cell, CV_NEED_ALL,
+                    step);
         deviceStreamSynchronize(cv->device_stream);
         Launch_Device_Kernel(
             BSpline_interpolate1d, (atom_numbers + 1023) / 1024, 1024, 0,

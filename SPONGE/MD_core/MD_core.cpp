@@ -274,16 +274,60 @@ void MD_INFORMATION::Read_Mass(CONTROLLER* controller)
     atom_numbers = Xponge_Atom_Numbers();
     Malloc_Safely((void**)&h_mass, sizeof(float) * atom_numbers);
     Malloc_Safely((void**)&h_mass_inverse, sizeof(float) * atom_numbers);
-    sys.total_mass = 0;
+    double total_mass = 0.0;
     for (int i = 0; i < atom_numbers; i++)
     {
         h_mass[i] = Xponge::system.atoms.mass[i];
-        if (h_mass[i] == 0)
+        if (!Float_Memory_Is_Finite(&h_mass[i]) || h_mass[i] < 0.0f)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat, "MD_INFORMATION::Read_Mass",
+                "Reason:\n\tatom %d has non-finite or negative mass %.9g\n", i,
+                static_cast<double>(h_mass[i]));
+            return;
+        }
+        unsigned int mass_bits = 0;
+        static_assert(sizeof(mass_bits) == sizeof(h_mass[i]));
+        memcpy(&mass_bits, &h_mass[i], sizeof(mass_bits));
+        if ((mass_bits & 0x7fffffffU) == 0)
+        {
             h_mass_inverse[i] = 0;
+        }
         else
+        {
             h_mass_inverse[i] = 1.0f / h_mass[i];
-        sys.total_mass += h_mass[i];
+            unsigned int inverse_bits = 0;
+            static_assert(sizeof(inverse_bits) == sizeof(h_mass_inverse[i]));
+            memcpy(&inverse_bits, &h_mass_inverse[i], sizeof(inverse_bits));
+            // Every supported accelerator build uses fast floating-point
+            // arithmetic, where subnormal operands may be flushed to zero.
+            // Reject a zero or subnormal reciprocal here so a positive mass
+            // cannot become an immobile atom on only some backends.
+            if (!Float_Memory_Is_Finite(&h_mass_inverse[i]) ||
+                (inverse_bits & 0x7f800000U) == 0)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "MD_INFORMATION::Read_Mass",
+                    "Reason:\n\tthe reciprocal mass of atom %d is outside "
+                    "the finite normal single-precision range used by the "
+                    "force kernels\n",
+                    i);
+                return;
+            }
+        }
+        total_mass += static_cast<double>(h_mass[i]);
     }
+    const float stored_total_mass = static_cast<float>(total_mass);
+    if (!Double_Memory_Is_Finite(&total_mass) ||
+        !Float_Memory_Is_Finite(&stored_total_mass))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat, "MD_INFORMATION::Read_Mass",
+            "Reason:\n\tthe system total mass is outside the finite "
+            "single-precision range\n");
+        return;
+    }
+    sys.total_mass = stored_total_mass;
     if (atom_numbers > 0)
     {
         Device_Malloc_And_Copy_Safely((void**)&d_mass, h_mass,
@@ -320,7 +364,7 @@ void MD_INFORMATION::Initial(CONTROLLER* controller)
     controller->printf("START INITIALIZING MD CORE:\n");
     atom_numbers = 0;  // 初始化，使得能够进行所有原子数目是否相等的判断
 
-    strcpy(md_name, controller[0].Command("md_name"));
+    md_name = controller[0].Original_Command("md_name");
     Read_Mode(controller);
 
     Read_Mass(controller);
@@ -347,6 +391,7 @@ void MD_INFORMATION::Initial(CONTROLLER* controller)
     pbc.Initial(controller, this);
 
     Read_dt(controller);
+    min.Validate_Final_Time_Step();
 
     is_initialized = 1;
     controller->printf("    structure last modify date is %d\n",
@@ -654,13 +699,15 @@ void MD_INFORMATION::Read_Rst7(const char* file_name, int irest,
 void MD_INFORMATION::MD_Reset_Atom_Energy_And_Virial_And_Force()
 {
     need_potential = 0;
+    need_pressure = 0;
     need_kinetic = 0;
-    if ((output.print_zeroth_frame || sys.steps) &&
-        sys.steps % output.write_mdout_interval == 0)
+    if (output.Check_Mdout_Step())
     {
         need_potential = 1;
         need_pressure = output.print_virial;
-        need_kinetic = 1;
+        // Optimizer velocities are numerical state, not physical momenta;
+        // kinetic energy and temperature are undefined in minimization mode.
+        need_kinetic = mode == MINIMIZATION ? 0 : 1;
     }
 
     deviceMemset(d_atom_energy, 0, sizeof(float) * atom_numbers);
@@ -945,7 +992,7 @@ void MD_INFORMATION::Step_Print(CONTROLLER* controller)
     }
 }
 
-void MD_INFORMATION::Get_pressure(CONTROLLER* controller, float dd_atom_numbers,
+void MD_INFORMATION::Get_pressure(CONTROLLER* controller, int dd_atom_numbers,
                                   VECTOR* dd_vel, float* dd_d_mass,
                                   LTMatrix3* dd_d_virial, deviceStream_t stream)
 {
@@ -954,8 +1001,11 @@ void MD_INFORMATION::Get_pressure(CONTROLLER* controller, float dd_atom_numbers,
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
         sys.Get_Potential_to_stress(controller, dd_atom_numbers, dd_d_virial);
-        sys.Get_Kinetic_to_stress(controller, dd_atom_numbers, dd_vel,
-                                  dd_d_mass);
+        if (mode != MINIMIZATION)
+        {
+            sys.Get_Kinetic_to_stress(controller, dd_atom_numbers, dd_vel,
+                                      dd_d_mass);
+        }
     }
     // PME进程计算势能贡献（如果有的话）
     else
@@ -970,6 +1020,32 @@ void MD_INFORMATION::Get_pressure(CONTROLLER* controller, float dd_atom_numbers,
 #endif
     deviceMemcpy(&sys.h_stress, sys.d_stress, sizeof(LTMatrix3),
                  deviceMemcpyDeviceToHost);
-    sys.h_pressure =
-        (sys.h_stress.a11 + sys.h_stress.a22 + sys.h_stress.a33) / 3;
+    if (!Float_Memory_Is_Finite(&sys.h_stress.a11) ||
+        !Float_Memory_Is_Finite(&sys.h_stress.a21) ||
+        !Float_Memory_Is_Finite(&sys.h_stress.a22) ||
+        !Float_Memory_Is_Finite(&sys.h_stress.a31) ||
+        !Float_Memory_Is_Finite(&sys.h_stress.a32) ||
+        !Float_Memory_Is_Finite(&sys.h_stress.a33))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "MD_INFORMATION::Get_pressure",
+            "Reason:\n\tthe global stress reduction is not finite; an "
+            "input virial or kinetic contribution is non-finite, or the "
+            "finite reduction overflowed\n");
+        return;
+    }
+    const double pressure = (static_cast<double>(sys.h_stress.a11) +
+                             static_cast<double>(sys.h_stress.a22) +
+                             static_cast<double>(sys.h_stress.a33)) /
+                            3.0;
+    const float stored_pressure = static_cast<float>(pressure);
+    if (!Float_Memory_Is_Finite(&stored_pressure))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "MD_INFORMATION::Get_pressure",
+            "Reason:\n\tthe global pressure is outside the finite "
+            "single-precision range\n");
+        return;
+    }
+    sys.h_pressure = stored_pressure;
 }

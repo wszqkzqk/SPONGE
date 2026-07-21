@@ -1,260 +1,235 @@
 ﻿// ECP 积分求值 (Type-1 local + Type-2 semi-local)
 //
-// Type-1 (local, n_k=2): 三中心 Gaussian overlap — 无需 Boys 函数
-// Type-2 (semi-local): factored angular projection at ECP center
-//
-// 当前实现: 仅支持 n_k=2 项 (覆盖 def2-ECP / LANL2DZ 全部项)
-// 后续扩展: n_k=0,1 项 (需要 Boys 函数)
+// Local n_k=2 terms retain the exact three-center Gaussian-overlap fast path.
+// Other local radial powers and every semi-local term use the complete
+// ECP-center angular series in structure/ecp.h. In particular, a projector-l
+// integral contains q=l,l+2,... components; keeping only q=l is not an ECP
+// integral for displaced or Cartesian higher-angular-momentum Gaussians.
 
 // clang-format off
 #include "../quantum_chemistry.h"
 #include "../integrals/one_e.hpp"
+#include "../structure/cart2sph.hpp"
+#include "ecp_error_policy.hpp"
 #include "ecp_integrals.h"
 // clang-format on
 
-// Angular projection coefficients
-// c_{abc,lm} = ∫ Y_lm(Ω) × (x/r)^a (y/r)^b (z/r)^c dΩ
-// where Y_lm are ORTHONORMAL real spherical harmonics (∫ Y_lm Y_l'm' dΩ = δ)
-//
-// 索引: c_table[l][cart_idx][m_idx]
-// Cartesian 分量按降序排列 (与 QC_Get_Lxyz_Device 一致)
-// m_idx = m + l (m 从 -l 到 +l)
-//
-// 使用正交归一 Y_lm 后, 投影公式不需要额外的 4π/(2l+1) 因子。
-
-// l=0: s → Y_00 = 1/√(4π)
-static __device__ const float c_l0[1][1] = {
-    {3.54490770f}  // s: c = √(4π)
-};
-
-// l=1: p → Y_{1m}
-// Cart: x(1,0,0), y(0,1,0), z(0,0,1)
-// Sph: m=-1(y), m=0(z), m=+1(x)
-static __device__ const float c_l1[3][3] = {
-    {0.0f, 0.0f, 2.04665342f},  // x → Y_{1,+1}
-    {2.04665342f, 0.0f, 0.0f},  // y → Y_{1,-1}
-    {0.0f, 2.04665342f, 0.0f}   // z → Y_{1,0}
-};
-
-// l=2: d → Y_{2m}
-// Cart: xx, xy, xz, yy, yz, zz
-// Sph: m=-2,-1,0,+1,+2
-static __device__ const float c_l2[6][5] = {
-    {0.0f, 0.0f, -0.52844364f, 0.0f, 0.91529123f},   // xx
-    {0.91529123f, 0.0f, 0.0f, 0.0f, 0.0f},           // xy
-    {0.0f, 0.0f, 0.0f, 0.91529123f, 0.0f},           // xz
-    {0.0f, 0.0f, -0.52844364f, 0.0f, -0.91529123f},  // yy
-    {0.0f, 0.91529123f, 0.0f, 0.0f, 0.0f},           // yz
-    {0.0f, 0.0f, 1.05688728f, 0.0f, 0.0f}            // zz
-};
-
-// l=3: f → Y_{3m}
-// Cart: xxx, xxy, xxz, xyy, xyz, xzz, yyy, yyz, yzz, zzz
-// Sph: m=-3,-2,-1,0,+1,+2,+3
-static __device__ const float c_l3[10][7] = {
-    {0.0f, 0.0f, 0.0f, 0.0f, -0.32819468f, 0.0f, 0.42369751f},   // xxx
-    {0.42369751f, 0.0f, -0.10939823f, 0.0f, 0.0f, 0.0f, 0.0f},   // xxy
-    {0.0f, 0.0f, 0.0f, -0.26796983f, 0.0f, 0.34594757f, 0.0f},   // xxz
-    {0.0f, 0.0f, 0.0f, 0.0f, -0.10939823f, 0.0f, -0.42369751f},  // xyy
-    {0.0f, 0.34594757f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},           // xyz
-    {0.0f, 0.0f, 0.0f, 0.0f, 0.43759291f, 0.0f, 0.0f},           // xzz
-    {-0.42369751f, 0.0f, -0.32819468f, 0.0f, 0.0f, 0.0f, 0.0f},  // yyy
-    {0.0f, 0.0f, 0.0f, -0.26796983f, 0.0f, -0.34594757f, 0.0f},  // yyz
-    {0.0f, 0.0f, 0.43759291f, 0.0f, 0.0f, 0.0f, 0.0f},           // yzz
-    {0.0f, 0.0f, 0.0f, 0.53593967f, 0.0f, 0.0f, 0.0f}            // zzz
-};
-
-// ECP 径向积分
-// R_l(η) = ∫₀^∞ r^{2l+2} exp(-η r²) dr = (2l+1)!! √π / (2^{l+2} η^{l+3/2})
-
-// Double-factorial: double_factorial(n) returns (2n-1)!!
-static __device__ float double_factorial(int n)
+// Numerical convergence estimates are checked after contraction, because ECP
+// and basis coefficients can amplify a tiny primitive estimate by six or more
+// orders of magnitude. Series values that would consume a material fraction
+// of the final budget are reevaluated by the independent quadrature path. The
+// tail/coarse-fine differences are practical estimators, not formal analytic
+// upper bounds, so diagnostics deliberately call them estimates.
+static __host__ __device__ __forceinline__ bool ecp_double_is_finite(
+    double value)
 {
-    if (n <= 0) return 1.0f;
-    float result = 1.0f;
-    for (int k = 1; k <= n; k++) result *= (2.0f * k - 1.0f);
-    return result;
+    return qc_ecp_error_policy::Double_Is_Finite(value);
 }
 
-// Type-1 Local 积分 (n_k=2)
-// ⟨μ|d_k exp(-ζ_k r_C²)|ν⟩ — 三中心 Gaussian overlap, 无投影算子
-static __device__ float ecp_local_n2(float ei, float ej, float Ax, float Ay,
-                                     float Az, float Bx, float By, float Bz,
-                                     float Cx, float Cy, float Cz,
-                                     float dist_sq_AB, float zeta, int lx_i,
-                                     int ly_i, int lz_i, int lx_j, int ly_j,
-                                     int lz_j)
+static __host__ __device__ bool ecp_contracted_error_is_acceptable(
+    double magnitude, double error)
 {
-    const float g = ei + ej;
-    const float Kab = expf(-ei * ej / g * dist_sq_AB);
-    if (Kab < 1e-15f) return 0.0f;
-
-    const float Px = (ei * Ax + ej * Bx) / g;
-    const float Py = (ei * Ay + ej * By) / g;
-    const float Pz = (ei * Az + ej * Bz) / g;
-
-    const float eta = g + zeta;
-    const float PC2 =
-        (Px - Cx) * (Px - Cx) + (Py - Cy) * (Py - Cy) + (Pz - Cz) * (Pz - Cz);
-    const float Kpc = expf(-g * zeta / eta * PC2);
-
-    const float Qx = (g * Px + zeta * Cx) / eta;
-    const float Qy = (g * Py + zeta * Cy) / eta;
-    const float Qz = (g * Pz + zeta * Cz) / eta;
-
-    float E_x[6][6][11], E_y[6][6][11], E_z[6][6][11];
-    compute_md_coeffs(E_x, lx_i, lx_j, Qx - Ax, Qx - Bx, 0.5f / eta);
-    compute_md_coeffs(E_y, ly_i, ly_j, Qy - Ay, Qy - By, 0.5f / eta);
-    compute_md_coeffs(E_z, lz_i, lz_j, Qz - Az, Qz - Bz, 0.5f / eta);
-
-    const float ox = E_x[lx_i][lx_j][0];
-    const float oy = E_y[ly_i][ly_j][0];
-    const float oz = E_z[lz_i][lz_j][0];
-
-    const float pi_over_eta_32 = sqrtf(CONSTANT_Pi / eta) * (CONSTANT_Pi / eta);
-
-    return Kab * Kpc * ox * oy * oz * pi_over_eta_32;
+    return qc_ecp_error_policy::Contracted_Error_Is_Acceptable(magnitude,
+                                                                error);
 }
 
-// Type-2 Semi-local 积分 (n_k=2)
-//
-// ⟨μ|ΔV_l P_l|ν⟩ 使用 factored angular projection:
-// P_l = (2l+1)/(4π) Σ_m |C_lm⟩⟨C_lm|
-//
-// 将基函数在 ECP 中心 C 展开 (二项式 + Taylor), 取 leading-order 分量:
-//   φ_μ(C + rΩ) ≈ K_A exp(-α r²) Σ_{a+b+c=l} f_a^x f_b^y f_c^z r^l Ω^a Ω^b Ω^c
-//
-// 角投影 ∫ C_lm φ_μ dΩ ≈ K_A exp(-αr²) r^l × [4π/(2l+1)] × B̃_m^μ
-// 其中 B̃_m = Σ_{abc:a+b+c=l} Ω_{abc,lm} f_a f_b f_c
-//
-// 最终: V = [4π/(2l+1)] × K_A K_B × [Σ_m B̃_m^μ B̃_m^ν] × R_l(η)
-
-static __device__ float get_c_lm(int l, int cart_idx, int m_idx)
+static __device__ bool ecp_primitive_result_is_usable(
+    const QC_ECP_PRIMITIVE_RESULT& result)
 {
-    if (l == 0) return c_l0[cart_idx][m_idx];
-    if (l == 1) return c_l1[cart_idx][m_idx];
-    if (l == 2) return c_l2[cart_idx][m_idx];
-    if (l == 3) return c_l3[cart_idx][m_idx];
-    return 0.0f;
+    return result.converged && ecp_double_is_finite(result.value) &&
+           ecp_double_is_finite(result.last_layer_bound) &&
+           result.last_layer_bound >= 0.0;
 }
 
-// f_p 系数 (单方向): 基函数在 ECP 中心展开后 (r-C)^p 的权重
-// d_pow[k] = (C_d - A_d)^k, t_pow[k] = (-2α(C_d-A_d))^k
-static __device__ void compute_fp_1d(int ecp_l, int l_xyz, const float* d_pow,
-                                     const float* t_pow, const float binom[][5],
-                                     const float inv_fact[], float* f_out)
+static __device__ bool ecp_derivative_result_is_usable(
+    const QC_ECP_PRIMITIVE_DERIVATIVE_RESULT& result)
 {
-    for (int p = 0; p <= ecp_l; p++)
+    if (!result.converged || !ecp_double_is_finite(result.estimated_error) ||
+        result.estimated_error < 0.0)
+        return false;
+    for (int direction = 0; direction < 3; ++direction)
     {
-        float s = 0;
-        int kmax = l_xyz < p ? l_xyz : p;
-        for (int k = 0; k <= kmax; k++)
-            s += binom[l_xyz][k] * d_pow[l_xyz - k] * t_pow[p - k] *
-                 inv_fact[p - k];
-        f_out[p] = s;
+        if (!ecp_double_is_finite(result.derivative_i[direction]) ||
+            !ecp_double_is_finite(result.derivative_j[direction]) ||
+            !ecp_double_is_finite(result.derivative_i_error[direction]) ||
+            !ecp_double_is_finite(result.derivative_j_error[direction]) ||
+            result.derivative_i_error[direction] < 0.0 ||
+            result.derivative_j_error[direction] < 0.0)
+            return false;
     }
+    return true;
 }
 
-static __device__ float ecp_semilocal_n2(float ei, float ej, float Ax, float Ay,
-                                         float Az, float Bx, float By, float Bz,
-                                         float Cx, float Cy, float Cz,
-                                         float zeta, int lx_i, int ly_i,
-                                         int lz_i, int lx_j, int ly_j, int lz_j,
-                                         int ecp_l)
+static __device__ QC_ECP_EVALUATION_FAILURE_KIND ecp_primitive_failure_kind(
+    bool converged)
 {
-    // 基函数中心到 ECP 中心的位移 d = C - A (或 C - B)
-    const float dAx = Cx - Ax, dAy = Cy - Ay, dAz = Cz - Az;
-    const float dBx = Cx - Bx, dBy = Cy - By, dBz = Cz - Bz;
-    const float dA2 = dAx * dAx + dAy * dAy + dAz * dAz;
-    const float dB2 = dBx * dBx + dBy * dBy + dBz * dBz;
+    return converged ? QC_ECP_NONFINITE_VALUE_OR_ESTIMATE
+                     : QC_ECP_PRIMITIVE_QUADRATURE_NOT_CONVERGED;
+}
 
-    // 偏心 Gaussian 衰减: K_A = exp(-α|A-C|²)
-    const float KA = expf(-ei * dA2);
-    const float KB = expf(-ej * dB2);
-    if (KA * KB < 1e-15f) return 0.0f;
+static __device__ bool ecp_series_error_is_small_enough(
+    const QC_ECP_PRIMITIVE_RESULT& result, double contraction_scale)
+{
+    return qc_ecp_error_policy::Series_Estimate_Is_Small_Enough(
+        ecp_primitive_result_is_usable(result), contraction_scale,
+        result.last_layer_bound);
+}
 
-    const float eta = ei + ej + zeta;
-
-    // 二项式系数 C(n,k), n ≤ 4
-    static __device__ const float binom[5][5] = {{1, 0, 0, 0, 0},
-                                                 {1, 1, 0, 0, 0},
-                                                 {1, 2, 1, 0, 0},
-                                                 {1, 3, 3, 1, 0},
-                                                 {1, 4, 6, 4, 1}};
-    // 1/k!, k ≤ 4
-    static __device__ const float inv_fact[5] = {1.0f, 1.0f, 0.5f, 1.0f / 6.0f,
-                                                 1.0f / 24.0f};
-
-    // f_p 系数: 基函数在 ECP 中心 C 展开后 (r-C)^p 方向的权重
-    // 数组大小 4 支持 ecp_l ≤ 3 (覆盖 def2-ECP/LANL2DZ 所有通道)
-    float fi_x[4], fi_y[4], fi_z[4];
-    float fj_x[4], fj_y[4], fj_z[4];
-
-    // 预计算 d^n 和 (-2αd)^n 的幂次
-    float dA_px[5] = {1}, dA_py[5] = {1}, dA_pz[5] = {1};
-    float dB_px[5] = {1}, dB_py[5] = {1}, dB_pz[5] = {1};
-    float tA_x[5] = {1}, tA_y[5] = {1}, tA_z[5] = {1};
-    float tB_x[5] = {1}, tB_y[5] = {1}, tB_z[5] = {1};
-    const float mAx = -2.0f * ei * dAx, mAy = -2.0f * ei * dAy,
-                mAz = -2.0f * ei * dAz;
-    const float mBx = -2.0f * ej * dBx, mBy = -2.0f * ej * dBy,
-                mBz = -2.0f * ej * dBz;
-    for (int n = 1; n <= 4; n++)
+static __device__ QC_ECP_PRIMITIVE_RESULT ecp_semilocal_complete(
+    float ei, float ej, float Ax, float Ay, float Az, float Bx, float By,
+    float Bz, float Cx, float Cy, float Cz, float zeta, int n_k, int lx_i,
+    int ly_i, int lz_i, int lx_j, int ly_j, int lz_j, int ecp_l,
+    double contraction_scale = 1.0)
+{
+    const double dx_i = static_cast<double>(Cx) - static_cast<double>(Ax);
+    const double dy_i = static_cast<double>(Cy) - static_cast<double>(Ay);
+    const double dz_i = static_cast<double>(Cz) - static_cast<double>(Az);
+    const double dx_j = static_cast<double>(Cx) - static_cast<double>(Bx);
+    const double dy_j = static_cast<double>(Cy) - static_cast<double>(By);
+    const double dz_j = static_cast<double>(Cz) - static_cast<double>(Bz);
+    const double eta =
+        static_cast<double>(ei) + static_cast<double>(ej) + zeta;
+    const double distance_i2 = dx_i * dx_i + dy_i * dy_i + dz_i * dz_i;
+    const double distance_j2 = dx_j * dx_j + dy_j * dy_j + dz_j * dz_j;
+    const double extent = qc_ecp_math::Semilocal_Series_Extent(
+        static_cast<double>(ei), static_cast<double>(ej), distance_i2,
+        distance_j2, eta, lx_i + ly_i + lz_i, lx_j + ly_j + lz_j, ecp_l);
+    const int order = qc_ecp_math::Semilocal_Series_Order(
+        static_cast<double>(ei), static_cast<double>(ej),
+        distance_i2, distance_j2, eta,
+        lx_i + ly_i + lz_i, lx_j + ly_j + lz_j, ecp_l);
+    if (extent <= static_cast<double>(QC_ECP_MAX_SERIES_ORDER))
     {
-        dA_px[n] = dA_px[n - 1] * dAx;
-        dA_py[n] = dA_py[n - 1] * dAy;
-        dA_pz[n] = dA_pz[n - 1] * dAz;
-        dB_px[n] = dB_px[n - 1] * dBx;
-        dB_py[n] = dB_py[n - 1] * dBy;
-        dB_pz[n] = dB_pz[n - 1] * dBz;
-        tA_x[n] = tA_x[n - 1] * mAx;
-        tA_y[n] = tA_y[n - 1] * mAy;
-        tA_z[n] = tA_z[n - 1] * mAz;
-        tB_x[n] = tB_x[n - 1] * mBx;
-        tB_y[n] = tB_y[n - 1] * mBy;
-        tB_z[n] = tB_z[n - 1] * mBz;
+        const QC_ECP_PRIMITIVE_RESULT series =
+            qc_ecp_math::Semilocal_Primitive(
+                static_cast<double>(ei), static_cast<double>(ej),
+                static_cast<double>(Ax), static_cast<double>(Ay),
+                static_cast<double>(Az), static_cast<double>(Bx),
+                static_cast<double>(By), static_cast<double>(Bz),
+                static_cast<double>(Cx), static_cast<double>(Cy),
+                static_cast<double>(Cz), static_cast<double>(zeta), n_k, lx_i,
+                ly_i, lz_i, lx_j, ly_j, lz_j, ecp_l, order);
+        if (ecp_series_error_is_small_enough(series, contraction_scale))
+            return series;
     }
+    return qc_ecp_math::Semilocal_Primitive_Quadrature(
+        static_cast<double>(ei), static_cast<double>(ej),
+        static_cast<double>(Ax), static_cast<double>(Ay),
+        static_cast<double>(Az), static_cast<double>(Bx),
+        static_cast<double>(By), static_cast<double>(Bz),
+        static_cast<double>(Cx), static_cast<double>(Cy),
+        static_cast<double>(Cz), static_cast<double>(zeta), n_k, lx_i, ly_i,
+        lz_i, lx_j, ly_j, lz_j, ecp_l);
+}
 
-    compute_fp_1d(ecp_l, lx_i, dA_px, tA_x, binom, inv_fact, fi_x);
-    compute_fp_1d(ecp_l, ly_i, dA_py, tA_y, binom, inv_fact, fi_y);
-    compute_fp_1d(ecp_l, lz_i, dA_pz, tA_z, binom, inv_fact, fi_z);
-    compute_fp_1d(ecp_l, lx_j, dB_px, tB_x, binom, inv_fact, fj_x);
-    compute_fp_1d(ecp_l, ly_j, dB_py, tB_y, binom, inv_fact, fj_y);
-    compute_fp_1d(ecp_l, lz_j, dB_pz, tB_z, binom, inv_fact, fj_z);
-
-    // B̃_m = Σ_{abc:a+b+c=l} Ω_{abc,lm} × f_a^x × f_b^y × f_c^z
-    // 数组大小 7 = 2*3+1, 支持 ecp_l ≤ 3
-    const int n_cart = (ecp_l + 1) * (ecp_l + 2) / 2;
-    const int n_sph = 2 * ecp_l + 1;
-    float Bi[7] = {}, Bj[7] = {};
-
-    for (int ic = 0; ic < n_cart; ic++)
+static __device__ QC_ECP_PRIMITIVE_RESULT ecp_local_complete(
+    float ei, float ej, float Ax, float Ay, float Az, float Bx, float By,
+    float Bz, float Cx, float Cy, float Cz, float zeta, int n_k, int lx_i,
+    int ly_i, int lz_i, int lx_j, int ly_j, int lz_j,
+    double contraction_scale = 1.0)
+{
+    if (n_k == 2)
     {
-        int a, b, c;
-        QC_Get_Lxyz_Device(ecp_l, ic, a, b, c);
-        float fi_abc = fi_x[a] * fi_y[b] * fi_z[c];
-        float fj_abc = fj_x[a] * fj_y[b] * fj_z[c];
-        for (int m = 0; m < n_sph; m++)
-        {
-            float clm = get_c_lm(ecp_l, ic, m);
-            Bi[m] += clm * fi_abc;
-            Bj[m] += clm * fj_abc;
-        }
+        return qc_ecp_math::Local_Primitive_N2(
+            static_cast<double>(ei), static_cast<double>(ej),
+            static_cast<double>(Ax), static_cast<double>(Ay),
+            static_cast<double>(Az), static_cast<double>(Bx),
+            static_cast<double>(By), static_cast<double>(Bz),
+            static_cast<double>(Cx), static_cast<double>(Cy),
+            static_cast<double>(Cz), static_cast<double>(zeta), lx_i, ly_i,
+            lz_i, lx_j, ly_j, lz_j);
     }
+    const double dx_i = static_cast<double>(Cx) - static_cast<double>(Ax);
+    const double dy_i = static_cast<double>(Cy) - static_cast<double>(Ay);
+    const double dz_i = static_cast<double>(Cz) - static_cast<double>(Az);
+    const double dx_j = static_cast<double>(Cx) - static_cast<double>(Bx);
+    const double dy_j = static_cast<double>(Cy) - static_cast<double>(By);
+    const double dz_j = static_cast<double>(Cz) - static_cast<double>(Bz);
+    const double eta =
+        static_cast<double>(ei) + static_cast<double>(ej) + zeta;
+    const int angular_degree =
+        lx_i + ly_i + lz_i + lx_j + ly_j + lz_j;
+    const double extent = qc_ecp_math::Local_Series_Extent(
+        static_cast<double>(ei), static_cast<double>(ej), dx_i, dy_i, dz_i,
+        dx_j, dy_j, dz_j, eta, angular_degree);
+    if (extent <= static_cast<double>(QC_ECP_MAX_SERIES_ORDER))
+    {
+        const int order = qc_ecp_math::Local_Series_Order(
+            static_cast<double>(ei), static_cast<double>(ej), dx_i, dy_i, dz_i,
+            dx_j, dy_j, dz_j, eta, angular_degree);
+        const QC_ECP_PRIMITIVE_RESULT series =
+            qc_ecp_math::Local_Primitive_Series(
+                static_cast<double>(ei), static_cast<double>(ej),
+                static_cast<double>(Ax), static_cast<double>(Ay),
+                static_cast<double>(Az), static_cast<double>(Bx),
+                static_cast<double>(By), static_cast<double>(Bz),
+                static_cast<double>(Cx), static_cast<double>(Cy),
+                static_cast<double>(Cz), static_cast<double>(zeta), n_k, lx_i,
+                ly_i, lz_i, lx_j, ly_j, lz_j, order);
+        if (ecp_series_error_is_small_enough(series, contraction_scale))
+            return series;
+    }
+    return qc_ecp_math::Local_Primitive_Quadrature(
+        static_cast<double>(ei), static_cast<double>(ej),
+        static_cast<double>(Ax), static_cast<double>(Ay),
+        static_cast<double>(Az), static_cast<double>(Bx),
+        static_cast<double>(By), static_cast<double>(Bz),
+        static_cast<double>(Cx), static_cast<double>(Cy),
+        static_cast<double>(Cz), static_cast<double>(zeta), n_k, lx_i, ly_i,
+        lz_i, lx_j, ly_j, lz_j);
+}
 
-    // 角动量求和: Σ_m B̃_m^μ × B̃_m^ν
-    float angular_sum = 0.0f;
-    for (int m = 0; m < n_sph; m++) angular_sum += Bi[m] * Bj[m];
+struct QC_ECP_DEVICE_FAILURE
+{
+    int kind;
+    int task_id;
+    int atom;
+    int channel;
+    int term;
+    int primitive_i;
+    int primitive_j;
+    int cartesian_i;
+    int cartesian_j;
+    double value;
+    double estimated_error;
+};
 
-    // 径向积分: R_l(η) = (2l+1)!! √π / (2^{l+2} η^{l+3/2})
-    float R_l = double_factorial(ecp_l + 1) * sqrtf(CONSTANT_Pi);
-    float eta_pow = eta * sqrtf(eta);  // η^{3/2}
-    for (int i = 0; i < ecp_l; i++) eta_pow *= eta;
-    float two_pow = (float)(1 << (ecp_l + 2));  // 2^{l+2}
-    R_l /= (two_pow * eta_pow);
+static __device__ int claim_ecp_failure_kind(
+    QC_ECP_DEVICE_FAILURE* failure, QC_ECP_EVALUATION_FAILURE_KIND kind)
+{
+#ifdef GPU_ARCH_NAME
+    return atomicCAS(&failure->kind, QC_ECP_EVALUATION_OK,
+                     static_cast<int>(kind));
+#else
+    int observed = QC_ECP_EVALUATION_OK;
+#pragma omp critical(sponge_ecp_failure_claim)
+    {
+        observed = failure->kind;
+        if (observed == QC_ECP_EVALUATION_OK)
+            failure->kind = static_cast<int>(kind);
+    }
+    return observed;
+#endif
+}
 
-    // K_A × K_B × angular_sum × R_l (no extra factor with orthonormal Y_lm)
-    return KA * KB * angular_sum * R_l;
+static __device__ void record_ecp_failure(
+    QC_ECP_DEVICE_FAILURE* failure, QC_ECP_EVALUATION_FAILURE_KIND kind,
+    int task_id, int atom, int channel, int term, int primitive_i,
+    int primitive_j, int cartesian_i, int cartesian_j, double value,
+    double estimated_error)
+{
+    if (claim_ecp_failure_kind(failure, kind) != QC_ECP_EVALUATION_OK)
+        return;
+    failure->task_id = task_id;
+    failure->atom = atom;
+    failure->channel = channel;
+    failure->term = term;
+    failure->primitive_i = primitive_i;
+    failure->primitive_j = primitive_j;
+    failure->cartesian_i = cartesian_i;
+    failure->cartesian_j = cartesian_j;
+    failure->value = value;
+    failure->estimated_error = estimated_error;
 }
 
 // 找到 local channel (l == l_max 或 l < 0)
@@ -271,19 +246,21 @@ static __device__ int find_local_channel(int ch_start, int ch_end, int l_max,
 
 // ECP 主 Kernel
 static __global__ void ECP_Kernel(
-    const int n_tasks, const QC_ONE_E_TASK* tasks, const VECTOR* centers,
+    const int n_tasks, const int task_offset, const QC_ONE_E_TASK* tasks,
+    const VECTOR* centers,
     const int* l_list, const float* exps_arr, const float* coeffs_arr,
     const int* shell_offsets, const int* shell_sizes, const int* ao_offsets,
     // ECP 参数
     const VECTOR* atom_coords, int natm, const int* ecp_l_max,
     const int* ecp_atom_channel_range, const int* ecp_channel_l,
     const int* ecp_channel_offsets, const int* ecp_channel_sizes,
-    const float* ecp_d, const float* ecp_zeta, const int* ecp_n_arr,
+    const float* ecp_d, const float* ecp_zeta, const int* ecp_n,
     // 输出
-    float* out_V_ECP, int nao_total)
+    float* out_V_ECP, int nao_total, QC_ECP_DEVICE_FAILURE* failure)
 {
     SIMPLE_DEVICE_FOR(task_id, n_tasks)
     {
+        const int global_task_id = task_offset + task_id;
         QC_ONE_E_TASK sh_idx = tasks[task_id];
         const int i_sh = sh_idx.x;
         const int j_sh = sh_idx.y;
@@ -295,9 +272,6 @@ static __global__ void ECP_Kernel(
         const VECTOR A = centers[i_sh], B = centers[j_sh];
         const float Ax = A.x, Ay = A.y, Az = A.z;
         const float Bx = B.x, By = B.y, Bz = B.z;
-        const float dist_sq = (Ax - Bx) * (Ax - Bx) + (Ay - By) * (Ay - By) +
-                              (Az - Bz) * (Az - Bz);
-
         for (int idx_i = 0; idx_i < ni; idx_i++)
         {
             for (int idx_j = 0; idx_j < nj; idx_j++)
@@ -306,7 +280,11 @@ static __global__ void ECP_Kernel(
                 QC_Get_Lxyz_Device(li, idx_i, lx_i, ly_i, lz_i);
                 QC_Get_Lxyz_Device(lj, idx_j, lx_j, ly_j, lz_j);
 
-                float total_ecp = 0.0f;
+                double total_ecp = 0.0;
+                double total_error_bound = 0.0;
+                double largest_weighted_error = -1.0;
+                int error_atom = -1, error_channel = -1, error_term = -1;
+                int error_primitive_i = -1, error_primitive_j = -1;
 
                 // 遍历 ECP 原子
                 for (int iat = 0; iat < natm; iat++)
@@ -333,7 +311,8 @@ static __global__ void ECP_Kernel(
                             const float ej = exps_arr[shell_offsets[j_sh] + pj];
                             const float cj =
                                 coeffs_arr[shell_offsets[j_sh] + pj];
-                            const float cc = ci * cj;
+                            const double cc = static_cast<double>(ci) *
+                                              static_cast<double>(cj);
 
                             // 1. Local 贡献: ⟨μ|U_L|ν⟩ (无投影)
                             if (local_ch >= 0)
@@ -344,14 +323,51 @@ static __global__ void ECP_Kernel(
                                 {
                                     const float dk = ecp_d[t_off + it];
                                     const float zk = ecp_zeta[t_off + it];
-                                    const int nk = ecp_n_arr[t_off + it];
-                                    if (nk != 2) continue;
-
-                                    float val = ecp_local_n2(
-                                        ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy,
-                                        Cz, dist_sq, zk, lx_i, ly_i, lz_i, lx_j,
-                                        ly_j, lz_j);
-                                    total_ecp += cc * dk * val;
+                                    const double factor =
+                                        cc * static_cast<double>(dk);
+                                    if (!ecp_double_is_finite(factor))
+                                    {
+                                        record_ecp_failure(
+                                            failure,
+                                            QC_ECP_NONFINITE_VALUE_OR_ESTIMATE,
+                                            global_task_id, iat, local_ch,
+                                            t_off + it, pi, pj, idx_i, idx_j,
+                                            factor, DBL_MAX);
+                                        continue;
+                                    }
+                                    const QC_ECP_PRIMITIVE_RESULT evaluated =
+                                        ecp_local_complete(
+                                            ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx,
+                                            Cy, Cz, zk, ecp_n[t_off + it], lx_i,
+                                            ly_i, lz_i, lx_j, ly_j, lz_j,
+                                            qc_ecp_math::Abs(factor));
+                                    if (!ecp_primitive_result_is_usable(
+                                            evaluated))
+                                    {
+                                        record_ecp_failure(
+                                            failure,
+                                            ecp_primitive_failure_kind(
+                                                evaluated.converged),
+                                            global_task_id, iat, local_ch,
+                                            t_off + it, pi, pj, idx_i, idx_j,
+                                            evaluated.value,
+                                            evaluated.last_layer_bound);
+                                        continue;
+                                    }
+                                    total_ecp += factor * evaluated.value;
+                                    const double weighted_error =
+                                        qc_ecp_math::Abs(factor) *
+                                        evaluated.last_layer_bound;
+                                    total_error_bound += weighted_error;
+                                    if (weighted_error > largest_weighted_error)
+                                    {
+                                        largest_weighted_error = weighted_error;
+                                        error_atom = iat;
+                                        error_channel = local_ch;
+                                        error_term = t_off + it;
+                                        error_primitive_i = pi;
+                                        error_primitive_j = pj;
+                                    }
                                 }
                             }
 
@@ -369,14 +385,51 @@ static __global__ void ECP_Kernel(
                                 {
                                     const float dk = ecp_d[t_off + it];
                                     const float zk = ecp_zeta[t_off + it];
-                                    const int nk = ecp_n_arr[t_off + it];
-                                    if (nk != 2) continue;
-
-                                    float val = ecp_semilocal_n2(
-                                        ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy,
-                                        Cz, zk, lx_i, ly_i, lz_i, lx_j, ly_j,
-                                        lz_j, ch_l);
-                                    total_ecp += cc * dk * val;
+                                    const double factor =
+                                        cc * static_cast<double>(dk);
+                                    if (!ecp_double_is_finite(factor))
+                                    {
+                                        record_ecp_failure(
+                                            failure,
+                                            QC_ECP_NONFINITE_VALUE_OR_ESTIMATE,
+                                            global_task_id, iat, ich,
+                                            t_off + it, pi, pj, idx_i, idx_j,
+                                            factor, DBL_MAX);
+                                        continue;
+                                    }
+                                    const QC_ECP_PRIMITIVE_RESULT evaluated =
+                                        ecp_semilocal_complete(
+                                            ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx,
+                                            Cy, Cz, zk, ecp_n[t_off + it], lx_i,
+                                            ly_i, lz_i, lx_j, ly_j, lz_j,
+                                            ch_l, qc_ecp_math::Abs(factor));
+                                    if (!ecp_primitive_result_is_usable(
+                                            evaluated))
+                                    {
+                                        record_ecp_failure(
+                                            failure,
+                                            ecp_primitive_failure_kind(
+                                                evaluated.converged),
+                                            global_task_id, iat, ich,
+                                            t_off + it, pi, pj, idx_i, idx_j,
+                                            evaluated.value,
+                                            evaluated.last_layer_bound);
+                                        continue;
+                                    }
+                                    total_ecp += factor * evaluated.value;
+                                    const double weighted_error =
+                                        qc_ecp_math::Abs(factor) *
+                                        evaluated.last_layer_bound;
+                                    total_error_bound += weighted_error;
+                                    if (weighted_error > largest_weighted_error)
+                                    {
+                                        largest_weighted_error = weighted_error;
+                                        error_atom = iat;
+                                        error_channel = ich;
+                                        error_term = t_off + it;
+                                        error_primitive_i = pi;
+                                        error_primitive_j = pj;
+                                    }
                                 }
                             }
                         }
@@ -385,17 +438,194 @@ static __global__ void ECP_Kernel(
 
                 // 1e task 列表包含全部 (i,j) 和 (j,i)，无需手动对称化
                 const int idx = (off_i + idx_i) * nao_total + (off_j + idx_j);
-                atomicAdd(&out_V_ECP[idx], total_ecp);
+                const qc_ecp_error_policy::Matrix_Storage_Assessment storage =
+                    qc_ecp_error_policy::Assess_Matrix_Storage(
+                        total_ecp, total_error_bound);
+                if (!storage.accepted)
+                {
+                    QC_ECP_EVALUATION_FAILURE_KIND kind =
+                        QC_ECP_MATRIX_STORAGE_EXCEEDS_BUDGET;
+                    if (!ecp_double_is_finite(total_ecp) ||
+                        !ecp_double_is_finite(total_error_bound))
+                        kind = QC_ECP_NONFINITE_VALUE_OR_ESTIMATE;
+                    else if (!ecp_contracted_error_is_acceptable(
+                                 qc_ecp_math::Abs(total_ecp),
+                                 total_error_bound))
+                        kind = QC_ECP_MATRIX_ESTIMATE_EXCEEDS_BUDGET;
+                    record_ecp_failure(
+                        failure, kind, global_task_id, error_atom,
+                        error_channel, error_term, error_primitive_i,
+                        error_primitive_j, idx_i, idx_j, storage.stored_value,
+                        storage.total_error_estimate);
+                    continue;
+                }
+                // Every ordered shell pair appears exactly once in the 1e task
+                // list and Cartesian AO ranges do not overlap, so this element
+                // has a single writer. Assignment avoids an unnecessary
+                // second float rounding through atomic addition with zero.
+                out_V_ECP[idx] = static_cast<float>(storage.stored_value);
             }
         }
     }
 }
 
 // ECP 积分驱动
-void QC_Compute_V_ECP(const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
-                      float* d_V_ECP)
+static void QC_Copy_ECP_Failure_Context(
+    const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
+    const QC_ECP_DEVICE_FAILURE& device_failure,
+    QC_ECP_EVALUATION_FAILURE* failure)
 {
-    if (!mol.has_ecp || mol.ecp_total_terms == 0) return;
+    if (failure == nullptr) return;
+    failure->kind = static_cast<QC_ECP_EVALUATION_FAILURE_KIND>(
+        device_failure.kind);
+    failure->task_id = device_failure.task_id;
+    if (device_failure.task_id >= 0 &&
+        device_failure.task_id < task_ctx.topo.n_1e_tasks)
+    {
+        const QC_ONE_E_TASK& task =
+            task_ctx.topo.h_1e_tasks[device_failure.task_id];
+        failure->shell_i = task.x;
+        failure->shell_j = task.y;
+    }
+    failure->atom = device_failure.atom;
+    failure->channel = device_failure.channel;
+    failure->term = device_failure.term;
+    failure->primitive_i = device_failure.primitive_i;
+    failure->primitive_j = device_failure.primitive_j;
+    failure->cartesian_i = device_failure.cartesian_i;
+    failure->cartesian_j = device_failure.cartesian_j;
+    failure->value = device_failure.value;
+    failure->estimated_error = device_failure.estimated_error;
+    if (device_failure.channel >= 0 &&
+        device_failure.channel < static_cast<int>(mol.h_ecp_l.size()))
+        failure->channel_l = mol.h_ecp_l[device_failure.channel];
+    if (device_failure.term >= 0 &&
+        device_failure.term < static_cast<int>(mol.h_ecp_n.size()))
+        failure->n_k = mol.h_ecp_n[device_failure.term];
+}
+
+static bool QC_Allocate_ECP_Failure(QC_ECP_DEVICE_FAILURE** device_failure)
+{
+    QC_ECP_DEVICE_FAILURE initial = {};
+    initial.kind = QC_ECP_EVALUATION_OK;
+    initial.task_id = initial.atom = initial.channel = initial.term = -1;
+    initial.primitive_i = initial.primitive_j = -1;
+    initial.cartesian_i = initial.cartesian_j = -1;
+    initial.value = initial.estimated_error = 0.0;
+    if (!Device_Malloc_Safely(reinterpret_cast<void**>(device_failure),
+                              sizeof(initial)))
+        return false;
+    deviceMemcpy(*device_failure, &initial, sizeof(initial),
+                 deviceMemcpyHostToDevice);
+    return true;
+}
+
+static bool QC_Report_ECP_Resource_Failure(
+    QC_ECP_EVALUATION_FAILURE* failure)
+{
+    if (failure != nullptr)
+        failure->kind = QC_ECP_RESOURCE_ALLOCATION_FAILED;
+    return false;
+}
+
+static bool QC_Finalize_ECP_Failure(
+    const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
+    QC_ECP_DEVICE_FAILURE* device_failure,
+    QC_ECP_EVALUATION_FAILURE* failure)
+{
+    QC_ECP_DEVICE_FAILURE observed = {};
+    deviceMemcpy(&observed, device_failure, sizeof(observed),
+                 deviceMemcpyDeviceToHost);
+    deviceFree(device_failure);
+    if (observed.kind == QC_ECP_EVALUATION_OK) return true;
+    QC_Copy_ECP_Failure_Context(mol, task_ctx, observed, failure);
+    return false;
+}
+
+static __global__ void ECP_Commit_Gradient_Kernel(
+    int component_count, const double* ecp_gradient, double* gradient)
+{
+    SIMPLE_DEVICE_FOR(component, component_count)
+    {
+        gradient[component] += ecp_gradient[component];
+    }
+}
+
+static bool QC_Finalize_ECP_Gradient(
+    const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
+    QC_ECP_DEVICE_FAILURE* device_failure, double* device_certificate,
+    QC_ECP_DEVICE_FAILURE* device_context, std::size_t component_count,
+    double* committed_gradient, QC_ECP_EVALUATION_FAILURE* failure)
+{
+    QC_ECP_DEVICE_FAILURE observed = {};
+    std::vector<double> certificate(2 * component_count, 0.0);
+    std::vector<QC_ECP_DEVICE_FAILURE> context(component_count);
+    deviceMemcpy(&observed, device_failure, sizeof(observed),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(certificate.data(), device_certificate,
+                 certificate.size() * sizeof(double),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(context.data(), device_context,
+                 context.size() * sizeof(QC_ECP_DEVICE_FAILURE),
+                 deviceMemcpyDeviceToHost);
+    if (observed.kind != QC_ECP_EVALUATION_OK)
+    {
+        QC_Copy_ECP_Failure_Context(mol, task_ctx, observed, failure);
+        deviceFree(device_failure);
+        deviceFree(device_certificate);
+        deviceFree(device_context);
+        return false;
+    }
+
+    const double* error = certificate.data();
+    const double* observable = certificate.data() + component_count;
+    for (std::size_t component = 0; component < component_count; ++component)
+    {
+        const qc_ecp_error_policy::Gradient_Assessment assessment =
+            qc_ecp_error_policy::Assess_Gradient(observable[component],
+                                                 error[component]);
+        if (assessment.accepted)
+            continue;
+
+        QC_ECP_DEVICE_FAILURE aggregate = context[component];
+        aggregate.kind =
+            ecp_double_is_finite(observable[component]) &&
+                    ecp_double_is_finite(error[component])
+                ? QC_ECP_GRADIENT_ESTIMATE_EXCEEDS_BUDGET
+                : QC_ECP_NONFINITE_VALUE_OR_ESTIMATE;
+        aggregate.value = observable[component];
+        aggregate.estimated_error = error[component];
+        QC_Copy_ECP_Failure_Context(mol, task_ctx, aggregate, failure);
+        if (failure != nullptr)
+        {
+            failure->observable_atom = static_cast<int>(component / 3);
+            failure->direction = static_cast<int>(component % 3);
+        }
+        deviceFree(device_failure);
+        deviceFree(device_certificate);
+        deviceFree(device_context);
+        return false;
+    }
+
+    const int count = static_cast<int>(component_count);
+    const double* device_observable = device_certificate + component_count;
+    Launch_Device_Kernel(ECP_Commit_Gradient_Kernel, (count + 63) / 64, 64, 0,
+                         0, count, device_observable, committed_gradient);
+    deviceFree(device_failure);
+    deviceFree(device_certificate);
+    deviceFree(device_context);
+    return true;
+}
+
+bool QC_Compute_V_ECP(const QC_MOLECULE& mol,
+                      const QC_INTEGRAL_TASKS& task_ctx, float* d_V_ECP,
+                      QC_ECP_EVALUATION_FAILURE* failure)
+{
+    if (!mol.has_ecp || mol.ecp_total_terms == 0) return true;
+
+    QC_ECP_DEVICE_FAILURE* device_failure = nullptr;
+    if (!QC_Allocate_ECP_Failure(&device_failure))
+        return QC_Report_ECP_Resource_Failure(failure);
 
     const int n_total = task_ctx.topo.n_1e_tasks;
     const int chunk_size = ONE_E_BATCH_SIZE;
@@ -405,14 +635,16 @@ void QC_Compute_V_ECP(const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
         int current_chunk = std::min(chunk_size, n_total - i);
         const QC_ONE_E_TASK* task_ptr = task_ctx.buffers.d_1e_tasks + i;
         Launch_Device_Kernel(
-            ECP_Kernel, (current_chunk + 63) / 64, 64, 0, 0, current_chunk,
+            ECP_Kernel, (current_chunk + 63) / 64, 64, 0, 0, current_chunk, i,
             task_ptr, mol.d_centers, mol.d_l_list, mol.d_exps, mol.d_coeffs,
             mol.d_shell_offsets, mol.d_shell_sizes, mol.d_ao_offsets,
             mol.d_atom_coords, mol.natm, mol.d_ecp_l_max,
             mol.d_ecp_atom_channel_range, mol.d_ecp_l,
             mol.d_ecp_channel_offsets, mol.d_ecp_channel_sizes, mol.d_ecp_d,
-            mol.d_ecp_zeta, mol.d_ecp_n, d_V_ECP, mol.nao_cart);
+            mol.d_ecp_zeta, mol.d_ecp_n, d_V_ECP, mol.nao_cart,
+            device_failure);
     }
+    return QC_Finalize_ECP_Failure(mol, task_ctx, device_failure, failure);
 }
 
 // ECP 梯度 Kernel
@@ -422,40 +654,144 @@ void QC_Compute_V_ECP(const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
 //   bra 导数 × 2.0 × P → atom_i (因子 2 包含 ket 贡献)
 //   ECP 中心导数 × 1.0 × P → ecp atom
 
-static __device__ float ecp_integral_for_term(
+static __device__ QC_ECP_PRIMITIVE_RESULT ecp_integral_for_term(
     float ei, float ej, float Ax, float Ay, float Az, float Bx, float By,
     float Bz, float Cx, float Cy, float Cz, float dist_sq_AB, float zeta,
-    int lx_i, int ly_i, int lz_i, int lx_j, int ly_j, int lz_j, int ch_l,
+    int n_k, int lx_i, int ly_i, int lz_i, int lx_j, int ly_j, int lz_j,
+    int ch_l, bool is_local, double contraction_scale)
+{
+    (void)dist_sq_AB;
+    if (lx_i < 0 || ly_i < 0 || lz_i < 0 || lx_j < 0 || ly_j < 0 ||
+        lz_j < 0)
+    {
+        QC_ECP_PRIMITIVE_RESULT zero;
+        zero.converged = true;
+        return zero;
+    }
+    if (is_local)
+        return ecp_local_complete(ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy, Cz,
+                                  zeta, n_k, lx_i, ly_i, lz_i, lx_j, ly_j,
+                                  lz_j, contraction_scale);
+    return ecp_semilocal_complete(ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy, Cz,
+                                  zeta, n_k, lx_i, ly_i, lz_i, lx_j, ly_j,
+                                  lz_j, ch_l, contraction_scale);
+}
+
+static __device__ QC_ECP_PRIMITIVE_RESULT ecp_integral_or_record_failure(
+    float ei, float ej, float Ax, float Ay, float Az, float Bx, float By,
+    float Bz, float Cx, float Cy, float Cz, float dist_sq_AB, float zeta,
+    int n_k, int lx_i, int ly_i, int lz_i, int lx_j, int ly_j, int lz_j,
+    int ch_l, bool is_local, QC_ECP_DEVICE_FAILURE* failure, int task_id,
+    int atom, int channel, int term, int primitive_i, int primitive_j,
+    int cartesian_i, int cartesian_j, double contraction_scale)
+{
+    const QC_ECP_PRIMITIVE_RESULT evaluated = ecp_integral_for_term(
+        ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy, Cz, dist_sq_AB, zeta, n_k,
+        lx_i, ly_i, lz_i, lx_j, ly_j, lz_j, ch_l, is_local,
+        contraction_scale);
+    if (!ecp_primitive_result_is_usable(evaluated))
+        record_ecp_failure(
+            failure, ecp_primitive_failure_kind(evaluated.converged), task_id,
+            atom, channel, term, primitive_i, primitive_j, cartesian_i,
+            cartesian_j, evaluated.value, evaluated.last_layer_bound);
+    return evaluated;
+}
+
+static __device__ bool ecp_gradient_requires_direct_quadrature(
+    float ei, float ej, float Ax, float Ay, float Az, float Bx, float By,
+    float Bz, float Cx, float Cy, float Cz, float zeta, int n_k, int lx_i,
+    int ly_i, int lz_i, int lx_j, int ly_j, int lz_j, int ch_l,
     bool is_local)
 {
-    if (lx_i < 0 || ly_i < 0 || lz_i < 0) return 0.0f;
-    if (lx_j < 0 || ly_j < 0 || lz_j < 0) return 0.0f;
+    const double dx_i = static_cast<double>(Cx) - static_cast<double>(Ax);
+    const double dy_i = static_cast<double>(Cy) - static_cast<double>(Ay);
+    const double dz_i = static_cast<double>(Cz) - static_cast<double>(Az);
+    const double dx_j = static_cast<double>(Cx) - static_cast<double>(Bx);
+    const double dy_j = static_cast<double>(Cy) - static_cast<double>(By);
+    const double dz_j = static_cast<double>(Cz) - static_cast<double>(Bz);
+    const double eta =
+        static_cast<double>(ei) + static_cast<double>(ej) + zeta;
     if (is_local)
-        return ecp_local_n2(ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy, Cz,
-                            dist_sq_AB, zeta, lx_i, ly_i, lz_i, lx_j, ly_j,
-                            lz_j);
-    else
-        return ecp_semilocal_n2(ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy, Cz,
-                                zeta, lx_i, ly_i, lz_i, lx_j, ly_j, lz_j, ch_l);
+    {
+        // n_k=2 has an exact Gaussian-overlap path for every raised/lowered
+        // integral and is always cheaper than numerical quadrature.
+        if (n_k == 2) return false;
+        const double extent = qc_ecp_math::Local_Series_Extent(
+            static_cast<double>(ei), static_cast<double>(ej), dx_i, dy_i, dz_i,
+            dx_j, dy_j, dz_j, eta,
+            lx_i + ly_i + lz_i + lx_j + ly_j + lz_j + 1);
+        return extent > static_cast<double>(QC_ECP_MAX_SERIES_ORDER);
+    }
+    const double distance_i2 = dx_i * dx_i + dy_i * dy_i + dz_i * dz_i;
+    const double distance_j2 = dx_j * dx_j + dy_j * dy_j + dz_j * dz_j;
+    const double extent = qc_ecp_math::Semilocal_Series_Extent(
+        static_cast<double>(ei), static_cast<double>(ej), distance_i2,
+        distance_j2, eta, lx_i + ly_i + lz_i + 1,
+        lx_j + ly_j + lz_j + 1, ch_l);
+    return extent > static_cast<double>(QC_ECP_MAX_SERIES_ORDER);
+}
+
+static __device__ QC_ECP_PRIMITIVE_DERIVATIVE_RESULT
+ecp_direct_primitive_derivative(
+    float ei, float ej, float Ax, float Ay, float Az, float Bx, float By,
+    float Bz, float Cx, float Cy, float Cz, float zeta, int n_k, int lx_i,
+    int ly_i, int lz_i, int lx_j, int ly_j, int lz_j, int ch_l,
+    bool is_local)
+{
+    if (is_local)
+        return qc_ecp_math::Local_Primitive_Derivative_Quadrature(
+            static_cast<double>(ei), static_cast<double>(ej),
+            static_cast<double>(Ax), static_cast<double>(Ay),
+            static_cast<double>(Az), static_cast<double>(Bx),
+            static_cast<double>(By), static_cast<double>(Bz),
+            static_cast<double>(Cx), static_cast<double>(Cy),
+            static_cast<double>(Cz), static_cast<double>(zeta), n_k, lx_i,
+            ly_i, lz_i, lx_j, ly_j, lz_j);
+    return qc_ecp_math::Semilocal_Primitive_Derivative_Quadrature(
+        static_cast<double>(ei), static_cast<double>(ej),
+        static_cast<double>(Ax), static_cast<double>(Ay),
+        static_cast<double>(Az), static_cast<double>(Bx),
+        static_cast<double>(By), static_cast<double>(Bz),
+        static_cast<double>(Cx), static_cast<double>(Cy),
+        static_cast<double>(Cz), static_cast<double>(zeta), n_k, lx_i, ly_i,
+        lz_i, lx_j, ly_j, lz_j, ch_l);
+}
+
+static __device__ void record_ecp_gradient_context(
+    QC_ECP_DEVICE_FAILURE* context, int task_id, int ecp_atom, int channel,
+    int term, int primitive_i, int primitive_j, int cartesian_i,
+    int cartesian_j, double contribution, double error)
+{
+    if (ecp_double_is_finite(contribution) && ecp_double_is_finite(error) &&
+        qc_ecp_math::Abs(contribution) == 0.0 && error == 0.0)
+        return;
+    record_ecp_failure(
+        context, QC_ECP_GRADIENT_ESTIMATE_EXCEEDS_BUDGET, task_id, ecp_atom,
+        channel, term, primitive_i, primitive_j, cartesian_i, cartesian_j,
+        contribution, error);
 }
 
 static __global__ void ECP_Grad_Kernel(
-    const int n_tasks, const QC_ONE_E_TASK* tasks, const VECTOR* centers,
-    const int* l_list, const float* exps_arr, const float* coeffs_arr,
-    const int* shell_offsets, const int* shell_sizes, const int* ao_offsets,
+    const int n_tasks, const int task_offset, const QC_ONE_E_TASK* tasks,
+    const VECTOR* centers, const int* l_list, const float* exps_arr,
+    const float* coeffs_arr, const int* shell_offsets, const int* shell_sizes,
+    const int* ao_offsets,
     // ECP 参数
     const VECTOR* atom_coords, int natm, const int* ecp_l_max,
     const int* ecp_atom_channel_range, const int* ecp_channel_l,
     const int* ecp_channel_offsets, const int* ecp_channel_sizes,
-    const float* ecp_d, const float* ecp_zeta, const int* ecp_n_arr,
+    const float* ecp_d, const float* ecp_zeta, const int* ecp_n,
     // 密度 (已含 norm 权重)
     int nao_total, const int* shell_atom, const float* P_weighted,
-    // 输出
-    double* grad)
+    // 输出与最终 observable 误差证书
+    double* gradient_error, double* gradient_observable,
+    QC_ECP_DEVICE_FAILURE* gradient_context,
+    QC_ECP_DEVICE_FAILURE* failure)
 {
     SIMPLE_DEVICE_FOR(task_id, n_tasks)
     {
-        QC_ONE_E_TASK sh_idx = tasks[task_id];
+        const int global_task_id = task_offset + task_id;
+        const QC_ONE_E_TASK sh_idx = tasks[task_id];
         const int i_sh = sh_idx.x;
         const int j_sh = sh_idx.y;
 
@@ -467,12 +803,13 @@ static __global__ void ECP_Grad_Kernel(
         const VECTOR A = centers[i_sh], B = centers[j_sh];
         const float Ax = A.x, Ay = A.y, Az = A.z;
         const float Bx = B.x, By = B.y, Bz = B.z;
-        const float dist_sq = (Ax - Bx) * (Ax - Bx) + (Ay - By) * (Ay - By) +
+        const float dist_sq = (Ax - Bx) * (Ax - Bx) +
+                              (Ay - By) * (Ay - By) +
                               (Az - Bz) * (Az - Bz);
 
-        for (int idx_i = 0; idx_i < ni; idx_i++)
+        for (int idx_i = 0; idx_i < ni; ++idx_i)
         {
-            for (int idx_j = 0; idx_j < nj; idx_j++)
+            for (int idx_j = 0; idx_j < nj; ++idx_j)
             {
                 int lx_i, ly_i, lz_i, lx_j, ly_j, lz_j;
                 QC_Get_Lxyz_Device(li, idx_i, lx_i, ly_i, lz_i);
@@ -480,10 +817,20 @@ static __global__ void ECP_Grad_Kernel(
 
                 const int mu = off_i + idx_i;
                 const int nu = off_j + idx_j;
-                const float p_val = P_weighted[mu * nao_total + nu];
+                const double dp = static_cast<double>(
+                    P_weighted[mu * nao_total + nu]);
+                if (!ecp_double_is_finite(dp))
+                {
+                    record_ecp_failure(
+                        failure, QC_ECP_NONFINITE_VALUE_OR_ESTIMATE,
+                        global_task_id, -1, -1, -1, -1, -1, idx_i, idx_j, dp,
+                        DBL_MAX);
+                    continue;
+                }
+                const double abs_dp = qc_ecp_math::Abs(dp);
 
                 // 遍历 ECP 原子
-                for (int iat = 0; iat < natm; iat++)
+                for (int iat = 0; iat < natm; ++iat)
                 {
                     if (ecp_l_max[iat] < 0) continue;
 
@@ -493,112 +840,273 @@ static __global__ void ECP_Grad_Kernel(
                     const int l_max = ecp_l_max[iat];
                     const int ch_start = ecp_atom_channel_range[iat];
                     const int ch_end = ecp_atom_channel_range[iat + 1];
+                    const int local_ch = find_local_channel(
+                        ch_start, ch_end, l_max, ecp_channel_l);
 
-                    int local_ch = find_local_channel(ch_start, ch_end, l_max,
-                                                      ecp_channel_l);
-
-                    // 对每个 primitive pair 累积梯度
-                    for (int pi = 0; pi < shell_sizes[i_sh]; pi++)
+                    // 对每个 primitive pair 累积梯度。误差先按 ECP/basis
+                    // coefficient 做绝对值收缩，随后再按密度和对称因子
+                    // 累计到最终原子力 observable。
+                    for (int pi = 0; pi < shell_sizes[i_sh]; ++pi)
                     {
                         const float ei = exps_arr[shell_offsets[i_sh] + pi];
                         const float ci = coeffs_arr[shell_offsets[i_sh] + pi];
-                        for (int pj = 0; pj < shell_sizes[j_sh]; pj++)
+                        for (int pj = 0; pj < shell_sizes[j_sh]; ++pj)
                         {
                             const float ej = exps_arr[shell_offsets[j_sh] + pj];
                             const float cj =
                                 coeffs_arr[shell_offsets[j_sh] + pj];
-                            const float cc = ci * cj;
-
-                            // 收集所有 ECP 通道的梯度贡献
-                            // dV_A[3] = d/dA_{x,y,z}, dV_B[3] = d/dB_{x,y,z}
+                            const double cc = static_cast<double>(ci) *
+                                              static_cast<double>(cj);
                             double dV_A[3] = {}, dV_B[3] = {};
+                            double dV_A_error[3] = {}, dV_B_error[3] = {};
                             int l_i[3] = {lx_i, ly_i, lz_i};
                             int l_j[3] = {lx_j, ly_j, lz_j};
 
-                            auto accumulate_grad =
-                                [&](float dk, float zk, int ch_l, bool is_local)
+                            auto accumulate_grad = [&](float dk, float zk,
+                                                       int n_k, int ch_l,
+                                                       bool is_local,
+                                                       int channel, int term)
                             {
-                                double cdk = (double)(cc * dk);
-
-                                // d/dA_d = 2α V(l_i[d]+1) - l_i[d] V(l_i[d]-1)
-                                // d/dB_d = 2β V(l_j[d]+1) - l_j[d] V(l_j[d]-1)
-                                for (int d = 0; d < 3; d++)
+                                const double cdk =
+                                    cc * static_cast<double>(dk);
+                                if (!ecp_double_is_finite(cdk))
                                 {
-                                    // bra 导数: modify-call-restore
-                                    int orig_i = l_i[d];
-                                    l_i[d] = orig_i + 1;
-                                    float vp = ecp_integral_for_term(
-                                        ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy,
-                                        Cz, dist_sq, zk, l_i[0], l_i[1], l_i[2],
-                                        l_j[0], l_j[1], l_j[2], ch_l, is_local);
-                                    l_i[d] = orig_i - 1;
-                                    float vm = ecp_integral_for_term(
-                                        ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy,
-                                        Cz, dist_sq, zk, l_i[0], l_i[1], l_i[2],
-                                        l_j[0], l_j[1], l_j[2], ch_l, is_local);
-                                    l_i[d] = orig_i;
-                                    dV_A[d] +=
-                                        cdk * (2.0 * (double)ei * (double)vp -
-                                               (double)orig_i * (double)vm);
+                                    record_ecp_failure(
+                                        failure,
+                                        QC_ECP_NONFINITE_VALUE_OR_ESTIMATE,
+                                        global_task_id, iat, channel, term, pi,
+                                        pj, idx_i, idx_j, cdk, DBL_MAX);
+                                    return;
+                                }
+                                const double abs_cdk = qc_ecp_math::Abs(cdk);
+                                double term_A[3] = {}, term_B[3] = {};
+                                double term_A_error[3] = {};
+                                double term_B_error[3] = {};
 
-                                    // ket 导数
-                                    int orig_j = l_j[d];
-                                    l_j[d] = orig_j + 1;
-                                    vp = ecp_integral_for_term(
+                                if (ecp_gradient_requires_direct_quadrature(
                                         ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy,
-                                        Cz, dist_sq, zk, l_i[0], l_i[1], l_i[2],
-                                        l_j[0], l_j[1], l_j[2], ch_l, is_local);
-                                    l_j[d] = orig_j - 1;
-                                    vm = ecp_integral_for_term(
-                                        ei, ej, Ax, Ay, Az, Bx, By, Bz, Cx, Cy,
-                                        Cz, dist_sq, zk, l_i[0], l_i[1], l_i[2],
-                                        l_j[0], l_j[1], l_j[2], ch_l, is_local);
-                                    l_j[d] = orig_j;
-                                    dV_B[d] +=
-                                        cdk * (2.0 * (double)ej * (double)vp -
-                                               (double)orig_j * (double)vm);
+                                        Cz, zk, n_k, lx_i, ly_i, lz_i, lx_j,
+                                        ly_j, lz_j, ch_l, is_local))
+                                {
+                                    const QC_ECP_PRIMITIVE_DERIVATIVE_RESULT
+                                        evaluated =
+                                            ecp_direct_primitive_derivative(
+                                                ei, ej, Ax, Ay, Az, Bx, By, Bz,
+                                                Cx, Cy, Cz, zk, n_k, lx_i, ly_i,
+                                                lz_i, lx_j, ly_j, lz_j, ch_l,
+                                                is_local);
+                                    if (!ecp_derivative_result_is_usable(
+                                            evaluated))
+                                    {
+                                        record_ecp_failure(
+                                            failure,
+                                            ecp_primitive_failure_kind(
+                                                evaluated.converged),
+                                            global_task_id, iat, channel, term,
+                                            pi, pj, idx_i, idx_j,
+                                            evaluated.value,
+                                            evaluated.estimated_error);
+                                        return;
+                                    }
+                                    for (int d = 0; d < 3; ++d)
+                                    {
+                                        term_A[d] =
+                                            cdk * evaluated.derivative_i[d];
+                                        term_B[d] =
+                                            cdk * evaluated.derivative_j[d];
+                                        term_A_error[d] =
+                                            abs_cdk *
+                                            evaluated.derivative_i_error[d];
+                                        term_B_error[d] =
+                                            abs_cdk *
+                                            evaluated.derivative_j_error[d];
+                                    }
+                                }
+                                else
+                                {
+                                    // d/dA_d = 2α V(l_i[d]+1)
+                                    //           - l_i[d] V(l_i[d]-1), and
+                                    // analogously for B. Each primitive error
+                                    // is propagated with the absolute linear
+                                    // coefficient; no cancellation is claimed.
+                                    for (int d = 0; d < 3; ++d)
+                                    {
+                                        const int orig_i = l_i[d];
+                                        const double plus_i_coefficient =
+                                            2.0 * static_cast<double>(ei);
+                                        const double minus_i_coefficient =
+                                            static_cast<double>(orig_i);
+                                        l_i[d] = orig_i + 1;
+                                        const QC_ECP_PRIMITIVE_RESULT vp_i =
+                                            ecp_integral_or_record_failure(
+                                                ei, ej, Ax, Ay, Az, Bx, By, Bz,
+                                                Cx, Cy, Cz, dist_sq, zk, n_k,
+                                                l_i[0], l_i[1], l_i[2], l_j[0],
+                                                l_j[1], l_j[2], ch_l, is_local,
+                                                failure, global_task_id, iat,
+                                                channel, term, pi, pj, idx_i,
+                                                idx_j,
+                                                2.0 * abs_dp * abs_cdk *
+                                                    plus_i_coefficient);
+                                        l_i[d] = orig_i - 1;
+                                        const QC_ECP_PRIMITIVE_RESULT vm_i =
+                                            ecp_integral_or_record_failure(
+                                                ei, ej, Ax, Ay, Az, Bx, By, Bz,
+                                                Cx, Cy, Cz, dist_sq, zk, n_k,
+                                                l_i[0], l_i[1], l_i[2], l_j[0],
+                                                l_j[1], l_j[2], ch_l, is_local,
+                                                failure, global_task_id, iat,
+                                                channel, term, pi, pj, idx_i,
+                                                idx_j,
+                                                2.0 * abs_dp * abs_cdk *
+                                                    minus_i_coefficient);
+                                        l_i[d] = orig_i;
+                                        if (!ecp_primitive_result_is_usable(
+                                                vp_i) ||
+                                            !ecp_primitive_result_is_usable(
+                                                vm_i))
+                                            return;
+                                        term_A[d] =
+                                            cdk *
+                                            (plus_i_coefficient * vp_i.value -
+                                             minus_i_coefficient * vm_i.value);
+                                        term_A_error[d] =
+                                            qc_ecp_error_policy::
+                                                Raising_Lowering_Error_Estimate(
+                                                    abs_cdk,
+                                                    static_cast<double>(ei),
+                                                    orig_i,
+                                                    vp_i.last_layer_bound,
+                                                    vm_i.last_layer_bound);
+
+                                        const int orig_j = l_j[d];
+                                        const double plus_j_coefficient =
+                                            2.0 * static_cast<double>(ej);
+                                        const double minus_j_coefficient =
+                                            static_cast<double>(orig_j);
+                                        l_j[d] = orig_j + 1;
+                                        const QC_ECP_PRIMITIVE_RESULT vp_j =
+                                            ecp_integral_or_record_failure(
+                                                ei, ej, Ax, Ay, Az, Bx, By, Bz,
+                                                Cx, Cy, Cz, dist_sq, zk, n_k,
+                                                l_i[0], l_i[1], l_i[2], l_j[0],
+                                                l_j[1], l_j[2], ch_l, is_local,
+                                                failure, global_task_id, iat,
+                                                channel, term, pi, pj, idx_i,
+                                                idx_j,
+                                                abs_dp * abs_cdk *
+                                                    plus_j_coefficient);
+                                        l_j[d] = orig_j - 1;
+                                        const QC_ECP_PRIMITIVE_RESULT vm_j =
+                                            ecp_integral_or_record_failure(
+                                                ei, ej, Ax, Ay, Az, Bx, By, Bz,
+                                                Cx, Cy, Cz, dist_sq, zk, n_k,
+                                                l_i[0], l_i[1], l_i[2], l_j[0],
+                                                l_j[1], l_j[2], ch_l, is_local,
+                                                failure, global_task_id, iat,
+                                                channel, term, pi, pj, idx_i,
+                                                idx_j,
+                                                abs_dp * abs_cdk *
+                                                    minus_j_coefficient);
+                                        l_j[d] = orig_j;
+                                        if (!ecp_primitive_result_is_usable(
+                                                vp_j) ||
+                                            !ecp_primitive_result_is_usable(
+                                                vm_j))
+                                            return;
+                                        term_B[d] =
+                                            cdk *
+                                            (plus_j_coefficient * vp_j.value -
+                                             minus_j_coefficient * vm_j.value);
+                                        term_B_error[d] =
+                                            qc_ecp_error_policy::
+                                                Raising_Lowering_Error_Estimate(
+                                                    abs_cdk,
+                                                    static_cast<double>(ej),
+                                                    orig_j,
+                                                    vp_j.last_layer_bound,
+                                                    vm_j.last_layer_bound);
+                                    }
+                                }
+
+                                for (int d = 0; d < 3; ++d)
+                                {
+                                    dV_A[d] += term_A[d];
+                                    dV_B[d] += term_B[d];
+                                    dV_A_error[d] += term_A_error[d];
+                                    dV_B_error[d] += term_B_error[d];
+
+                                    const double bra_contribution =
+                                        2.0 * dp * term_A[d];
+                                    const double center_contribution =
+                                        -dp * (term_A[d] + term_B[d]);
+                                    const double bra_error =
+                                        2.0 * abs_dp * term_A_error[d];
+                                    const double center_error =
+                                        abs_dp *
+                                        (term_A_error[d] + term_B_error[d]);
+                                    record_ecp_gradient_context(
+                                        &gradient_context[atom_i * 3 + d],
+                                        global_task_id, iat, channel, term, pi,
+                                        pj, idx_i, idx_j, bra_contribution,
+                                        bra_error);
+                                    record_ecp_gradient_context(
+                                        &gradient_context[iat * 3 + d],
+                                        global_task_id, iat, channel, term, pi,
+                                        pj, idx_i, idx_j, center_contribution,
+                                        center_error);
                                 }
                             };
 
-                            // Local 通道
                             if (local_ch >= 0)
                             {
                                 const int t_off = ecp_channel_offsets[local_ch];
                                 const int t_cnt = ecp_channel_sizes[local_ch];
-                                for (int it = 0; it < t_cnt; it++)
-                                {
-                                    if (ecp_n_arr[t_off + it] != 2) continue;
-                                    accumulate_grad(ecp_d[t_off + it],
-                                                    ecp_zeta[t_off + it], -1,
-                                                    true);
-                                }
+                                for (int it = 0; it < t_cnt; ++it)
+                                    accumulate_grad(
+                                        ecp_d[t_off + it],
+                                        ecp_zeta[t_off + it],
+                                        ecp_n[t_off + it], -1, true, local_ch,
+                                        t_off + it);
                             }
 
-                            // Semi-local 通道
-                            for (int ich = ch_start; ich < ch_end; ich++)
+                            for (int ich = ch_start; ich < ch_end; ++ich)
                             {
                                 const int ch_l = ecp_channel_l[ich];
                                 if (ch_l < 0 || ch_l == l_max) continue;
                                 const int t_off = ecp_channel_offsets[ich];
                                 const int t_cnt = ecp_channel_sizes[ich];
-                                for (int it = 0; it < t_cnt; it++)
-                                {
-                                    if (ecp_n_arr[t_off + it] != 2) continue;
-                                    accumulate_grad(ecp_d[t_off + it],
-                                                    ecp_zeta[t_off + it], ch_l,
-                                                    false);
-                                }
+                                for (int it = 0; it < t_cnt; ++it)
+                                    accumulate_grad(
+                                        ecp_d[t_off + it],
+                                        ecp_zeta[t_off + it],
+                                        ecp_n[t_off + it], ch_l, false, ich,
+                                        t_off + it);
                             }
 
-                            // 累加到梯度: bra × 2.0, ECP center × 1.0
-                            double dp = (double)p_val;
-                            for (int d = 0; d < 3; d++)
+                            for (int d = 0; d < 3; ++d)
                             {
-                                atomicAdd(&grad[atom_i * 3 + d],
-                                          2.0 * dp * dV_A[d]);
-                                // d/dC = -(d/dA + d/dB) (平移不变性)
-                                atomicAdd(&grad[iat * 3 + d],
-                                          -dp * (dV_A[d] + dV_B[d]));
+                                const int bra_component = atom_i * 3 + d;
+                                const int center_component = iat * 3 + d;
+                                const double bra_contribution =
+                                    2.0 * dp * dV_A[d];
+                                const double center_contribution =
+                                    -dp * (dV_A[d] + dV_B[d]);
+                                const double bra_error =
+                                    2.0 * abs_dp * dV_A_error[d];
+                                const double center_error =
+                                    abs_dp *
+                                    (dV_A_error[d] + dV_B_error[d]);
+
+                                atomicAdd(&gradient_error[bra_component],
+                                          bra_error);
+                                atomicAdd(&gradient_error[center_component],
+                                          center_error);
+                                atomicAdd(&gradient_observable[bra_component],
+                                          bra_contribution);
+                                atomicAdd(
+                                    &gradient_observable[center_component],
+                                    center_contribution);
                             }
                         }
                     }
@@ -614,42 +1122,58 @@ void QC_Sph2Cart_Density_Host(int ns, int nc, const std::vector<float>& h_norms,
                               const std::vector<float>& h_M_sph,
                               std::vector<float>& h_M_cart)
 {
-    // NMN[i,j] = norms[i] * M[i,j] * norms[j]
-    std::vector<float> NMN(ns * ns);
-    for (int i = 0; i < ns; i++)
-        for (int j = 0; j < ns; j++)
-            NMN[i * ns + j] = h_norms[i] * h_M_sph[i * ns + j] * h_norms[j];
-
-    // temp[a,k] = Σ_i C[i,a] * NMN[i,k]   (a ∈ cart, i,k ∈ sph)
-    std::vector<float> temp(nc * ns, 0.0f);
-    for (int a = 0; a < nc; a++)
-        for (int k = 0; k < ns; k++)
-        {
-            double s = 0;
-            for (int i = 0; i < ns; i++)
-                s += (double)h_C[i * nc + a] * (double)NMN[i * ns + k];
-            temp[a * ns + k] = (float)s;
-        }
-
-    // M_cart[a,b] = Σ_k temp[a,k] * C[k,b]
-    h_M_cart.assign(nc * nc, 0.0f);
-    for (int a = 0; a < nc; a++)
-        for (int b = 0; b < nc; b++)
-        {
-            double s = 0;
-            for (int k = 0; k < ns; k++)
-                s += (double)temp[a * ns + k] * (double)h_C[k * nc + b];
-            h_M_cart[a * nc + b] = (float)s;
-        }
+    h_M_cart = qc_cart2sph::Transform_Weighted_Matrix_To_Cartesian(
+        nc, ns, h_C, h_norms, h_M_sph);
 }
 
 // ECP 梯度驱动
-void QC_Compute_ECP_Gradient(const QC_MOLECULE& mol,
+bool QC_Compute_ECP_Gradient(const QC_MOLECULE& mol,
                              const QC_INTEGRAL_TASKS& task_ctx,
-                             const int* d_shell_atom, const float* d_P_cart_eff,
-                             double* d_grad)
+                             const int* d_shell_atom,
+                             const float* d_P_cart_eff, double* d_grad,
+                             QC_ECP_EVALUATION_FAILURE* failure)
 {
-    if (!mol.has_ecp || mol.ecp_total_terms == 0) return;
+    if (!mol.has_ecp || mol.ecp_total_terms == 0) return true;
+
+    QC_ECP_DEVICE_FAILURE* device_failure = nullptr;
+    if (!QC_Allocate_ECP_Failure(&device_failure))
+        return QC_Report_ECP_Resource_Failure(failure);
+
+    const std::size_t component_count =
+        static_cast<std::size_t>(mol.natm) * 3;
+    double* device_certificate = nullptr;
+    QC_ECP_DEVICE_FAILURE* device_context = nullptr;
+    if (!Device_Malloc_Safely(
+            reinterpret_cast<void**>(&device_certificate),
+            2 * component_count * sizeof(double)))
+    {
+        deviceFree(device_failure);
+        return QC_Report_ECP_Resource_Failure(failure);
+    }
+    if (!Device_Malloc_Safely(reinterpret_cast<void**>(&device_context),
+                              component_count *
+                                  sizeof(QC_ECP_DEVICE_FAILURE)))
+    {
+        deviceFree(device_certificate);
+        deviceFree(device_failure);
+        return QC_Report_ECP_Resource_Failure(failure);
+    }
+    deviceMemset(device_certificate, 0,
+                 2 * component_count * sizeof(double));
+    std::vector<QC_ECP_DEVICE_FAILURE> initial_context(component_count);
+    for (QC_ECP_DEVICE_FAILURE& item : initial_context)
+    {
+        item.kind = QC_ECP_EVALUATION_OK;
+        item.task_id = item.atom = item.channel = item.term = -1;
+        item.primitive_i = item.primitive_j = -1;
+        item.cartesian_i = item.cartesian_j = -1;
+        item.value = item.estimated_error = 0.0;
+    }
+    deviceMemcpy(device_context, initial_context.data(),
+                 component_count * sizeof(QC_ECP_DEVICE_FAILURE),
+                 deviceMemcpyHostToDevice);
+    double* const device_error = device_certificate;
+    double* const device_observable = device_certificate + component_count;
 
     const int nao_cart = mol.nao_cart;
     const int n_total = task_ctx.topo.n_1e_tasks;
@@ -660,13 +1184,17 @@ void QC_Compute_ECP_Gradient(const QC_MOLECULE& mol,
         int current_chunk = std::min(chunk_size, n_total - i);
         const QC_ONE_E_TASK* task_ptr = task_ctx.buffers.d_1e_tasks + i;
         Launch_Device_Kernel(
-            ECP_Grad_Kernel, (current_chunk + 63) / 64, 64, 0, 0, current_chunk,
-            task_ptr, mol.d_centers, mol.d_l_list, mol.d_exps, mol.d_coeffs,
-            mol.d_shell_offsets, mol.d_shell_sizes, mol.d_ao_offsets,
-            mol.d_atom_coords, mol.natm, mol.d_ecp_l_max,
+            ECP_Grad_Kernel, (current_chunk + 63) / 64, 64, 0, 0,
+            current_chunk, i, task_ptr, mol.d_centers, mol.d_l_list,
+            mol.d_exps, mol.d_coeffs, mol.d_shell_offsets, mol.d_shell_sizes,
+            mol.d_ao_offsets, mol.d_atom_coords, mol.natm, mol.d_ecp_l_max,
             mol.d_ecp_atom_channel_range, mol.d_ecp_l,
             mol.d_ecp_channel_offsets, mol.d_ecp_channel_sizes, mol.d_ecp_d,
-            mol.d_ecp_zeta, mol.d_ecp_n, nao_cart, d_shell_atom, d_P_cart_eff,
-            d_grad);
+            mol.d_ecp_zeta, mol.d_ecp_n, nao_cart, d_shell_atom,
+            d_P_cart_eff, device_error, device_observable, device_context,
+            device_failure);
     }
+    return QC_Finalize_ECP_Gradient(
+        mol, task_ctx, device_failure, device_certificate, device_context,
+        component_count, d_grad, failure);
 }

@@ -1,27 +1,103 @@
-﻿#include "basis/basis.h"
+﻿#include <cctype>
+#include <new>
+#include <stdexcept>
+
+#include "basis/basis.h"
 #include "ecp/ecp_library.h"
 #include "guess/minao.h"
 #include "guess/sap.h"
 #include "quantum_chemistry.h"
+#include "scf/diis_coefficients.hpp"
+#include "structure/cart2sph.hpp"
+#include "structure/electron_configuration.hpp"
+#include "structure/input_contract.hpp"
+
+namespace
+{
+int Parse_Exact_QC_Int(CONTROLLER* controller, const char* command)
+{
+    const char* token = controller->Command(command);
+    try
+    {
+        return sponge_qc_input::Parse_Exact_Int(token);
+    }
+    catch (const std::exception& error)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    %s must be an exactly representable integer, got "
+            "\"%s\": %s\n",
+            command, token, error.what());
+        return 0;
+    }
+}
+
+int Parse_Strict_QC_Bool(CONTROLLER* controller, const char* command)
+{
+    const int parsed = Parse_Exact_QC_Int(controller, command);
+    if (parsed != 0 && parsed != 1)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    %s must be exactly 0 or 1, got \"%s\"\n", command,
+            controller->Command(command));
+        return 0;
+    }
+    return parsed;
+}
+
+int Parse_Positive_DFT_Grid_Count(CONTROLLER* controller, const char* command)
+{
+    const int parsed = Parse_Exact_QC_Int(controller, command);
+    if (parsed <= 0)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    %s must be positive, got %d\n", command, parsed);
+        return 1;
+    }
+    return parsed;
+}
+
+float Parse_ERI_Screening_Tolerance(CONTROLLER* controller, const char* command)
+{
+    const char* token = controller->Command(command);
+    try
+    {
+        return sponge_qc_input::Parse_Finite_Nonnegative_Float(token);
+    }
+    catch (const std::exception& error)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    %s must be a finite, nonnegative float, got "
+            "\"%s\": %s\n",
+            command, token, error.what());
+        return 0.0f;
+    }
+}
+}  // namespace
 
 static void Init_ERI_Workspace_Params(QUANTUM_CHEMISTRY* qc,
                                       CONTROLLER* controller, int max_l)
 {
-    const int max_total_l = 4 * max_l;
-    qc->task_ctx.params.eri_hr_base = max_total_l + 1;
-    if (qc->task_ctx.params.eri_hr_base > HR_BASE_MAX)
+    const long long required_hr_base = 4LL * max_l + 1LL;
+    if (required_hr_base > HR_BASE_MAX)
     {
         controller->Throw_Formatted_SPONGE_Error(
             spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
             "Reason:\n    basis angular momentum too high (max l=%d, required "
-            "hr_base=%d, supported <=%d)\n",
-            max_l, qc->task_ctx.params.eri_hr_base, HR_BASE_MAX);
+            "hr_base=%lld, supported <=%d)\n",
+            max_l, required_hr_base, HR_BASE_MAX);
     }
+    qc->task_ctx.params.eri_hr_base = static_cast<int>(required_hr_base);
     qc->task_ctx.params.eri_hr_size =
         qc->task_ctx.params.eri_hr_base * qc->task_ctx.params.eri_hr_base *
         qc->task_ctx.params.eri_hr_base * qc->task_ctx.params.eri_hr_base;
 
-    const int max_cart = (max_l + 1) * (max_l + 2) / 2;
+    const int max_cart =
+        static_cast<int>((static_cast<long long>(max_l) + 1LL) *
+                         (static_cast<long long>(max_l) + 2LL) / 2LL);
     qc->task_ctx.params.eri_shell_buf_size =
         max_cart * max_cart * max_cart * max_cart;
     qc->task_ctx.params.eri_shell_buf_size = std::max(
@@ -159,25 +235,41 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
         is_initialized = 0;
         return false;
     }
-    qc_type_file = controller->Command("qc_type_in_file");
+    qc_type_file = controller->Original_Command("qc_type_in_file");
+    periodic_boundary =
+        !controller->Command_Exist("pbc") ||
+        controller->Get_Bool("pbc", "QUANTUM_CHEMISTRY::Initial");
 
     std::string model_chemistry = "HF/6-31g";
     if (controller->Command_Exist("qc_model_chemistry"))
     {
         model_chemistry = controller->Command("qc_model_chemistry");
     }
-    int slash_pos = model_chemistry.find('/');
-    if (slash_pos == std::string::npos)
+    const std::string::size_type slash_pos = model_chemistry.find('/');
+    if (slash_pos == std::string::npos || slash_pos == 0 ||
+        slash_pos + 1 == model_chemistry.size() ||
+        model_chemistry.find('/', slash_pos + 1) != std::string::npos)
     {
         controller->Throw_Formatted_SPONGE_Error(
             spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-            "Reason:\n    qc_model_chemistry format error: expected "
-            "\"METHOD/<basis>\", got \"%s\"\n",
+            "Reason:\n    qc_model_chemistry must contain exactly one slash "
+            "with a nonempty method and basis: expected \"METHOD/<basis>\", "
+            "got \"%s\"\n",
             model_chemistry.c_str());
+        return false;
     }
     std::string method_name =
         string_strip(model_chemistry.substr(0, slash_pos));
     basis_set_name = string_strip(model_chemistry.substr(slash_pos + 1));
+    if (method_name.empty() || basis_set_name.empty())
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    qc_model_chemistry method and basis must remain "
+            "nonempty after trimming whitespace, got \"%s\"\n",
+            model_chemistry.c_str());
+        return false;
+    }
 
     if (is_str_equal(method_name.c_str(), "HF", 0))
     {
@@ -226,79 +318,44 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
 
     if (controller->Command_Exist("qc_need_gradient"))
     {
-        need_gradient = atoi(controller->Command("qc_need_gradient"));
+        need_gradient = Parse_Strict_QC_Bool(controller, "qc_need_gradient");
     }
 
     task_ctx.params.eri_prim_screen_tol = 1e-12f;
     if (controller->Command_Exist("qc_eri_prim_screen_tol"))
     {
-        controller->Check_Float("qc_eri_prim_screen_tol",
-                                "QUANTUM_CHEMISTRY::Initial");
         task_ctx.params.eri_prim_screen_tol =
-            atof(controller->Command("qc_eri_prim_screen_tol"));
-        if (task_ctx.params.eri_prim_screen_tol < 0.0f)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_eri_prim_screen_tol must be >= 0, got %g\n",
-                (double)task_ctx.params.eri_prim_screen_tol);
-        }
+            Parse_ERI_Screening_Tolerance(controller, "qc_eri_prim_screen_tol");
     }
 
     task_ctx.params.direct_eri_prim_screen_tol = 1e-10f;
     if (controller->Command_Exist("qc_direct_eri_prim_screen_tol"))
     {
-        controller->Check_Float("qc_direct_eri_prim_screen_tol",
-                                "QUANTUM_CHEMISTRY::Initial");
         task_ctx.params.direct_eri_prim_screen_tol =
-            atof(controller->Command("qc_direct_eri_prim_screen_tol"));
-        if (task_ctx.params.direct_eri_prim_screen_tol < 0.0f)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_direct_eri_prim_screen_tol must be >= 0, got "
-                "%g\n",
-                (double)task_ctx.params.direct_eri_prim_screen_tol);
-        }
+            Parse_ERI_Screening_Tolerance(controller,
+                                          "qc_direct_eri_prim_screen_tol");
     }
 
     task_ctx.params.eri_shell_screen_tol = 1e-10f;
     if (controller->Command_Exist("qc_eri_shell_screen_tol"))
     {
-        controller->Check_Float("qc_eri_shell_screen_tol",
-                                "QUANTUM_CHEMISTRY::Initial");
-        task_ctx.params.eri_shell_screen_tol =
-            atof(controller->Command("qc_eri_shell_screen_tol"));
-        if (task_ctx.params.eri_shell_screen_tol < 0.0f)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_eri_shell_screen_tol must be >= 0, got %g\n",
-                (double)task_ctx.params.eri_shell_screen_tol);
-        }
+        task_ctx.params.eri_shell_screen_tol = Parse_ERI_Screening_Tolerance(
+            controller, "qc_eri_shell_screen_tol");
     }
 
     scf_ws.runtime.unrestricted = false;
     if (controller->Command_Exist("qc_restricted"))
     {
-        controller->Check_Int("qc_restricted", "QUANTUM_CHEMISTRY::Initial");
-        const int qc_restricted = atoi(controller->Command("qc_restricted"));
-        if (qc_restricted != 0 && qc_restricted != 1)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_restricted must be 0 or 1, got \"%s\"\n",
-                controller->Command("qc_restricted"));
-        }
+        const int qc_restricted =
+            Parse_Strict_QC_Bool(controller, "qc_restricted");
         scf_ws.runtime.unrestricted = (qc_restricted == 0);
     }
 
-    scf_ws.runtime.max_scf_iter = 100;
+    scf_ws.runtime.max_scf_iter = 300;
     if (controller->Command_Exist("qc_scf_max_iter"))
     {
-        controller->Check_Int("qc_scf_max_iter", "QUANTUM_CHEMISTRY::Initial");
         scf_ws.runtime.max_scf_iter =
-            atoi(controller->Command("qc_scf_max_iter"));
+            Parse_Exact_QC_Int(controller, "qc_scf_max_iter");
         if (scf_ws.runtime.max_scf_iter < 1)
         {
             controller->Throw_Formatted_SPONGE_Error(
@@ -311,24 +368,15 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     scf_ws.runtime.use_diis = true;
     if (controller->Command_Exist("qc_diis"))
     {
-        controller->Check_Int("qc_diis", "QUANTUM_CHEMISTRY::Initial");
-        const int qc_diis = atoi(controller->Command("qc_diis"));
-        if (qc_diis != 0 && qc_diis != 1)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_diis must be 0 or 1, got \"%s\"\n",
-                controller->Command("qc_diis"));
-        }
+        const int qc_diis = Parse_Strict_QC_Bool(controller, "qc_diis");
         scf_ws.runtime.use_diis = (qc_diis != 0);
     }
 
     scf_ws.runtime.diis_start_iter = 2;
     if (controller->Command_Exist("qc_diis_start"))
     {
-        controller->Check_Int("qc_diis_start", "QUANTUM_CHEMISTRY::Initial");
         scf_ws.runtime.diis_start_iter =
-            atoi(controller->Command("qc_diis_start"));
+            Parse_Exact_QC_Int(controller, "qc_diis_start");
         if (scf_ws.runtime.diis_start_iter < 1)
         {
             controller->Throw_Formatted_SPONGE_Error(
@@ -341,13 +389,15 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     scf_ws.runtime.diis_space = 6;
     if (controller->Command_Exist("qc_diis_space"))
     {
-        controller->Check_Int("qc_diis_space", "QUANTUM_CHEMISTRY::Initial");
-        scf_ws.runtime.diis_space = atoi(controller->Command("qc_diis_space"));
-        if (scf_ws.runtime.diis_space < 2)
+        scf_ws.runtime.diis_space =
+            Parse_Exact_QC_Int(controller, "qc_diis_space");
+        if (scf_ws.runtime.diis_space < 2 ||
+            scf_ws.runtime.diis_space > QC_SCF_SIMPLEX_QP_MAX_DIMENSION)
         {
             controller->Throw_Formatted_SPONGE_Error(
                 spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_diis_space must be >= 2, got \"%s\"\n",
+                "Reason:\n    qc_diis_space must be in [2, %d], got \"%s\"\n",
+                QC_SCF_SIMPLEX_QP_MAX_DIMENSION,
                 controller->Command("qc_diis_space"));
         }
     }
@@ -357,11 +407,13 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     {
         controller->Check_Float("qc_diis_reg", "QUANTUM_CHEMISTRY::Initial");
         scf_ws.runtime.diis_reg = atof(controller->Command("qc_diis_reg"));
-        if (scf_ws.runtime.diis_reg < 0.0)
+        if (!Double_Memory_Is_Finite(&scf_ws.runtime.diis_reg) ||
+            scf_ws.runtime.diis_reg < 0.0)
         {
             controller->Throw_Formatted_SPONGE_Error(
                 spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_diis_reg must be >= 0, got \"%s\"\n",
+                "Reason:\n    qc_diis_reg must be finite and >= 0, got "
+                "\"%s\"\n",
                 controller->Command("qc_diis_reg"));
         }
     }
@@ -373,7 +425,8 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
                                 "QUANTUM_CHEMISTRY::Initial");
         scf_ws.runtime.energy_tol =
             atof(controller->Command("qc_scf_energy_tol"));
-        if (scf_ws.runtime.energy_tol <= 0.0)
+        if (!Double_Memory_Is_Finite(&scf_ws.runtime.energy_tol) ||
+            scf_ws.runtime.energy_tol <= 0.0)
         {
             controller->Throw_Formatted_SPONGE_Error(
                 spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
@@ -382,53 +435,74 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
         }
     }
 
-    scf_ws.runtime.print_iter = false;
-    if (controller->Command_Exist("qc_scf_print_iter"))
+    scf_ws.runtime.density_tol = 1e-6;
+    if (controller->Command_Exist("qc_scf_density_tol"))
     {
-        controller->Check_Int("qc_scf_print_iter",
-                              "QUANTUM_CHEMISTRY::Initial");
-        const int qc_scf_print_iter =
-            atoi(controller->Command("qc_scf_print_iter"));
-        if (qc_scf_print_iter != 0 && qc_scf_print_iter != 1)
+        controller->Check_Float("qc_scf_density_tol",
+                                "QUANTUM_CHEMISTRY::Initial");
+        scf_ws.runtime.density_tol =
+            atof(controller->Command("qc_scf_density_tol"));
+        if (!Double_Memory_Is_Finite(&scf_ws.runtime.density_tol) ||
+            scf_ws.runtime.density_tol <= 0.0)
         {
             controller->Throw_Formatted_SPONGE_Error(
                 spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_scf_print_iter must be 0 or 1, got \"%s\"\n",
-                controller->Command("qc_scf_print_iter"));
+                "Reason:\n    qc_scf_density_tol must be > 0, got \"%s\"\n",
+                controller->Command("qc_scf_density_tol"));
         }
+    }
+
+    scf_ws.runtime.print_iter = false;
+    if (controller->Command_Exist("qc_scf_print_iter"))
+    {
+        const int qc_scf_print_iter =
+            Parse_Strict_QC_Bool(controller, "qc_scf_print_iter");
         scf_ws.runtime.print_iter = (qc_scf_print_iter != 0);
     }
 
+    scf_ws.runtime.configured_level_shift = dft.enable_dft ? 1.5 : 0.25;
     if (controller->Command_Exist("qc_level_shift"))
     {
-        scf_ws.runtime.level_shift =
+        controller->Check_Float("qc_level_shift", "QUANTUM_CHEMISTRY::Initial");
+        scf_ws.runtime.configured_level_shift =
             atof(controller->Command("qc_level_shift"));
+        if (!Double_Memory_Is_Finite(&scf_ws.runtime.configured_level_shift) ||
+            scf_ws.runtime.configured_level_shift < 0.0)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    qc_level_shift must be finite and >= 0, got "
+                "\"%s\"\n",
+                controller->Command("qc_level_shift"));
+        }
     }
+    scf_ws.runtime.level_shift = scf_ws.runtime.configured_level_shift;
 
     if (controller->Command_Exist("qc_scf_output"))
     {
-        const char* fname = controller->Command("qc_scf_output");
+        const char* fname = controller->Original_Command("qc_scf_output");
         Open_File_Safely(&scf_output_file, fname, "w");
     }
 
-    dft.dft_radial_points = 60;
+    int dft_radial_points = 60;
     if (controller->Command_Exist("qc_dft_radial_points"))
     {
-        controller->Check_Int("qc_dft_radial_points",
-                              "QUANTUM_CHEMISTRY::Initial");
-        dft.dft_radial_points = std::max(
-            10,
-            std::min(200, atoi(controller->Command("qc_dft_radial_points"))));
+        dft_radial_points =
+            Parse_Positive_DFT_Grid_Count(controller, "qc_dft_radial_points");
     }
 
-    dft.dft_angular_points = 194;
+    int dft_angular_points = 194;
     if (controller->Command_Exist("qc_dft_angular_points"))
     {
-        controller->Check_Int("qc_dft_angular_points",
-                              "QUANTUM_CHEMISTRY::Initial");
-        dft.dft_angular_points = std::max(
-            26,
-            std::min(590, atoi(controller->Command("qc_dft_angular_points"))));
+        dft_angular_points =
+            Parse_Positive_DFT_Grid_Count(controller, "qc_dft_angular_points");
+    }
+    dft.dft_radial_points = dft_radial_points;
+    dft.dft_angular_points = dft_angular_points;
+    if (dft.enable_dft)
+    {
+        controller->printf("    DFT grid: radial=%d angular=%d\n",
+                           dft.dft_radial_points, dft.dft_angular_points);
     }
 
     initial_guess = QC_INITIAL_GUESS::SAP;
@@ -436,7 +510,8 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     {
         std::string guess_str = controller->Command("qc_initial_guess");
         std::transform(guess_str.begin(), guess_str.end(), guess_str.begin(),
-                       ::tolower);
+                       [](unsigned char character)
+                       { return static_cast<char>(std::tolower(character)); });
         if (guess_str == "none")
             initial_guess = QC_INITIAL_GUESS::NONE;
         else if (guess_str == "minao")
@@ -457,15 +532,7 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     scf_ws.ri.enabled = false;
     if (controller->Command_Exist("qc_density_fit"))
     {
-        controller->Check_Int("qc_density_fit", "QUANTUM_CHEMISTRY::Initial");
-        const int qc_df = atoi(controller->Command("qc_density_fit"));
-        if (qc_df != 0 && qc_df != 1)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_density_fit must be 0 or 1, got \"%s\"\n",
-                controller->Command("qc_density_fit"));
-        }
+        const int qc_df = Parse_Strict_QC_Bool(controller, "qc_density_fit");
         scf_ws.ri.enabled = (qc_df != 0);
     }
 
@@ -476,7 +543,8 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     {
         std::string mode_str(controller->Command("qc_density_fitting_mode"));
         std::transform(mode_str.begin(), mode_str.end(), mode_str.begin(),
-                       ::tolower);
+                       [](unsigned char character)
+                       { return static_cast<char>(std::tolower(character)); });
         if (mode_str == "auto")
             scf_ws.ri.mode = QC_RI_WORKSPACE::DF_AUTO;
         else if (mode_str == "stored")
@@ -499,7 +567,8 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     {
         std::string ecp_name_str = controller->Command("qc_ecp");
         std::transform(ecp_name_str.begin(), ecp_name_str.end(),
-                       ecp_name_str.begin(), ::tolower);
+                       ecp_name_str.begin(), [](unsigned char character)
+                       { return static_cast<char>(std::tolower(character)); });
         if (ecp_name_str == "auto")
             ecp_type = QC_ECP_TYPE::AUTO;
         else if (ecp_name_str == "none")
@@ -588,30 +657,77 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
         std::getline(ifs, line);
         {
             std::istringstream iss(line);
-            if (!(iss >> mol.natm >> mol.charge >> mol.multiplicity))
+            std::string trailing_token;
+            if (!(iss >> mol.natm >> mol.charge >> mol.multiplicity) ||
+                (iss >> trailing_token))
             {
                 controller->Throw_Formatted_SPONGE_Error(
                     spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
-                    "Reason:\n    Failed to read first line of %s\n",
+                    "Reason:\n    First line of %s must contain exactly "
+                    "three integers: natm charge multiplicity\n",
                     qc_type_file);
+            }
+            if (mol.natm <= 0 || mol.natm > this->atom_numbers)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    QC atom count %d in %s must be in [1, %d]\n",
+                    mol.natm, qc_type_file, this->atom_numbers);
             }
         }
         atom_local.reserve(mol.natm);
+        std::vector<int> seen_md_atoms(this->atom_numbers, 0);
         for (int i = 0; i < mol.natm; i++)
         {
             std::getline(ifs, line);
             std::istringstream iss(line);
             int idx;
             std::string sym;
-            if (!(iss >> idx >> sym))
+            std::string trailing_token;
+            if (!(iss >> idx >> sym) || (iss >> trailing_token))
             {
                 controller->Throw_Formatted_SPONGE_Error(
                     spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
-                    "Reason:\n    Failed to read atom line %d of %s\n", i,
-                    qc_type_file);
+                    "Reason:\n    Atom line %d of %s must contain exactly an "
+                    "MD atom index and element symbol\n",
+                    i, qc_type_file);
             }
+            if (idx < 0 || idx >= this->atom_numbers)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    MD index %d on QC atom line %d is outside "
+                    "[0, %d)\n",
+                    idx, i, this->atom_numbers);
+            }
+            if (seen_md_atoms[idx])
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    duplicate MD atom index %d on QC atom line "
+                    "%d in %s\n",
+                    idx, i, qc_type_file);
+            }
+            seen_md_atoms[idx] = 1;
             atom_local.push_back(idx);
             atom_symbols.push_back(sym);
+        }
+        while (std::getline(ifs, line))
+        {
+            if (line.find_first_not_of(" \t\r\n") != std::string::npos)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    %s contains an unexpected nonempty record "
+                    "after the declared %d QC atom lines\n",
+                    qc_type_file, mol.natm);
+            }
+        }
+        if (ifs.bad())
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    I/O error while reading %s\n", qc_type_file);
         }
     }
 
@@ -634,14 +750,17 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
 
     if (ecp_set) ecp_set->Initialize();
 
-    mol.nelectron = -mol.charge;
+    long long electron_count =
+        sponge_qc_electrons::Electron_Count_From_Charge(mol.charge);
+    mol.h_atomic_numbers.resize(mol.natm);
     mol.h_Z.resize(mol.natm);
     mol.h_ecp_n_core.resize(mol.natm, 0);
     mol.h_ecp_l_max.resize(mol.natm, -1);
     for (int i = 0; i < mol.natm; ++i)
     {
-        auto it_sym = QC_Z_FROM_SYMBOL.find(atom_symbols[i]);
-        if (it_sym == QC_Z_FROM_SYMBOL.end())
+        const int atomic_number =
+            sponge_qc_elements::Atomic_Number_From_Symbol(atom_symbols[i]);
+        if (atomic_number == 0)
         {
             controller->Throw_Formatted_SPONGE_Error(
                 spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
@@ -649,7 +768,8 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
                 "%s\n",
                 atom_symbols[i].c_str(), i, qc_type_file);
         }
-        int Z = it_sym->second;
+        mol.h_atomic_numbers[i] = atomic_number;
+        int effective_nuclear_charge = atomic_number;
         int md_idx = atom_local[i];
         if (md_idx < 0 || md_idx >= this->atom_numbers)
         {
@@ -662,64 +782,99 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
         // ECP: 用有效核电荷替代全电荷
         // auto 模式下按基组规范过滤（def2-ECP 只对 Z>=37 生效）
         const bool apply_ecp =
-            ecp_set && (ecp_type != QC_ECP_TYPE::AUTO ||
-                        QC_Auto_ECP_Applies(basis_set_name.c_str(), Z));
+            ecp_set &&
+            (ecp_type != QC_ECP_TYPE::AUTO ||
+             QC_Auto_ECP_Applies(basis_set_name.c_str(), atomic_number));
         if (apply_ecp)
         {
             auto it_ecp = ecp_set->data.find(atom_symbols[i]);
-            if (it_ecp != ecp_set->data.end())
+            if (it_ecp == ecp_set->data.end())
+            {
+                if (ecp_type == QC_ECP_TYPE::AUTO)
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorValueErrorCommand,
+                        "QUANTUM_CHEMISTRY::Initial",
+                        "Reason:\n    Automatic ECP selection for basis %s "
+                        "requires %s parameters for element %s (atomic "
+                        "number %d), but this build does not provide them. "
+                        "Refusing to silently continue with an all-electron "
+                        "calculation.\n",
+                        basis_set_name.c_str(), ecp_set->name,
+                        atom_symbols[i].c_str(), atomic_number);
+                }
+            }
+            else
             {
                 const auto& ecp_data = it_ecp->second;
+                if (ecp_data.n_core < 0 || ecp_data.n_core >= atomic_number ||
+                    !QC_ECP_L_Max_Is_Supported(ecp_data.l_max))
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                        "Reason:\n    ECP %s has invalid core-electron count "
+                        "%d or unsupported local-channel l_max=%d for "
+                        "element %s (atomic number %d); this backend requires "
+                        "0 <= l_max <= %d\n",
+                        ecp_set->name, ecp_data.n_core, ecp_data.l_max,
+                        atom_symbols[i].c_str(), atomic_number,
+                        QC_ECP_MAX_SEMILOCAL_L + 1);
+                }
                 mol.h_ecp_n_core[i] = ecp_data.n_core;
                 mol.h_ecp_l_max[i] = ecp_data.l_max;
-                Z -= ecp_data.n_core;
+                effective_nuclear_charge -= ecp_data.n_core;
                 mol.has_ecp = true;
             }
         }
-        mol.h_Z[i] = Z;
-        mol.nelectron += Z;
+        mol.h_Z[i] = effective_nuclear_charge;
+        try
+        {
+            electron_count = sponge_qc_electrons::Add_Effective_Nuclear_Charge(
+                electron_count, effective_nuclear_charge);
+        }
+        catch (const std::exception& error)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    Failed to accumulate the molecular electron "
+                "count at atom %d: %s\n",
+                i, error.what());
+            return;
+        }
     }
 
-    Device_Malloc_And_Copy_Safely((void**)&mol.d_Z, (void*)mol.h_Z.data(),
-                                  sizeof(int) * (int)mol.natm);
-
-    const int spin_e = mol.multiplicity - 1;
-    if (spin_e < 0)
+    sponge_qc_electrons::Electron_Configuration electron_configuration;
+    try
+    {
+        electron_configuration =
+            sponge_qc_electrons::Resolve_Electron_Configuration(
+                electron_count, mol.multiplicity, scf_ws.runtime.unrestricted);
+    }
+    catch (const std::overflow_error& error)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    Invalid molecular electron configuration "
+            "(charge=%d, multiplicity=%d): %s\n",
+            mol.charge, mol.multiplicity, error.what());
+        return;
+    }
+    catch (const std::domain_error& error)
     {
         controller->Throw_Formatted_SPONGE_Error(
             spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
-            "Reason:\n    multiplicity must be >= 1, got %d\n",
-            mol.multiplicity);
+            "Reason:\n    Invalid molecular electron configuration "
+            "(N=%lld, charge=%d, multiplicity=%d): %s\n",
+            electron_count, mol.charge, mol.multiplicity, error.what());
+        return;
     }
-    if (((mol.nelectron + spin_e) & 1) != 0)
-    {
-        controller->Throw_Formatted_SPONGE_Error(
-            spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
-            "Reason:\n    Inconsistent electron number/multiplicity: N=%d, "
-            "multiplicity=%d\n",
-            mol.nelectron, mol.multiplicity);
-    }
-    if (!scf_ws.runtime.unrestricted)
-    {
-        if (spin_e != 0)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_restricted=1 requires closed-shell "
-                "multiplicity=1, got multiplicity=%d\n",
-                mol.multiplicity);
-        }
-        if ((mol.nelectron & 1) != 0)
-        {
-            controller->Throw_Formatted_SPONGE_Error(
-                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    qc_restricted=1 requires even electron number, "
-                "got N=%d\n",
-                mol.nelectron);
-        }
-    }
+    mol.nelectron = electron_configuration.total;
+    scf_ws.runtime.n_alpha = electron_configuration.alpha;
+    scf_ws.runtime.n_beta = electron_configuration.beta;
+    scf_ws.runtime.occ_factor = electron_configuration.occupation_factor;
 
     mol.nao_cart = 0;
+    mol.nao_cart2 = 0;
     mol.nbas = 0;
     mol.nao_sph = 0;
     mol.nao = 0;
@@ -754,6 +909,52 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
         const auto& shells = *shells_ptr;
         for (const auto& shell : shells)
         {
+            int cart_dimension = 0;
+            int spherical_dimension = 0;
+            try
+            {
+                const std::pair<int, int> dimensions =
+                    qc_cart2sph::Int_Dimensions(shell.l);
+                cart_dimension = dimensions.first;
+                spherical_dimension = dimensions.second;
+            }
+            catch (const std::exception& error)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    Invalid orbital-basis angular momentum "
+                    "l=%d for element %s: %s\n",
+                    shell.l, sym.c_str(), error.what());
+            }
+            if (mol.nao_cart >
+                    std::numeric_limits<int>::max() - cart_dimension ||
+                mol.nao_sph >
+                    std::numeric_limits<int>::max() - spherical_dimension)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    Orbital-basis AO dimension overflows int "
+                    "while adding l=%d shell for element %s\n",
+                    shell.l, sym.c_str());
+            }
+            if (shell.exps.empty() ||
+                shell.exps.size() != shell.coeffs.size() ||
+                shell.exps.size() > static_cast<std::size_t>(
+                                        std::numeric_limits<int>::max() / 2) ||
+                mol.h_env.size() >
+                    static_cast<std::size_t>(std::numeric_limits<int>::max()) -
+                        2U * shell.exps.size() ||
+                mol.h_exps.size() >
+                    static_cast<std::size_t>(std::numeric_limits<int>::max()) -
+                        shell.exps.size() ||
+                mol.nbas == std::numeric_limits<int>::max())
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    Invalid or overflowing orbital primitive "
+                    "data for l=%d shell of element %s\n",
+                    shell.l, sym.c_str());
+            }
             int ptr_exp = mol.h_env.size();
             mol.h_env.insert(mol.h_env.end(), shell.exps.begin(),
                              shell.exps.end());
@@ -770,9 +971,8 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
             mol.h_bas.push_back(ptr_coeff);
             mol.h_bas.push_back(0);
 
-            int ao_dim = (shell.l + 1) * (shell.l + 2) / 2;
-            mol.nao_cart += ao_dim;
-            mol.nao_sph += (2 * shell.l + 1);
+            mol.nao_cart += cart_dimension;
+            mol.nao_sph += spherical_dimension;
 
             mol.h_l_list.push_back(shell.l);
             mol.h_shell_sizes.push_back(shell.exps.size());
@@ -787,12 +987,45 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
             mol.nbas++;
         }
     }
-    if (!mol.is_spherical)
-        mol.nao_sph = mol.nao_cart;
-    else
-        Build_Cart2Sph_Matrix();
+    const std::size_t nao_cart_square = static_cast<std::size_t>(mol.nao_cart) *
+                                        static_cast<std::size_t>(mol.nao_cart);
+    if (nao_cart_square >
+        static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    Cartesian AO square dimension exceeds the int "
+            "indexing contract (nao_cart=%d)\n",
+            mol.nao_cart);
+    }
+    mol.nao_cart2 = static_cast<int>(nao_cart_square);
+    if (!mol.is_spherical) mol.nao_sph = mol.nao_cart;
     mol.nao = mol.is_spherical ? mol.nao_sph : mol.nao_cart;
-    mol.nao2 = (int)((int)mol.nao * (int)mol.nao);
+    if (mol.nao != 0 && mol.nao > std::numeric_limits<int>::max() / mol.nao)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    Orbital-basis AO square dimension overflows int "
+            "(nao=%d)\n",
+            mol.nao);
+    }
+    mol.nao2 = mol.nao * mol.nao;
+    try
+    {
+        sponge_qc_electrons::Validate_AO_Capacity(electron_configuration,
+                                                  mol.nao);
+    }
+    catch (const std::domain_error& error)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    Invalid molecular electron configuration for the "
+            "%s basis (N=%d, n_alpha=%d, n_beta=%d, nao=%d): %s\n",
+            basis_set_name.c_str(), mol.nelectron, electron_configuration.alpha,
+            electron_configuration.beta, mol.nao, error.what());
+        return;
+    }
+    if (mol.is_spherical) Build_Cart2Sph_Matrix();
     mol.h_ao_offsets.clear();
     mol.h_ao_offsets_sph.clear();
     int acc = 0;
@@ -800,8 +1033,10 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
     for (int k = 0; k < mol.h_l_list.size(); k++)
     {
         const int l = mol.h_l_list[k];
-        const int cart_dim = (l + 1) * (l + 2) / 2;
-        const int sph_dim = mol.is_spherical ? (2 * l + 1) : cart_dim;
+        const std::pair<int, int> dimensions = qc_cart2sph::Int_Dimensions(l);
+        const int cart_dim = dimensions.first;
+        const int sph_dim =
+            mol.is_spherical ? dimensions.second : dimensions.first;
         mol.h_ao_offsets.push_back(acc);
         mol.h_ao_offsets_sph.push_back(acc_sph);
         acc += cart_dim;
@@ -815,6 +1050,11 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
         exp_acc += mol.h_shell_sizes[k];
     }
 
+    Device_Malloc_And_Copy_Safely((void**)&mol.d_atomic_numbers,
+                                  (void*)mol.h_atomic_numbers.data(),
+                                  sizeof(int) * (int)mol.natm);
+    Device_Malloc_And_Copy_Safely((void**)&mol.d_Z, (void*)mol.h_Z.data(),
+                                  sizeof(int) * (int)mol.natm);
     Device_Malloc_And_Copy_Safely((void**)&mol.d_atm, (void*)mol.h_atm.data(),
                                   sizeof(int) * mol.h_atm.size());
     Device_Malloc_And_Copy_Safely((void**)&mol.d_bas, (void*)mol.h_bas.data(),
@@ -867,19 +1107,79 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
             if (mol.h_ecp_l_max[i] < 0) continue;
 
             const auto& ecp_data = ecp_set->data.at(atom_symbols[i]);
+            int local_channel_count = 0;
+            std::vector<int> semilocal_channel_count(ecp_data.l_max, 0);
             for (const auto& ch : ecp_data.channels)
             {
+                const bool is_local_channel =
+                    ch.l < 0 || ch.l == ecp_data.l_max;
+                if (is_local_channel) local_channel_count++;
+                if (!is_local_channel && ch.l >= 0 && ch.l < ecp_data.l_max)
+                    semilocal_channel_count[ch.l]++;
+                if (ch.l < -1 || ch.l > ecp_data.l_max ||
+                    (!is_local_channel && ch.l > QC_ECP_MAX_SEMILOCAL_L) ||
+                    ch.terms.empty() ||
+                    ch.terms.size() > static_cast<std::size_t>(
+                                          std::numeric_limits<int>::max()) ||
+                    mol.ecp_total_channels == std::numeric_limits<int>::max() ||
+                    mol.ecp_total_terms > std::numeric_limits<int>::max() -
+                                              static_cast<int>(ch.terms.size()))
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                        "Reason:\n    ECP %s has an invalid or unsupported "
+                        "channel l=%d with %zu terms for element %s\n",
+                        ecp_set->name, ch.l, ch.terms.size(),
+                        atom_symbols[i].c_str());
+                }
                 mol.h_ecp_l.push_back(ch.l);
                 mol.h_ecp_channel_offsets.push_back(mol.ecp_total_terms);
                 mol.h_ecp_channel_sizes.push_back((int)ch.terms.size());
                 for (const auto& t : ch.terms)
                 {
+                    if (t.n_k < 0 || !Float_Memory_Is_Finite(&t.d_k) ||
+                        !Float_Memory_Is_Finite(&t.zeta_k) ||
+                        !(t.zeta_k > 0.0f))
+                    {
+                        controller->Throw_Formatted_SPONGE_Error(
+                            spongeErrorBadFileFormat,
+                            "QUANTUM_CHEMISTRY::Initial",
+                            "Reason:\n    ECP %s term for element %s, "
+                            "channel l=%d has invalid n_k=%d or "
+                            "non-finite/non-positive parameters. The radial "
+                            "integral requires integer n_k>=0, finite d_k, "
+                            "and finite zeta_k>0.\n",
+                            ecp_set->name, atom_symbols[i].c_str(), ch.l,
+                            t.n_k);
+                    }
                     mol.h_ecp_d.push_back(t.d_k);
                     mol.h_ecp_zeta.push_back(t.zeta_k);
                     mol.h_ecp_n.push_back(t.n_k);
                     mol.ecp_total_terms++;
                 }
                 mol.ecp_total_channels++;
+            }
+            if (local_channel_count != 1)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                    "Reason:\n    ECP %s for element %s must provide exactly "
+                    "one local channel, found %d\n",
+                    ecp_set->name, atom_symbols[i].c_str(),
+                    local_channel_count);
+            }
+            for (int l = 0; l < ecp_data.l_max; ++l)
+            {
+                if (semilocal_channel_count[l] != 1)
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorBadFileFormat, "QUANTUM_CHEMISTRY::Initial",
+                        "Reason:\n    ECP %s for element %s must provide "
+                        "exactly one semi-local channel for every l below "
+                        "l_max=%d; found %d channel(s) for l=%d\n",
+                        ecp_set->name, atom_symbols[i].c_str(), ecp_data.l_max,
+                        semilocal_channel_count[l], l);
+                }
             }
         }
         mol.h_ecp_atom_channel_range[mol.natm] = mol.ecp_total_channels;
@@ -931,9 +1231,11 @@ void QUANTUM_CHEMISTRY::Initial_Integral_Tasks(CONTROLLER* controller)
 }
 
 void QUANTUM_CHEMISTRY::Initial(CONTROLLER* controller, const int atom_numbers,
-                                const VECTOR* crd, const char* module_name)
+                                const VECTOR* crd, const VECTOR box_length,
+                                const char* module_name,
+                                std::uint64_t coordinate_generation)
 {
-    (void)crd;
+    this->controller = controller;
     if (module_name == NULL)
     {
         strcpy(this->module_name, "quantum_chemistry");
@@ -957,10 +1259,60 @@ void QUANTUM_CHEMISTRY::Initial(CONTROLLER* controller, const int atom_numbers,
 
     Initial_Integral_Tasks(controller);
 
+    const int blas_create_status = (int)deviceBlasCreate(&blas_handle);
+    if (blas_create_status != (int)BLAS_SUCCESS)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    failed to create the BLAS backend handle: "
+            "status=%d\n",
+            blas_create_status);
+    }
+    const int solver_create_status = (int)deviceSolverCreate(&solver_handle);
+    if (solver_create_status != (int)SOLVER_SUCCESS)
+    {
+        const int blas_cleanup_status = (int)deviceBlasDestroy(blas_handle);
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "QUANTUM_CHEMISTRY::Initial",
+            "Reason:\n    failed to create the eigensolver backend handle: "
+            "status=%d; BLAS cleanup status=%d\n",
+            solver_create_status, blas_cleanup_status);
+    }
     is_initialized = 1;
-    deviceBlasCreate(&blas_handle);
-    deviceSolverCreate(&solver_handle);
     Memory_Allocate(controller);
+    Device_Malloc_Safely((void**)&d_nuclear_geometry_failure,
+                         5 * sizeof(int));
+    deviceMemset(d_nuclear_geometry_failure, -1, 5 * sizeof(int));
+    if (!Initialize_Coordinates_From_MD(crd, box_length)) return;
+    accepted_coordinate_generation = coordinate_generation;
+
+    const size_t density_bytes = sizeof(float) * mol.nao2;
+    Device_Malloc_Safely((void**)&d_accepted_alpha_density, density_bytes);
+    deviceMemcpy(d_accepted_alpha_density, scf_ws.alpha.d_P, density_bytes,
+                 deviceMemcpyDeviceToDevice);
+    if (scf_ws.runtime.unrestricted)
+    {
+        Device_Malloc_Safely((void**)&d_accepted_beta_density, density_bytes);
+        deviceMemcpy(d_accepted_beta_density, scf_ws.beta.d_P, density_bytes,
+                     deviceMemcpyDeviceToDevice);
+    }
+    const size_t env_bytes = sizeof(float) * mol.h_env.size();
+    Device_Malloc_Safely((void**)&d_accepted_env, env_bytes);
+    deviceMemcpy(d_accepted_env, mol.d_env, env_bytes,
+                 deviceMemcpyDeviceToDevice);
+    if (scf_ws.ri.enabled)
+    {
+        const size_t aux_env_bytes = sizeof(float) * scf_ws.ri.h_aux_env.size();
+        Device_Malloc_Safely((void**)&d_accepted_aux_env, aux_env_bytes);
+        deviceMemcpy(d_accepted_aux_env, scf_ws.ri.d_aux_env, aux_env_bytes,
+                     deviceMemcpyDeviceToDevice);
+    }
+    Device_Malloc_Safely((void**)&d_scf_validation_failure, sizeof(int));
+    deviceMemset(d_scf_validation_failure, -1, sizeof(int));
+    Device_Malloc_Safely((void**)&d_nuclear_overlap_pair, 2 * sizeof(int));
+    deviceMemset(d_nuclear_overlap_pair, -1, 2 * sizeof(int));
+    accepted_need_initial_guess = need_initial_guess;
+    accepted_density_is_ensemble = false;
 
     controller->Step_Print_Initial("QC", "%e");
     if (scf_ws.runtime.unrestricted)
@@ -968,7 +1320,7 @@ void QUANTUM_CHEMISTRY::Initial(CONTROLLER* controller, const int atom_numbers,
 }
 
 // 将 d_F 中的 F_guess 对角化，按 aufbau 填充 alpha/beta 轨道构建初始 P
-void QUANTUM_CHEMISTRY::Diag_Guess_And_Build_P()
+bool QUANTUM_CHEMISTRY::Diag_Guess_And_Build_P()
 {
     const int nao2 = mol.nao2;
 
@@ -986,8 +1338,9 @@ void QUANTUM_CHEMISTRY::Diag_Guess_And_Build_P()
     // 对角化（跳过 level shift）
     double saved_ls = scf_ws.runtime.level_shift;
     scf_ws.runtime.level_shift = 0.0;
-    Diagonalize_And_Build_Density();
+    const bool diagonalized = Diagonalize_And_Build_Density();
     scf_ws.runtime.level_shift = saved_ls;
+    if (!diagonalized) return false;
 
     // P = P_new
     deviceMemcpy(scf_ws.alpha.d_P, scf_ws.alpha.d_P_new, sizeof(float) * nao2,
@@ -997,18 +1350,30 @@ void QUANTUM_CHEMISTRY::Diag_Guess_And_Build_P()
         deviceMemcpy(scf_ws.beta.d_P, scf_ws.beta.d_P_new, sizeof(float) * nao2,
                      deviceMemcpyDeviceToDevice);
     }
+    return true;
 }
 
-void QUANTUM_CHEMISTRY::Build_Initial_Guess()
+bool QUANTUM_CHEMISTRY::Build_Initial_Guess()
 {
-    if (initial_guess == QC_INITIAL_GUESS::NONE) return;
+    if (initial_guess == QC_INITIAL_GUESS::NONE) return true;
 
     const int nao2 = mol.nao2;
 
     if (initial_guess == QC_INITIAL_GUESS::MINAO)
     {
-        QC_Build_Minao_Guess(mol, scf_ws.runtime, scf_ws.alpha.d_P,
-                             scf_ws.beta.d_P);
+        try
+        {
+            QC_Build_Minao_Guess(mol, scf_ws.runtime, scf_ws.alpha.d_P,
+                                 scf_ws.beta.d_P);
+        }
+        catch (const std::exception& error)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "QUANTUM_CHEMISTRY::Build_Initial_Guess",
+                "Reason:\n    MINAO initial guess failed: %s\n", error.what());
+            return false;
+        }
     }
     else if (initial_guess == QC_INITIAL_GUESS::SAP)
     {
@@ -1032,9 +1397,12 @@ void QUANTUM_CHEMISTRY::Build_Initial_Guess()
         QC_Scale_Matrix_By_Norms(nao, scf_ws.ortho.d_norms, scf_ws.alpha.d_F);
         QC_Add_Matrix(nao2, scf_ws.core.d_T, scf_ws.alpha.d_F,
                       scf_ws.alpha.d_F);
+        if (mol.has_ecp)
+            QC_Add_Matrix(nao2, scf_ws.alpha.d_F, scf_ws.core.d_V_ECP,
+                          scf_ws.alpha.d_F);
 
         // 4. 对角化 + aufbau 构建 P
-        Diag_Guess_And_Build_P();
+        if (!Diag_Guess_And_Build_P()) return false;
     }
 
     if (scf_ws.runtime.unrestricted)
@@ -1042,6 +1410,7 @@ void QUANTUM_CHEMISTRY::Build_Initial_Guess()
         QC_Add_Matrix((int)mol.nao2, scf_ws.alpha.d_P, scf_ws.beta.d_P,
                       scf_ws.direct.d_Ptot);
     }
+    return true;
 }
 
 void QUANTUM_CHEMISTRY::Memory_Allocate(CONTROLLER* controller)
@@ -1059,9 +1428,11 @@ void QUANTUM_CHEMISTRY::Memory_Allocate(CONTROLLER* controller)
     Device_Malloc_Safely((void**)&scf_ws.core.d_scf_energy, sizeof(double));
     Device_Malloc_Safely((void**)&scf_ws.core.d_nuc_energy_dev, sizeof(double));
     Device_Malloc_Safely((void**)&dft.d_exc_total, sizeof(double));
+    Device_Malloc_Safely((void**)&dft.d_xc_failure, 2 * sizeof(int));
     deviceMemset(scf_ws.core.d_scf_energy, 0, sizeof(double));
     deviceMemset(scf_ws.core.d_nuc_energy_dev, 0, sizeof(double));
     deviceMemset(dft.d_exc_total, 0, sizeof(double));
+    deviceMemset(dft.d_xc_failure, 0, 2 * sizeof(int));
 
     if (mol.is_spherical)
     {
@@ -1094,28 +1465,89 @@ void QUANTUM_CHEMISTRY::Memory_Allocate(CONTROLLER* controller)
                  sizeof(float) * task_ctx.topo.n_shell_pairs);
     if (dft.enable_dft)
     {
-        dft.max_grid_capacity =
-            mol.natm * dft.dft_radial_points * dft.dft_angular_points;
-        dft.max_grid_size = 0;
-        if (dft.max_grid_capacity <= 0)
+        const std::size_t atom_count = static_cast<std::size_t>(mol.natm);
+        const std::size_t radial_count =
+            static_cast<std::size_t>(dft.dft_radial_points);
+        const std::size_t angular_count =
+            static_cast<std::size_t>(dft.dft_angular_points);
+        const std::size_t maximum_grid_count =
+            static_cast<std::size_t>(std::numeric_limits<int>::max() / 3);
+        if (atom_count == 0 || radial_count == 0 || angular_count == 0 ||
+            atom_count > maximum_grid_count / radial_count ||
+            atom_count * radial_count > maximum_grid_count / angular_count)
         {
             controller->Throw_Formatted_SPONGE_Error(
                 spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
-                "Reason:\n    invalid DFT grid capacity: %d (natm=%d, "
-                "radial=%d, "
-                "angular=%d)\n",
-                dft.max_grid_capacity, mol.natm, dft.dft_radial_points,
-                dft.dft_angular_points);
+                "Reason:\n    DFT grid dimensions exceed the supported "
+                "kernel index range (natm=%d, radial=%d, angular=%d)\n",
+                mol.natm, dft.dft_radial_points, dft.dft_angular_points);
         }
-
-        dft.h_grid_coords.assign((int)dft.max_grid_capacity * 3, 0.0f);
-        dft.h_grid_weights.assign((int)dft.max_grid_capacity, 0.0f);
-        Device_Malloc_And_Copy_Safely((void**)&dft.d_grid_coords,
-                                      (void*)dft.h_grid_coords.data(),
-                                      sizeof(float) * dft.h_grid_coords.size());
-        Device_Malloc_And_Copy_Safely(
-            (void**)&dft.d_grid_weights, (void*)dft.h_grid_weights.data(),
-            sizeof(float) * dft.h_grid_weights.size());
+        const std::size_t grid_capacity =
+            atom_count * radial_count * angular_count;
+        const std::size_t batch_count =
+            static_cast<std::size_t>(dft.grid_batch_size);
+        if (batch_count == 0 ||
+            atom_count > std::numeric_limits<std::size_t>::max() /
+                             sizeof(double) / batch_count)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    DFT Becke-gradient workspace dimensions are "
+                "not representable (natm=%d, batch=%d)\n",
+                mol.natm, dft.grid_batch_size);
+        }
+        if (grid_capacity > dft.h_grid_weights.max_size() ||
+            grid_capacity > dft.h_grid_coords.max_size() / 3)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    DFT grid dimensions exceed the host container "
+                "size (natm=%d, radial=%d, angular=%d)\n",
+                mol.natm, dft.dft_radial_points, dft.dft_angular_points);
+        }
+        std::vector<float> grid_coords;
+        std::vector<float> grid_weights;
+        try
+        {
+            grid_coords.assign(3 * grid_capacity, 0.0f);
+            grid_weights.assign(grid_capacity, 0.0f);
+        }
+        catch (const std::length_error& error)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorOverflow, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    DFT grid host storage is not representable "
+                "(natm=%d, radial=%d, angular=%d): %s\n",
+                mol.natm, dft.dft_radial_points, dft.dft_angular_points,
+                error.what());
+        }
+        catch (const std::bad_alloc& error)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorMallocFailed, "QUANTUM_CHEMISTRY::Initial",
+                "Reason:\n    failed to allocate DFT grid host storage "
+                "(natm=%d, radial=%d, angular=%d): %s\n",
+                mol.natm, dft.dft_radial_points, dft.dft_angular_points,
+                error.what());
+        }
+        float* d_grid_coords = NULL;
+        float* d_grid_weights = NULL;
+        Device_Malloc_And_Copy_Safely((void**)&d_grid_coords,
+                                      (void*)grid_coords.data(),
+                                      sizeof(float) * grid_coords.size());
+        Device_Malloc_And_Copy_Safely((void**)&d_grid_weights,
+                                      (void*)grid_weights.data(),
+                                      sizeof(float) * grid_weights.size());
+        dft.h_grid_coords.swap(grid_coords);
+        dft.h_grid_weights.swap(grid_weights);
+        dft.d_grid_coords = d_grid_coords;
+        dft.d_grid_weights = d_grid_weights;
+        Device_Malloc_Safely((void**)&dft.d_becke_atom_weights,
+                             sizeof(double) * batch_count * atom_count);
+        Device_Malloc_Safely((void**)&dft.d_covalent_radii,
+                             sizeof(double) * atom_count);
+        dft.max_grid_capacity = static_cast<int>(grid_capacity);
+        dft.max_grid_size = 0;
         Device_Malloc_Safely((void**)&dft.d_Vxc, sizeof(float) * mol.nao2);
         if (scf_ws.runtime.unrestricted)
         {
@@ -1221,7 +1653,19 @@ void QUANTUM_CHEMISTRY::Memory_Allocate(CONTROLLER* controller)
                          sizeof(float) * mol.nbas, deviceMemcpyHostToDevice);
         }
     }
-    Build_SCF_Workspace();
+    try
+    {
+        Build_SCF_Workspace();
+    }
+    catch (const std::exception& error)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "QUANTUM_CHEMISTRY::Memory_Allocate",
+            "Reason:\n    SCF workspace electron configuration is invalid: "
+            "%s\n",
+            error.what());
+        return;
+    }
 
     // RI 内存分配在 Build_SCF_Workspace 之后，因为需要 n_alpha/n_beta
     if (scf_ws.ri.enabled) RI_Memory_Allocate();
@@ -1249,13 +1693,13 @@ void QUANTUM_CHEMISTRY::Memory_Allocate(CONTROLLER* controller)
     // 预分配笛卡尔密度缓冲 (球谐 1e 梯度 + ECP 梯度共用)
     if (mol.is_spherical || mol.has_ecp)
     {
-        const int nc2 = mol.nao_cart * mol.nao_cart;
-        Device_Malloc_Safely((void**)&grad_ws.d_P_cart, sizeof(float) * nc2);
+        Device_Malloc_Safely((void**)&grad_ws.d_P_cart,
+                             sizeof(float) * (size_t)mol.nao_cart2);
     }
     if (mol.is_spherical)
     {
-        const int nc2 = mol.nao_cart * mol.nao_cart;
-        Device_Malloc_Safely((void**)&grad_ws.d_W_cart, sizeof(float) * nc2);
+        Device_Malloc_Safely((void**)&grad_ws.d_W_cart,
+                             sizeof(float) * (size_t)mol.nao_cart2);
         Device_Malloc_Safely((void**)&grad_ws.d_norms_ones,
                              sizeof(float) * mol.nao_cart);
         std::vector<float> h_ones(mol.nao_cart, 1.0f);

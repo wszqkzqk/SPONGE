@@ -36,6 +36,7 @@ struct NON_BOND_14
 
     void Initial(CONTROLLER* controller, const float* LJ_type_A,
                  const float* LJ_type_B, const int* lj_atom_type,
+                 int atom_numbers, int atom_type_numbers,
                  const char* module_name = NULL);
     void Memory_Allocate();
     void Parameter_Host_To_Device();

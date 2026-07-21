@@ -1,6 +1,8 @@
 ﻿#include "torsion.h"
 
 #include "bond_order.h"  // for find_bond_index
+#include "reaxff_geometry.h"
+#include "reaxff_input.h"
 
 static __global__ void Calculate_Torsion_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_type,
@@ -13,12 +15,12 @@ static __global__ void Calculate_Torsion_Kernel(
     const LTMatrix3 cell, const LTMatrix3 rcell, float* atom_energy,
     VECTOR* frc, LTMatrix3* atom_virial, float* d_energy_tor_sum,
     float* d_energy_cot_sum, const int* bond_count, const int* bond_offset,
-    const int* bond_nbr, const int* bond_idx_arr)
+    const int* bond_nbr, const int* bond_idx_arr, int* geometry_error)
 {
     SIMPLE_DEVICE_FOR(j, atom_numbers)
     {
         int type_j = atom_type[j];
-        if (type_j >= 0)
+        if (type_j >= 0 && type_j < atom_type_numbers)
         {
             VECTOR rj = crd[j];
             float delta_j_val = Delta_boc[j];
@@ -36,6 +38,13 @@ static __global__ void Calculate_Torsion_Kernel(
                 if (j >= k) continue;
 
                 int type_k = atom_type[k];
+                if (type_k < 0 || type_k >= atom_type_numbers)
+                {
+                    Record_ReaxFF_Geometry_Error(
+                        geometry_error, REAXFF_INVALID_ATOM_TYPE, j, k,
+                        type_j, type_k);
+                    continue;
+                }
                 float bo_jk_val = bo_s[b_jk] + bo_pi[b_jk] + bo_pi2[b_jk];
                 if (bo_jk_val <= thb_cut) continue;
                 float bo_jk_pi_val = bo_pi[b_jk];
@@ -54,6 +63,13 @@ static __global__ void Calculate_Torsion_Kernel(
                     int i = bond_nbr[bo_j + pi];
                     if (i == k) continue;
                     int type_i = atom_type[i];
+                    if (type_i < 0 || type_i >= atom_type_numbers)
+                    {
+                        Record_ReaxFF_Geometry_Error(
+                            geometry_error, REAXFF_INVALID_ATOM_TYPE, i, j,
+                            type_i, type_j);
+                        continue;
+                    }
                     float bo_ij_val = bo_s[b_ij] + bo_pi[b_ij] + bo_pi2[b_ij];
                     if (bo_ij_val <= thb_cut) continue;
 
@@ -67,6 +83,13 @@ static __global__ void Calculate_Torsion_Kernel(
                         int l = bond_nbr[bo_k + pl];
                         if (l == j || l == i) continue;
                         int type_l = atom_type[l];
+                        if (type_l < 0 || type_l >= atom_type_numbers)
+                        {
+                            Record_ReaxFF_Geometry_Error(
+                                geometry_error, REAXFF_INVALID_ATOM_TYPE, i, j,
+                                k, l);
+                            continue;
+                        }
                         float bo_kl_val =
                             bo_s[b_kl] + bo_pi[b_kl] + bo_pi2[b_kl];
                         if (bo_kl_val <= thb_cut) continue;
@@ -78,21 +101,49 @@ static __global__ void Calculate_Torsion_Kernel(
                             Get_Periodic_Displacement(rk, rl, cell, rcell);
                         float r_kl = norm3df(dkl.x, dkl.y, dkl.z);
 
-                        float cos_ijk =
-                            (dji.x * djk.x + dji.y * djk.y + dji.z * djk.z) /
-                            (r_ij * r_jk);
-                        if (cos_ijk > 1.0f) cos_ijk = 1.0f;
-                        if (cos_ijk < -1.0f) cos_ijk = -1.0f;
-                        float sin_ijk = sinf(acosf(cos_ijk));
-                        if (sin_ijk < 1e-5f) sin_ijk = 1e-5f;
+                        int quartet_idx =
+                            (((type_i * atom_type_numbers + type_j) *
+                                  atom_type_numbers +
+                              type_k) *
+                                 atom_type_numbers +
+                             type_l);
+                        REAXFF_TORSION_Info info = torsion_info[quartet_idx];
+                        if (info.entry_count <= 0) continue;
 
-                        float cos_jkl = ((-djk.x) * dkl.x + (-djk.y) * dkl.y +
-                                         (-djk.z) * dkl.z) /
-                                        (r_jk * r_kl);
-                        if (cos_jkl > 1.0f) cos_jkl = 1.0f;
-                        if (cos_jkl < -1.0f) cos_jkl = -1.0f;
-                        float sin_jkl = sinf(acosf(cos_jkl));
-                        if (sin_jkl < 1e-5f) sin_jkl = 1e-5f;
+                        REAXFF_ANGLE_GEOMETRY angle_ijk;
+                        REAXFF_ANGLE_GEOMETRY angle_jkl;
+                        const VECTOR dkj = {-djk.x, -djk.y, -djk.z};
+                        const bool geometry_valid =
+                            Compute_ReaxFF_Angle_Geometry(dji, djk,
+                                                         &angle_ijk) &&
+                            Compute_ReaxFF_Angle_Geometry(dkj, dkl,
+                                                         &angle_jkl);
+                        bool direction_dependent = false;
+                        for (int e = 0; e < info.entry_count; e++)
+                        {
+                            const REAXFF_TORSION_Entry* param =
+                                &torsion_entries[info.start_idx + e];
+                            direction_dependent =
+                                direction_dependent || param->V1 != 0.0f ||
+                                param->V2 != 0.0f || param->V3 != 0.0f ||
+                                param->p_cot1 != 0.0f;
+                        }
+                        if (!geometry_valid || angle_ijk.is_collinear ||
+                            angle_jkl.is_collinear)
+                        {
+                            // A parameter entry with no torsional or
+                            // conjugation coefficient is the exact inactive
+                            // branch and remains well defined at collinearity.
+                            if (direction_dependent)
+                            {
+                                Record_ReaxFF_Geometry_Error(
+                                    geometry_error, REAXFF_TORSION_UNDEFINED,
+                                    i, j, k, l);
+                            }
+                            continue;
+                        }
+                        const float sin_ijk = angle_ijk.sine;
+                        const float sin_jkl = angle_jkl.sine;
 
                         float unnorm_cos_phi =
                             -(dji.x * djk.x + dji.y * djk.y + dji.z * djk.z) *
@@ -109,14 +160,19 @@ static __global__ void Calculate_Torsion_Kernel(
                                                         dji.z * cross_jk_kl.z);
                         float phi = atan2f(unnorm_sin_phi, unnorm_cos_phi);
                         float cos_phi = cosf(phi);
-
-                        int quartet_idx =
-                            (((type_i * atom_type_numbers + type_j) *
-                                  atom_type_numbers +
-                              type_k) *
-                                 atom_type_numbers +
-                             type_l);
-                        REAXFF_TORSION_Info info = torsion_info[quartet_idx];
+                        if (!ReaxFF_Float_Is_Finite(r_ij) ||
+                            !ReaxFF_Float_Is_Finite(r_jk) ||
+                            !ReaxFF_Float_Is_Finite(r_kl) ||
+                            !ReaxFF_Float_Is_Finite(phi) ||
+                            !ReaxFF_Float_Is_Finite(cos_phi) ||
+                            (unnorm_sin_phi == 0.0f &&
+                             unnorm_cos_phi == 0.0f))
+                        {
+                            Record_ReaxFF_Geometry_Error(
+                                geometry_error, REAXFF_TORSION_NONFINITE, i, j,
+                                k, l);
+                            continue;
+                        }
 
                         SADvector<9> s_dji;
                         s_dji.x = SADfloat<9>(dji.x, 0);
@@ -135,23 +191,18 @@ static __global__ void Calculate_Torsion_Kernel(
                         SADfloat<9> s_r_jk = norm3df(s_djk.x, s_djk.y, s_djk.z);
                         SADfloat<9> s_r_kl = norm3df(s_dkl.x, s_dkl.y, s_dkl.z);
 
-                        SADfloat<9> s_cos_ijk =
-                            (s_dji * s_djk) / (s_r_ij * s_r_jk);
-                        if (s_cos_ijk.val > 1.0f) s_cos_ijk = SADfloat<9>(1.0f);
-                        if (s_cos_ijk.val < -1.0f)
-                            s_cos_ijk = SADfloat<9>(-1.0f);
-                        SADfloat<9> s_sin_ijk = sinf(acosf(s_cos_ijk));
-                        if (s_sin_ijk.val < 1e-5f)
-                            s_sin_ijk = SADfloat<9>(1e-5f);
+                        SADvector<9> s_cross_ijk = s_dji ^ s_djk;
+                        SADfloat<9> s_sin_ijk =
+                            norm3df(s_cross_ijk.x, s_cross_ijk.y,
+                                    s_cross_ijk.z) /
+                            (s_r_ij * s_r_jk);
 
-                        SADfloat<9> s_cos_jkl =
-                            (((-1.0f) * s_djk) * s_dkl) / (s_r_jk * s_r_kl);
-                        if (s_cos_jkl.val > 1.0f) s_cos_jkl = SADfloat<9>(1.0f);
-                        if (s_cos_jkl.val < -1.0f)
-                            s_cos_jkl = SADfloat<9>(-1.0f);
-                        SADfloat<9> s_sin_jkl = sinf(acosf(s_cos_jkl));
-                        if (s_sin_jkl.val < 1e-5f)
-                            s_sin_jkl = SADfloat<9>(1e-5f);
+                        SADvector<9> s_cross_jkl =
+                            ((-1.0f) * s_djk) ^ s_dkl;
+                        SADfloat<9> s_sin_jkl =
+                            norm3df(s_cross_jkl.x, s_cross_jkl.y,
+                                    s_cross_jkl.z) /
+                            (s_r_jk * s_r_kl);
 
                         SADfloat<9> s_unnorm_cos_phi =
                             -(s_dji * s_djk) * (s_djk * s_dkl) +
@@ -205,7 +256,7 @@ static __global__ void Calculate_Torsion_Kernel(
                                 s_fn10 * sin_ijk * sin_jkl * s_CV;
 
                             SADfloat<6> s_en_cot(0.0f);
-                            if (fabsf(param->p_cot1) > 0.0001f)
+                            if (param->p_cot1 != 0.0f)
                             {
                                 SADfloat<6> s_cot_diff_ij = s_boa_ij - 1.5f;
                                 SADfloat<6> s_cot_diff_jk = s_boa_jk - 1.5f;
@@ -223,6 +274,26 @@ static __global__ void Calculate_Torsion_Kernel(
                             }
 
                             SADfloat<6> s_en_total = s_en_tor + s_en_cot;
+
+                            bool bond_derivatives_finite =
+                                ReaxFF_Float_Is_Finite(s_en_tor.val) &&
+                                ReaxFF_Float_Is_Finite(s_en_cot.val) &&
+                                ReaxFF_Float_Is_Finite(s_en_total.val);
+                            for (int derivative_i = 0;
+                                 bond_derivatives_finite && derivative_i < 6;
+                                 derivative_i++)
+                            {
+                                bond_derivatives_finite =
+                                    ReaxFF_Float_Is_Finite(
+                                        s_en_total.dval[derivative_i]);
+                            }
+                            if (!bond_derivatives_finite)
+                            {
+                                Record_ReaxFF_Geometry_Error(
+                                    geometry_error,
+                                    REAXFF_TORSION_NONFINITE, i, j, k, l);
+                                continue;
+                            }
 
                             atomicAdd(&d_dE_dBO_s[b_ij], s_en_total.dval[0]);
                             atomicAdd(&d_dE_dBO_pi[b_ij], s_en_total.dval[0]);
@@ -269,7 +340,7 @@ static __global__ void Calculate_Torsion_Kernel(
                                 fn10_val * s_sin_ijk * s_sin_jkl * s_cv_dir;
 
                             SADfloat<9> s_en_cot_dir(0.0f);
-                            if (fabsf(param->p_cot1) > 0.0001f)
+                            if (param->p_cot1 != 0.0f)
                             {
                                 float cot_diff_ij_val = boa_ij_val - 1.5f;
                                 float cot_diff_jk_val = boa_jk_val - 1.5f;
@@ -288,6 +359,24 @@ static __global__ void Calculate_Torsion_Kernel(
                             }
                             SADfloat<9> s_en_direct =
                                 s_en_tor_dir + s_en_cot_dir;
+
+                            bool direct_derivatives_finite =
+                                ReaxFF_Float_Is_Finite(s_en_direct.val);
+                            for (int derivative_i = 0;
+                                 direct_derivatives_finite && derivative_i < 9;
+                                 derivative_i++)
+                            {
+                                direct_derivatives_finite =
+                                    ReaxFF_Float_Is_Finite(
+                                        s_en_direct.dval[derivative_i]);
+                            }
+                            if (!direct_derivatives_finite)
+                            {
+                                Record_ReaxFF_Geometry_Error(
+                                    geometry_error,
+                                    REAXFF_TORSION_NONFINITE, i, j, k, l);
+                                continue;
+                            }
 
                             VECTOR dE_ddji = {s_en_direct.dval[0],
                                               s_en_direct.dval[1],
@@ -308,6 +397,39 @@ static __global__ void Calculate_Torsion_Kernel(
                                          dE_ddjk.z - dE_ddkl.z};
                             VECTOR fl = dE_ddkl;
 
+                            if (!ReaxFF_Vector_Is_Finite(fi) ||
+                                !ReaxFF_Vector_Is_Finite(fj) ||
+                                !ReaxFF_Vector_Is_Finite(fk) ||
+                                !ReaxFF_Vector_Is_Finite(fl))
+                            {
+                                Record_ReaxFF_Geometry_Error(
+                                    geometry_error,
+                                    REAXFF_TORSION_NONFINITE, i, j, k, l);
+                                continue;
+                            }
+
+                            LTMatrix3 interaction_virial = {0, 0, 0, 0, 0, 0};
+                            if (atom_virial)
+                            {
+                                VECTOR dr_ji = {-dji.x, -dji.y, -dji.z};
+                                VECTOR dr_jk = {-djk.x, -djk.y, -djk.z};
+                                VECTOR dr_jl = {dr_jk.x - dkl.x,
+                                                dr_jk.y - dkl.y,
+                                                dr_jk.z - dkl.z};
+                                interaction_virial =
+                                    Get_Virial_From_Force_Dis(fi, dr_ji) +
+                                    Get_Virial_From_Force_Dis(fk, dr_jk) +
+                                    Get_Virial_From_Force_Dis(fl, dr_jl);
+                                if (!ReaxFF_Matrix_Is_Finite(
+                                        interaction_virial))
+                                {
+                                    Record_ReaxFF_Geometry_Error(
+                                        geometry_error,
+                                        REAXFF_TORSION_NONFINITE, i, j, k, l);
+                                    continue;
+                                }
+                            }
+
                             atomicAdd(&frc[i].x, fi.x);
                             atomicAdd(&frc[i].y, fi.y);
                             atomicAdd(&frc[i].z, fi.z);
@@ -322,16 +444,8 @@ static __global__ void Calculate_Torsion_Kernel(
                             atomicAdd(&frc[l].z, fl.z);
                             if (atom_virial)
                             {
-                                VECTOR dr_ji = {-dji.x, -dji.y, -dji.z};
-                                VECTOR dr_jk = {-djk.x, -djk.y, -djk.z};
-                                VECTOR dr_jl = {dr_jk.x - dkl.x,
-                                                dr_jk.y - dkl.y,
-                                                dr_jk.z - dkl.z};
-                                LTMatrix3 v =
-                                    Get_Virial_From_Force_Dis(fi, dr_ji) +
-                                    Get_Virial_From_Force_Dis(fk, dr_jk) +
-                                    Get_Virial_From_Force_Dis(fl, dr_jl);
-                                atomicAdd(atom_virial + j, v);
+                                atomicAdd(atom_virial + j,
+                                          interaction_virial);
                             }
 
                             en_tor += s_en_tor.val;
@@ -345,6 +459,11 @@ static __global__ void Calculate_Torsion_Kernel(
             if (atom_energy)
                 atomicAdd(&atom_energy[j], (float)(en_tor + en_cot));
         }
+        else
+        {
+            Record_ReaxFF_Geometry_Error(
+                geometry_error, REAXFF_INVALID_ATOM_TYPE, j, -1, type_j);
+        }
     }
 }
 
@@ -352,330 +471,239 @@ void REAXFF_TORSION::Initial(CONTROLLER* controller, int atom_numbers,
                              const char* module_name)
 {
     if (module_name == NULL) module_name = "REAXFF";
-    this->atom_numbers = atom_numbers;
     if (!controller->Command_Exist(module_name, "in_file")) return;
 
-    const char* parameter_in_file = controller->Command(module_name, "in_file");
-    const char* type_in_file = controller->Command(module_name, "type_in_file");
+    const char* parameter_in_file =
+        controller->Original_Command(module_name, "in_file");
+    const char* type_in_file =
+        controller->Original_Command(module_name, "type_in_file");
     if (parameter_in_file == NULL || type_in_file == NULL)
     {
         controller->printf(
             "REAXFF_TORSION IS NOT INITIALIZED (missing input files)\n\n");
         return;
     }
-    controller->Step_Print_Initial("REAXFF_TOR", "%14.7e");
-    controller->Step_Print_Initial("REAXFF_CONJ", "%14.7e");
 
-    FILE* fp;
-    Open_File_Safely(&fp, parameter_in_file, "r");
-    char line[1024];
-    auto throw_bad_format = [&](const char* file_name, const char* reason)
+    REAXFF_INPUT_ERROR input_error;
+    REAXFF_FORCE_FIELD_IR force_field;
+    if (!ReaxFF_Parse_Force_Field_File(parameter_in_file, &force_field,
+                                       &input_error))
     {
-        char error_msg[1024];
-        sprintf(error_msg, "Reason:\n\t%s in file %s\n", reason, file_name);
-        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
-                                       "REAXFF_TORSION::Initial", error_msg);
-    };
-    auto read_line_or_throw =
-        [&](FILE* file, const char* file_name, const char* stage)
-    {
-        if (fgets(line, 1024, file) == NULL)
-        {
-            char reason[512];
-            sprintf(reason, "failed to read %s", stage);
-            throw_bad_format(file_name, reason);
-        }
-    };
-
-    read_line_or_throw(fp, parameter_in_file, "parameter header line 1");
-    read_line_or_throw(fp, parameter_in_file, "general parameter count line");
-    int n_gp = 0;
-    if (sscanf(line, "%d", &n_gp) != 1 || n_gp <= 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of general parameters");
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_TORSION::Initial", "Reason:\n\t%s", reason.c_str());
+        return;
     }
-    if (n_gp <= 29)
+    std::vector<int> atom_type;
+    if (!ReaxFF_Parse_Type_File_Path(type_in_file, atom_numbers, force_field,
+                                     &atom_type, NULL, &input_error))
     {
-        throw_bad_format(parameter_in_file,
-                         "general parameter count is too small for torsion");
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_TORSION::Initial", "Reason:\n\t%s", reason.c_str());
+        return;
     }
-    std::vector<float> gp(n_gp);
-    for (int i = 0; i < n_gp; i++)
+    if (force_field.general_parameters.size() <= 29)
     {
-        read_line_or_throw(fp, parameter_in_file, "general parameter block");
-        if (sscanf(line, "%f", &gp[i]) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse general parameter at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-    }
-    p_tor2 = gp[23];
-    p_tor3 = gp[24];
-    p_tor4 = gp[25];
-    p_cot2 = gp[27];
-
-    read_line_or_throw(fp, parameter_in_file, "atom type count line");
-    int n_atom_types = 0;
-    if (sscanf(line, "%d", &n_atom_types) != 1 || n_atom_types <= 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of atom types");
-    }
-    this->atom_type_numbers = n_atom_types;
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 1");
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 2");
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 3");
-    std::map<std::string, int> type_map;
-    for (int i = 0; i < n_atom_types; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 1");
-        char name[16];
-        if (sscanf(line, "%15s", name) != 1)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 1 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        type_map[name] = i;
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 2");
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 3");
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 4");
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_TORSION::Initial",
+            "Reason:\n\tgeneral parameter count is too small for torsion in "
+            "file %s",
+            parameter_in_file);
+        return;
     }
 
-    read_line_or_throw(fp, parameter_in_file, "bond parameter count line");
-    int n_bond = 0;
-    if (sscanf(line, "%d", &n_bond) != 1 || n_bond < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of bond parameters");
-    }
-    read_line_or_throw(fp, parameter_in_file, "bond parameter header line");
-    for (int i = 0; i < n_bond * 2; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file, "bond parameter block");
-    }
-
-    read_line_or_throw(fp, parameter_in_file, "off-diagonal count line");
-    int n_off = 0;
-    if (sscanf(line, "%d", &n_off) != 1 || n_off < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of off-diagonal parameters");
-    }
-    for (int i = 0; i < n_off; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file,
-                           "off-diagonal parameter entry");
-    }
-
-    read_line_or_throw(fp, parameter_in_file, "three-body count line");
-    int n_thb = 0;
-    if (sscanf(line, "%d", &n_thb) != 1 || n_thb < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of three-body parameters");
-    }
-    for (int i = 0; i < n_thb; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file, "three-body parameter entry");
-    }
-
-    read_line_or_throw(fp, parameter_in_file, "torsion count line");
-    int n_tor = 0;
-    if (sscanf(line, "%d", &n_tor) != 1 || n_tor < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of torsion parameters");
-    }
-    struct TmpTorEntry
-    {
-        int t1, t2, t3, t4;
-        REAXFF_TORSION_Entry entry;
-    };
-    std::vector<TmpTorEntry> tmp_entries;
-    for (int i = 0; i < n_tor; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file, "torsion parameter entry");
-        int t1, t2, t3, t4;
-        float v1, v2, v3, p1, p2, cot;
-        int read_cnt = sscanf(line, "%d %d %d %d %f %f %f %f %f %f", &t1, &t2,
-                              &t3, &t4, &v1, &v2, &v3, &p1, &p2, &cot);
-        if (read_cnt < 9)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse torsion parameter entry at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        TmpTorEntry te;
-        te.t1 = t1;
-        te.t2 = t2;
-        te.t3 = t3;
-        te.t4 = t4;
-        te.entry.p_tor1 = p1;
-        te.entry.V1 = v1;
-        te.entry.V2 = v2;
-        te.entry.V3 = v3;
-        te.entry.p_tor2 = 0.0f;
-        te.entry.p_cot1 = p2;
-        tmp_entries.push_back(te);
-    }
-    fclose(fp);
-
-    int n4 = n_atom_types * n_atom_types * n_atom_types * n_atom_types;
-    std::vector<int> tor_flag(n4, 0);
-    std::vector<REAXFF_TORSION_Entry> all_entries;
-    std::map<int, std::vector<int>> quartet_to_entries;
-
-    for (const auto& te : tmp_entries)
-    {
-        if (te.t1 > 0 && te.t4 > 0)
-        {
-            int t1 = te.t1, t2 = te.t2, t3 = te.t3, t4 = te.t4;
-            if (t1 < 1 || t1 > n_atom_types || t2 < 1 || t2 > n_atom_types ||
-                t3 < 1 || t3 > n_atom_types || t4 < 1 || t4 > n_atom_types)
-            {
-                throw_bad_format(
-                    parameter_in_file,
-                    "torsion atom type index out of range for explicit entry");
-            }
-            int q_idx = (((t1 - 1) * n_atom_types + (t2 - 1)) * n_atom_types +
-                         (t3 - 1)) *
-                            n_atom_types +
-                        (t4 - 1);
-            int q_idx_rev =
-                (((t4 - 1) * n_atom_types + (t3 - 1)) * n_atom_types +
-                 (t2 - 1)) *
-                    n_atom_types +
-                (t1 - 1);
-            int entry_idx = all_entries.size();
-            all_entries.push_back(te.entry);
-            quartet_to_entries[q_idx] = {entry_idx};
-            tor_flag[q_idx] = 1;
-            if (q_idx != q_idx_rev)
-            {
-                quartet_to_entries[q_idx_rev] = {entry_idx};
-                tor_flag[q_idx_rev] = 1;
-            }
-        }
-    }
-
-    for (const auto& te : tmp_entries)
-    {
-        if (te.t1 == 0 && te.t4 == 0)
-        {
-            int t2 = te.t2, t3 = te.t3;
-            if (t2 < 1 || t2 > n_atom_types || t3 < 1 || t3 > n_atom_types)
-            {
-                throw_bad_format(
-                    parameter_in_file,
-                    "torsion atom type index out of range for wildcard entry");
-            }
-            int entry_idx = all_entries.size();
-            all_entries.push_back(te.entry);
-            for (int p = 0; p < n_atom_types; p++)
-            {
-                for (int o = 0; o < n_atom_types; o++)
-                {
-                    int q_idx = (((p)*n_atom_types + (t2 - 1)) * n_atom_types +
-                                 (t3 - 1)) *
-                                    n_atom_types +
-                                (o);
-                    if (tor_flag[q_idx] == 0)
-                        quartet_to_entries[q_idx] = {entry_idx};
-                    int q_idx_rev =
-                        (((o)*n_atom_types + (t3 - 1)) * n_atom_types +
-                         (t2 - 1)) *
-                            n_atom_types +
-                        (p);
-                    if (q_idx_rev != q_idx && tor_flag[q_idx_rev] == 0)
-                        quartet_to_entries[q_idx_rev] = {entry_idx};
-                }
-            }
-        }
-    }
-
-    Malloc_Safely((void**)&h_torsion_info, sizeof(REAXFF_TORSION_Info) * n4);
-    memset(h_torsion_info, 0, sizeof(REAXFF_TORSION_Info) * n4);
-    std::vector<REAXFF_TORSION_Entry> sorted_entries;
-    for (int i = 0; i < n4; i++)
-    {
-        if (quartet_to_entries.count(i))
-        {
-            h_torsion_info[i].start_idx = sorted_entries.size();
-            h_torsion_info[i].entry_count = quartet_to_entries[i].size();
-            for (int idx : quartet_to_entries[i])
-                sorted_entries.push_back(all_entries[idx]);
-        }
-    }
-    Malloc_Safely((void**)&h_torsion_entries,
-                  sizeof(REAXFF_TORSION_Entry) * sorted_entries.size());
-    for (size_t i = 0; i < sorted_entries.size(); i++)
-        h_torsion_entries[i] = sorted_entries[i];
-
-    Open_File_Safely(&fp, type_in_file, "r");
-    int check_atom_numbers = 0;
-    read_line_or_throw(fp, type_in_file, "atom number line");
-    if (sscanf(line, "%d", &check_atom_numbers) != 1)
-    {
-        throw_bad_format(type_in_file, "failed to parse atom numbers");
-    }
-    if (check_atom_numbers != atom_numbers)
-    {
-        char reason[512];
-        sprintf(reason, "atom numbers (%d) does not match system (%d)",
-                check_atom_numbers, atom_numbers);
-        throw_bad_format(type_in_file, reason);
-    }
-    Malloc_Safely((void**)&h_atom_type, sizeof(int) * atom_numbers);
-    for (int i = 0; i < atom_numbers; i++)
-    {
-        read_line_or_throw(fp, type_in_file, "atom type entry line");
-        char name[16];
-        if (sscanf(line, "%15s", name) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse atom type at index %d", i + 1);
-            throw_bad_format(type_in_file, reason);
-        }
-        auto iter = type_map.find(std::string(name));
-        if (iter == type_map.end())
-        {
-            char reason[512];
-            sprintf(reason, "atom type %s not found in parameter file %s", name,
-                    parameter_in_file);
-            throw_bad_format(type_in_file, reason);
-        }
-        h_atom_type[i] = iter->second;
-    }
-    fclose(fp);
-
-    Device_Malloc_And_Copy_Safely((void**)&d_atom_type, h_atom_type,
-                                  sizeof(int) * atom_numbers);
-    Device_Malloc_And_Copy_Safely((void**)&d_torsion_info, h_torsion_info,
-                                  sizeof(REAXFF_TORSION_Info) * n4);
-    Device_Malloc_And_Copy_Safely(
-        (void**)&d_torsion_entries, h_torsion_entries,
-        sizeof(REAXFF_TORSION_Entry) * sorted_entries.size());
-    Device_Malloc_Safely((void**)&d_energy_tor_sum, sizeof(float));
-    Device_Malloc_Safely((void**)&d_energy_cot_sum, sizeof(float));
-    // thb_cutoff means the three-/four-body screening cutoff used by torsion
-    // and conjugation terms. It is a control parameter, not the bond-order
-    // cutoff in the force-field file.
-    this->thb_cut = 0.001f;
+    float staged_thb_cut = 0.001f;
     if (controller->Command_Exist(module_name, "thb_cutoff"))
     {
-        this->thb_cut = atof(controller->Command(module_name, "thb_cutoff"));
+        controller->Check_Float(module_name, "thb_cutoff",
+                                "REAXFF_TORSION::Initial");
+        staged_thb_cut =
+            atof(controller->Command(module_name, "thb_cutoff"));
     }
+    if (!Float_Memory_Is_Finite(&staged_thb_cut) ||
+        staged_thb_cut < 0.0f)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "REAXFF_TORSION::Initial",
+            "REAXFF.thb_cutoff must be finite and non-negative, but got %g.",
+            staged_thb_cut);
+        return;
+    }
+
+    const int n_atom_types = static_cast<int>(force_field.atom_types.size());
+    int quartet_parameter_count = 0;
+    if (!ReaxFF_Checked_Dense_Table_Count(
+            n_atom_types, 4, 3 * sizeof(REAXFF_TORSION_Info),
+            &quartet_parameter_count))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_TORSION::Initial",
+            "Reason:\n\tatom type count %d exceeds the supported four-body "
+            "parameter table extent in file %s",
+            n_atom_types, parameter_in_file);
+        return;
+    }
+
+    auto make_entry = [](const REAXFF_TORSION_IR& source)
+    {
+        REAXFF_TORSION_Entry entry;
+        entry.p_tor1 = source.values[3];
+        entry.V1 = source.values[0];
+        entry.V2 = source.values[1];
+        entry.V3 = source.values[2];
+        entry.p_tor2 = 0.0f;
+        entry.p_cot1 = source.values[4];
+        return entry;
+    };
+    auto quartet_index = [n_atom_types](int type1, int type2, int type3,
+                                         int type4)
+    {
+        return (((type1)*n_atom_types + type2) * n_atom_types + type3) *
+                   n_atom_types +
+               type4;
+    };
+
+    std::map<int, REAXFF_TORSION_Entry> quartet_entries;
+    std::set<int> explicit_quartets;
+    for (const REAXFF_TORSION_IR& source : force_field.torsions)
+    {
+        if (source.types[0] == 0) continue;
+        const int type1 = source.types[0] - 1;
+        const int type2 = source.types[1] - 1;
+        const int type3 = source.types[2] - 1;
+        const int type4 = source.types[3] - 1;
+        const int forward = quartet_index(type1, type2, type3, type4);
+        const int reverse = quartet_index(type4, type3, type2, type1);
+        const REAXFF_TORSION_Entry entry = make_entry(source);
+        quartet_entries[forward] = entry;
+        explicit_quartets.insert(forward);
+        if (reverse != forward)
+        {
+            quartet_entries[reverse] = entry;
+            explicit_quartets.insert(reverse);
+        }
+    }
+
+    std::size_t wildcard_count = 0;
+    for (const REAXFF_TORSION_IR& source : force_field.torsions)
+        if (source.types[0] == 0) wildcard_count++;
+    std::size_t wildcard_work = 0;
+    std::size_t pair_count = 0;
+    if (!ReaxFF_Checked_Size_Multiply(
+            static_cast<std::size_t>(n_atom_types),
+            static_cast<std::size_t>(n_atom_types), &pair_count) ||
+        !ReaxFF_Checked_Size_Multiply(wildcard_count, pair_count,
+                                      &wildcard_work) ||
+        wildcard_work >
+            static_cast<std::size_t>(quartet_parameter_count) * 4)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_TORSION::Initial",
+            "Reason:\n\twildcard torsion expansion (%zu entries over %zu "
+            "outer-type pairs) exceeds the supported preprocessing work in "
+            "file %s",
+            wildcard_count, pair_count, parameter_in_file);
+        return;
+    }
+
+    for (const REAXFF_TORSION_IR& source : force_field.torsions)
+    {
+        if (source.types[0] != 0) continue;
+        const int type2 = source.types[1] - 1;
+        const int type3 = source.types[2] - 1;
+        const REAXFF_TORSION_Entry entry = make_entry(source);
+        for (int outer1 = 0; outer1 < n_atom_types; outer1++)
+        {
+            for (int outer2 = 0; outer2 < n_atom_types; outer2++)
+            {
+                const int forward =
+                    quartet_index(outer1, type2, type3, outer2);
+                if (explicit_quartets.count(forward) == 0)
+                    quartet_entries[forward] = entry;
+                const int reverse =
+                    quartet_index(outer2, type3, type2, outer1);
+                if (explicit_quartets.count(reverse) == 0)
+                    quartet_entries[reverse] = entry;
+            }
+        }
+    }
+
+    std::vector<REAXFF_TORSION_Info> torsion_info(
+        quartet_parameter_count, REAXFF_TORSION_Info{0, 0});
+    std::vector<REAXFF_TORSION_Entry> sorted_entries;
+    for (const auto& indexed_entry : quartet_entries)
+    {
+        if (indexed_entry.first < 0 ||
+            indexed_entry.first >= quartet_parameter_count ||
+            sorted_entries.size() >= static_cast<std::size_t>(INT_MAX))
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat, "REAXFF_TORSION::Initial",
+                "Reason:\n\ttorsion parameter index/count exceeds the "
+                "supported representation in file %s",
+                parameter_in_file);
+            return;
+        }
+        REAXFF_TORSION_Info& info = torsion_info[indexed_entry.first];
+        info.start_idx = static_cast<int>(sorted_entries.size());
+        info.entry_count = 1;
+        sorted_entries.push_back(indexed_entry.second);
+    }
+
+    REAXFF_TORSION_Info* staged_torsion_info = NULL;
+    REAXFF_TORSION_Entry* staged_torsion_entries = NULL;
+    int* staged_atom_type = NULL;
+    Malloc_Safely((void**)&staged_torsion_info,
+                  sizeof(REAXFF_TORSION_Info) * torsion_info.size());
+    if (!sorted_entries.empty())
+        Malloc_Safely((void**)&staged_torsion_entries,
+                      sizeof(REAXFF_TORSION_Entry) * sorted_entries.size());
+    Malloc_Safely((void**)&staged_atom_type, sizeof(int) * atom_numbers);
+    memcpy(staged_torsion_info, torsion_info.data(),
+           sizeof(REAXFF_TORSION_Info) * torsion_info.size());
+    if (!sorted_entries.empty())
+        memcpy(staged_torsion_entries, sorted_entries.data(),
+               sizeof(REAXFF_TORSION_Entry) * sorted_entries.size());
+    memcpy(staged_atom_type, atom_type.data(), sizeof(int) * atom_numbers);
+
+    this->controller = controller;
+    this->atom_numbers = atom_numbers;
+    this->atom_type_numbers = n_atom_types;
+    p_tor2 = force_field.general_parameters[23];
+    p_tor3 = force_field.general_parameters[24];
+    p_tor4 = force_field.general_parameters[25];
+    p_cot2 = force_field.general_parameters[27];
+    thb_cut = staged_thb_cut;
+    h_torsion_info = staged_torsion_info;
+    h_torsion_entries = staged_torsion_entries;
+    h_atom_type = staged_atom_type;
+
+    Device_Malloc_And_Copy_Safely((void**)&d_atom_type_global, h_atom_type,
+                                  sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_atom_type, sizeof(int) * atom_numbers);
+    Device_Malloc_And_Copy_Safely(
+        (void**)&d_torsion_info, h_torsion_info,
+        sizeof(REAXFF_TORSION_Info) * quartet_parameter_count);
+    if (!sorted_entries.empty())
+        Device_Malloc_And_Copy_Safely(
+            (void**)&d_torsion_entries, h_torsion_entries,
+            sizeof(REAXFF_TORSION_Entry) * sorted_entries.size());
+    Device_Malloc_Safely((void**)&d_energy_tor_sum, sizeof(float));
+    Device_Malloc_Safely((void**)&d_energy_cot_sum, sizeof(float));
+    Device_Malloc_Safely((void**)&d_geometry_error,
+                         sizeof(int) * REAXFF_GEOMETRY_ERROR_SIZE);
+
+    controller->Step_Print_Initial("REAXFF_TOR", "%14.7e");
+    controller->Step_Print_Initial("REAXFF_CONJ", "%14.7e");
     is_initialized = 1;
 }
-
 void REAXFF_TORSION::Calculate_Torsion_Energy_And_Force(
     int atom_numbers, const VECTOR* crd, VECTOR* frc, const LTMatrix3 cell,
     const LTMatrix3 rcell, const ATOM_GROUP* nl, REAXFF_BOND_ORDER* bo_module,
@@ -687,6 +715,8 @@ void REAXFF_TORSION::Calculate_Torsion_Energy_And_Force(
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
     deviceMemset(d_energy_tor_sum, 0, sizeof(float));
     deviceMemset(d_energy_cot_sum, 0, sizeof(float));
+    deviceMemset(d_geometry_error, 0,
+                 sizeof(int) * REAXFF_GEOMETRY_ERROR_SIZE);
 
     Launch_Device_Kernel(
         Calculate_Torsion_Kernel, gridSize, blockSize, 0, NULL, atom_numbers,
@@ -697,7 +727,33 @@ void REAXFF_TORSION::Calculate_Torsion_Energy_And_Force(
         d_CdDelta, cell, rcell, atom_energy, frc,
         need_virial ? atom_virial : NULL, d_energy_tor_sum, d_energy_cot_sum,
         bo_module->d_bond_count, bo_module->d_bond_offset,
-        bo_module->d_bond_nbr, bo_module->d_bond_idx);
+        bo_module->d_bond_nbr, bo_module->d_bond_idx, d_geometry_error);
+    Check_Geometry_Error();
+}
+
+void REAXFF_TORSION::Check_Geometry_Error()
+{
+    int error[REAXFF_GEOMETRY_ERROR_SIZE] = {0, -1, -1, -1, -1};
+    deviceMemcpy(error, d_geometry_error, sizeof(error),
+                 deviceMemcpyDeviceToHost);
+    if (error[0] == REAXFF_GEOMETRY_OK) return;
+    if (error[0] == REAXFF_INVALID_ATOM_TYPE)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "REAXFF_TORSION::Calculate_Torsion_Energy_And_Force",
+            "Invalid ReaxFF atom type in torsion evaluation record "
+            "[%d, %d, %d, %d] (valid range is [0, %d)).",
+            error[1], error[2], error[3], error[4], atom_type_numbers);
+        return;
+    }
+    controller->Throw_Formatted_SPONGE_Error(
+        spongeErrorSimulationBreakDown,
+        "REAXFF_TORSION::Calculate_Torsion_Energy_And_Force",
+        "Reason:\n\tlocal atoms %d %d %d %d have an undefined zero-bond/"
+        "collinear ReaxFF torsion geometry or produce a non-finite/"
+        "unrepresentable torsion energy, derivative, force, or virial\n",
+        error[1], error[2], error[3], error[4]);
 }
 
 void REAXFF_TORSION::Step_Print(CONTROLLER* controller)

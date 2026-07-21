@@ -5,6 +5,7 @@
 #include "../../common.h"
 #include "../../control.h"
 #include "bond_order.h"
+#include "reaxff_geometry.h"
 
 struct REAXFF_TORSION_Entry
 {
@@ -23,6 +24,7 @@ struct REAXFF_TORSION_Info
 struct REAXFF_TORSION
 {
     int is_initialized = 0;
+    CONTROLLER* controller = NULL;
     int atom_numbers = 0;
     int atom_type_numbers = 0;
 
@@ -36,6 +38,8 @@ struct REAXFF_TORSION
 
     // Per-atom-type parameters
     int* h_atom_type = NULL;
+    // Immutable input-order table. d_atom_type is the current DD-local view.
+    int* d_atom_type_global = NULL;
     int* d_atom_type = NULL;
 
     // 4-body parameters
@@ -54,6 +58,7 @@ struct REAXFF_TORSION
     float* d_dE_dBO_pi = NULL;
     float* d_dE_dBO_pi2 = NULL;
     float* d_CdDelta = NULL;
+    int* d_geometry_error = NULL;
 
     void Initial(CONTROLLER* controller, int atom_numbers,
                  const char* module_name);
@@ -65,6 +70,7 @@ struct REAXFF_TORSION
         LTMatrix3* atom_virial);
 
     void Step_Print(CONTROLLER* controller);
+    void Check_Geometry_Error();
 };
 
 #endif

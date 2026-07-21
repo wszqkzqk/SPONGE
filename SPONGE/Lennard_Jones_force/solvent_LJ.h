@@ -17,9 +17,12 @@ struct SOLVENT_LENNARD_JONES
     int solvent_start = 0;
     int water_points = 0;
 
-    LENNARD_JONES_INFORMATION* lj_info;
-    LJ_SOFT_CORE* lj_soft_info;
-    VECTOR_LJ* soft_to_hard_crd;
+    // The optimized solvent kernel is a hard-LJ specialization.  When a
+    // soft-core LJ module is active, Initial leaves this object disabled so
+    // the general soft-core kernel owns every solvent atom as well.
+    LENNARD_JONES_INFORMATION* lj_info = NULL;
+    LJ_SOFT_CORE* lj_soft_info = NULL;
+    int* d_dispatch_error = NULL;
     void Initial(CONTROLLER* controller, LENNARD_JONES_INFORMATION* lj,
                  LJ_SOFT_CORE* lj_soft, MD_INFORMATION* md_info,
                  bool default_enable, const char* module_name = NULL);

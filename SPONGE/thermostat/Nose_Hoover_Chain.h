@@ -20,7 +20,7 @@ struct NOSE_HOOVER_CHAIN_INFORMATION
     float kB_T = 0;
 
     float max_velocity = 0;                       // 最大速度
-    char restart_file_name[CHAR_LENGTH_MAX];      // 重启文件名字
+    std::string restart_file_name;                // 重启文件名字
     FILE *f_crd_traj = NULL, *f_vel_traj = NULL;  // 坐标和速度轨迹文件
 
     float* d_mass_inverse = NULL;  // 质量的倒数

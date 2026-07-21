@@ -6,9 +6,10 @@
 struct CMAP
 {
     char module_name[CHAR_LENGTH_MAX];
+    CONTROLLER* controller = NULL;
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
-    int last_modify_date = 20260216;
+    int last_modify_date = 20260720;
 
     // 基本文件信息读入
     int tot_cmap_num = 0;
@@ -20,6 +21,7 @@ struct CMAP
     float* d_inter_coeff = NULL;
     float* grid_value = NULL;
     int* type_offset = NULL;
+    int* d_type_offset = NULL;
 
     // 插值系数矩阵的逆矩阵，相当于解线性方程组得到插值多项式系数
     /*
@@ -46,8 +48,6 @@ struct CMAP
     int* d_atom_e = NULL;
     int* h_cmap_type = NULL;
     int* d_cmap_type = NULL;
-    float** h_coeff_ptr = NULL;
-    float** d_coeff_ptr = NULL;
 
     float* d_cmap_ene = NULL;
     float h_sigma_of_cmap_ene = 0;
@@ -78,10 +78,14 @@ struct CMAP
     int* d_atom_d_local = NULL;
     int* d_atom_e_local = NULL;
     int* d_cmap_type_local = NULL;
+    int* d_cmap_global_index_local = NULL;
 
     int local_atom_numbers = 0;
     int num_cmap_local = 0;
     int* d_num_cmap_local = NULL;
+    int* d_invalid_local_term = NULL;
+    int* d_invalid_local_atom = NULL;
+    int* d_invalid_geometry_term = NULL;
     void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
                    char* atom_local_label, int* atom_local_id);
 };

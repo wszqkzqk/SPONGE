@@ -1,7 +1,10 @@
 ﻿#include "Lennard_Jones_force.h"
 
+#include <cstdint>
+
 #include "../xponge/load/native/lj.hpp"
 #include "../xponge/xponge.h"
+#include "pair_activity.h"
 // #include "assert.h"
 
 // 由LJ坐标和转化系数求距离
@@ -11,6 +14,7 @@ __global__ void Copy_LJ_Type_To_New_Crd(const int atom_numbers,
     SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
     {
         new_crd[atom_i].LJ_type = LJ_type[atom_i];
+        new_crd[atom_i].global_atom = atom_i;
     }
 }
 
@@ -47,7 +51,8 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
     const ATOM_GROUP* nl, const VECTOR_LJ* crd, const LTMatrix3 cell,
     const LTMatrix3 rcell, const float* LJ_type_A, const float* LJ_type_B,
     const float cutoff, VECTOR* frc, const float pme_beta, float* atom_energy,
-    LTMatrix3* atom_virial, float* atom_direct_cf_energy, float* atom_LJ_ene)
+    LTMatrix3* atom_virial, float* atom_direct_cf_energy, float* atom_LJ_ene,
+    int* pair_overlap_error)
 {
 #ifdef USE_GPU
     int atom_i = 0 + blockDim.y * blockIdx.x + threadIdx.y;
@@ -81,10 +86,32 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
                 int atom_pair_LJ_type = Get_LJ_Type(r1.LJ_type, r2.LJ_type);
                 float A = LJ_type_A[atom_pair_LJ_type];
                 float B = LJ_type_B[atom_pair_LJ_type];
+                const PairwiseInteraction::Pair_Activity activity =
+                    PairwiseInteraction::Classify(
+                        A, B,
+                        need_coulomb && PairwiseInteraction::Coulomb_Is_Active(
+                                            r1.charge, r2.charge));
+                if (!activity.Any())
+                {
+                    continue;
+                }
+                if (dr_abs == 0.0f)
+                {
+                    PairwiseInteraction::Fail_Exact_Overlap(
+                        r1.global_atom, r2.global_atom,
+                        PairwiseInteraction::Components(activity.lennard_jones,
+                                                        activity.coulomb),
+                        pair_overlap_error);
+                    continue;
+                }
                 if (need_force)
                 {
-                    float frc_abs = Get_LJ_Force(r1, r2, dr_abs, A, B);
-                    if (need_coulomb)
+                    float frc_abs = 0.0f;
+                    if (activity.lennard_jones)
+                    {
+                        frc_abs = Get_LJ_Force(r1, r2, dr_abs, A, B);
+                    }
+                    if (activity.coulomb)
                     {
                         float frc_cf_abs =
                             Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
@@ -104,9 +131,12 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
                 }
                 if (need_energy)
                 {
-                    energy_lj +=
-                        ij_factor * Get_LJ_Energy(r1, r2, dr_abs, A, B);
-                    if (need_coulomb)
+                    if (activity.lennard_jones)
+                    {
+                        energy_lj +=
+                            ij_factor * Get_LJ_Energy(r1, r2, dr_abs, A, B);
+                    }
+                    if (activity.coulomb)
                     {
                         energy_coulomb +=
                             ij_factor *
@@ -148,14 +178,13 @@ static __global__ void Total_C6_Get(int atom_numbers, int* atom_lj_type,
 {
     int j;
     double temp_sum = 0;
-    int x, y;
     int itype, jtype, atom_pair_LJ_type;
 #ifdef USE_GPU
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < atom_numbers;
          i += gridDim.x * blockDim.x)
 #else
-#pragma omp parallel for firstprivate( \
-        j, x, y, itype, jtype, atom_pair_LJ_type) reduction(+ : temp_sum)
+#pragma omp parallel for firstprivate(j, itype, jtype, atom_pair_LJ_type) \
+    reduction(+ : temp_sum)
     for (int i = 0; i < atom_numbers; i++)
 #endif
     {
@@ -169,13 +198,7 @@ static __global__ void Total_C6_Get(int atom_numbers, int* atom_lj_type,
 #endif
         {
             jtype = atom_lj_type[j];
-            y = (jtype - itype);
-            x = y >> 31;
-            y = (y ^ x) - x;
-            x = jtype + itype;
-            jtype = (x + y) >> 1;
-            x = (x - y) >> 1;
-            atom_pair_LJ_type = (jtype * (jtype + 1) >> 1) + x;
+            atom_pair_LJ_type = Get_LJ_Type(itype, jtype);
             temp_small_sum += d_lj_b[atom_pair_LJ_type];
         }
         temp_sum += temp_small_sum;
@@ -186,6 +209,7 @@ static __global__ void Total_C6_Get(int atom_numbers, int* atom_lj_type,
 void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
                                         const char* module_name)
 {
+    this->controller = controller;
     if (module_name == NULL)
     {
         strcpy(this->module_name, "LJ");
@@ -204,20 +228,94 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
     }
     else if (controller->Command_Exist(this->module_name, "in_file"))
     {
-        Xponge::Native_Load_LJ(&local_lj, controller, 0, this->module_name);
+        Xponge::Native_Load_LJ(&local_lj, controller,
+                               Xponge::Load_Get_Atom_Numbers(&Xponge::system),
+                               this->module_name);
         lj_to_use = &local_lj;
     }
     if (lj_to_use != NULL)
     {
+        if (lj_to_use->atom_type.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorConflictingCommand,
+                "LENNARD_JONES_INFORMATION::Initial",
+                "Reason:\n\tLJ atom count cannot be represented by the "
+                "runtime index type\n");
+            return;
+        }
         atom_numbers = static_cast<int>(lj_to_use->atom_type.size());
         atom_type_numbers = lj_to_use->atom_type_numbers;
+        if (atom_type_numbers < 0 || atom_type_numbers > 65535)
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorConflictingCommand,
+                "LENNARD_JONES_INFORMATION::Initial",
+                "Reason:\n\tLJ atom type count %d is outside the "
+                "representable range [0, 65535]\n",
+                atom_type_numbers);
+            return;
+        }
+        const std::uint64_t type_count =
+            static_cast<std::uint64_t>(atom_type_numbers);
+        const std::uint64_t expected_pair_count =
+            type_count * (type_count + 1ULL) / 2ULL;
+        if (expected_pair_count >
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+            lj_to_use->pair_A.size() != expected_pair_count ||
+            lj_to_use->pair_B.size() != expected_pair_count ||
+            (atom_numbers > 0 && atom_type_numbers == 0))
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorConflictingCommand,
+                "LENNARD_JONES_INFORMATION::Initial",
+                "Reason:\n\tLJ table shape is inconsistent: atoms=%d, "
+                "types=%d, expected pairs=%llu, A/B pairs=%llu/%llu\n",
+                atom_numbers, atom_type_numbers,
+                static_cast<unsigned long long>(expected_pair_count),
+                static_cast<unsigned long long>(lj_to_use->pair_A.size()),
+                static_cast<unsigned long long>(lj_to_use->pair_B.size()));
+            return;
+        }
+        pair_type_numbers = static_cast<int>(expected_pair_count);
+        for (int atom = 0; atom < atom_numbers; atom++)
+        {
+            const int type = lj_to_use->atom_type[atom];
+            if (type < 0 || type >= atom_type_numbers)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorConflictingCommand,
+                    "LENNARD_JONES_INFORMATION::Initial",
+                    "Reason:\n\tLJ atom %d has type %d outside [0, %d)\n", atom,
+                    type, atom_type_numbers);
+                return;
+            }
+        }
+        for (int pair = 0; pair < pair_type_numbers; pair++)
+        {
+            if (!Float_Memory_Is_Finite(lj_to_use->pair_A.data() + pair) ||
+                !Float_Memory_Is_Zero_Or_Normal(lj_to_use->pair_A.data() +
+                                                pair) ||
+                !Float_Memory_Is_Finite(lj_to_use->pair_B.data() + pair) ||
+                !Float_Memory_Is_Zero_Or_Normal(lj_to_use->pair_B.data() +
+                                                pair))
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorConflictingCommand,
+                    "LENNARD_JONES_INFORMATION::Initial",
+                    "Reason:\n\tLJ pair %d contains a non-finite or "
+                    "subnormal coefficient\n",
+                    pair);
+                return;
+            }
+        }
     }
     if (atom_numbers > 0)
     {
         controller->printf("    atom_numbers is %d\n", atom_numbers);
         controller->printf("    atom_LJ_type_number is %d\n",
                            atom_type_numbers);
-        pair_type_numbers = atom_type_numbers * (atom_type_numbers + 1) / 2;
         LJ_Malloc();
 
         for (int i = 0; i < pair_type_numbers; i++)
@@ -283,13 +381,24 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
 }
 
 static __global__ void get_local_device(int* atom_local, int local_atom_numbers,
-                                        int ghost_numbers, int* d_atom_LJ_type,
-                                        VECTOR_LJ* crd_with_LJ_parameters_local)
+                                        int ghost_numbers,
+                                        int global_atom_numbers,
+                                        int* d_atom_LJ_type,
+                                        VECTOR_LJ* crd_with_LJ_parameters_local,
+                                        int* invalid_local_index)
 {
     SIMPLE_DEVICE_FOR(i, local_atom_numbers + ghost_numbers)
     {
         int atom_i = atom_local[i];
-        crd_with_LJ_parameters_local[i].LJ_type = d_atom_LJ_type[atom_i];
+        if (atom_i < 0 || atom_i >= global_atom_numbers)
+        {
+            atomicExch(invalid_local_index, i);
+        }
+        else
+        {
+            crd_with_LJ_parameters_local[i].LJ_type = d_atom_LJ_type[atom_i];
+            crd_with_LJ_parameters_local[i].global_atom = atom_i;
+        }
     }
 }
 
@@ -298,15 +407,115 @@ void LENNARD_JONES_INFORMATION::Get_Local(int* atom_local,
                                           int ghost_numbers)
 {
     if (!is_initialized) return;
+    local_metadata_is_ready = false;
+    if (local_atom_numbers < 0 || ghost_numbers < 0 ||
+        local_atom_numbers > atom_numbers ||
+        ghost_numbers > atom_numbers - local_atom_numbers)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "LENNARD_JONES_INFORMATION::Get_Local",
+            "Reason:\n\t%s received invalid local/ghost atom counts %d/%d "
+            "for %d global atoms\n",
+            module_name, local_atom_numbers, ghost_numbers, atom_numbers);
+        return;
+    }
     this->local_atom_numbers = local_atom_numbers;
     this->ghost_numbers = ghost_numbers;
-    Launch_Device_Kernel(get_local_device,
-                         (local_atom_numbers + ghost_numbers +
-                          CONTROLLER::device_max_thread - 1) /
-                             CONTROLLER::device_max_thread,
-                         CONTROLLER::device_max_thread, 0, NULL, atom_local,
-                         local_atom_numbers, ghost_numbers, d_atom_LJ_type,
-                         crd_with_LJ_parameters_local);
+    const int local_coordinate_numbers = local_atom_numbers + ghost_numbers;
+    if (local_coordinate_numbers == 0)
+    {
+        local_metadata_is_ready = true;
+        return;
+    }
+    deviceMemset(d_local_metadata_error, -1, sizeof(int));
+    Launch_Device_Kernel(
+        get_local_device,
+        (local_coordinate_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, atom_local, local_atom_numbers,
+        ghost_numbers, atom_numbers, d_atom_LJ_type,
+        crd_with_LJ_parameters_local, d_local_metadata_error);
+    int invalid_local_index = -1;
+    deviceMemcpy(&invalid_local_index, d_local_metadata_error, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    if (invalid_local_index >= 0)
+    {
+        int invalid_global_atom = -1;
+        deviceMemcpy(&invalid_global_atom, atom_local + invalid_local_index,
+                     sizeof(int), deviceMemcpyDeviceToHost);
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "LENNARD_JONES_INFORMATION::Get_Local",
+            "Reason:\n\t%s local coordinate %d maps to global atom %d "
+            "outside [0, %d)\n",
+            module_name, invalid_local_index, invalid_global_atom,
+            atom_numbers);
+        return;
+    }
+    local_metadata_is_ready = true;
+}
+
+bool LENNARD_JONES_INFORMATION::Validate_Local_State(const char* error_by,
+                                                     int global_atom_numbers,
+                                                     int local_atom_numbers,
+                                                     int ghost_numbers,
+                                                     int solvent_numbers)
+{
+    if (global_atom_numbers != atom_numbers ||
+        local_atom_numbers != this->local_atom_numbers ||
+        ghost_numbers != this->ghost_numbers || !local_metadata_is_ready ||
+        solvent_numbers < 0 || solvent_numbers > local_atom_numbers)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, error_by,
+            "Reason:\n\t%s local nonbond metadata mismatch: call has "
+            "global/local/ghost/solvent counts %d/%d/%d/%d, initialized "
+            "state has %d/%d/%d and ready=%d\n",
+            module_name, global_atom_numbers, local_atom_numbers, ghost_numbers,
+            solvent_numbers, atom_numbers, this->local_atom_numbers,
+            this->ghost_numbers, static_cast<int>(local_metadata_is_ready));
+        return false;
+    }
+    return true;
+}
+
+void LENNARD_JONES_INFORMATION::Reset_Pair_Overlap_Error()
+{
+#ifndef GPU_ARCH_NAME
+    deviceMemset(d_pair_overlap_error, 0, 3 * sizeof(int));
+#endif
+}
+
+bool LENNARD_JONES_INFORMATION::Check_Pair_Overlap_Error(const char* error_by)
+{
+#ifndef GPU_ARCH_NAME
+    int overlap_error[3] = {0, -1, -1};
+    deviceMemcpy(overlap_error, d_pair_overlap_error, sizeof(overlap_error),
+                 deviceMemcpyDeviceToHost);
+    if (overlap_error[0] != PairwiseInteraction::PAIR_COMPONENT_NONE)
+    {
+        const char* component =
+            overlap_error[0] ==
+                    (PairwiseInteraction::PAIR_COMPONENT_LENNARD_JONES |
+                     PairwiseInteraction::PAIR_COMPONENT_COULOMB)
+                ? "LJ and Coulomb components"
+            : overlap_error[0] &
+                    PairwiseInteraction::PAIR_COMPONENT_LENNARD_JONES
+                ? "LJ component"
+                : "Coulomb component";
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, error_by,
+            "Reason:\n\t%s global atoms %d %d overlap exactly with active "
+            "%s; an active hard nonbond pair has undefined inverse-distance "
+            "energy and force\n",
+            module_name, overlap_error[1], overlap_error[2], component);
+        return true;
+    }
+#else
+    (void)error_by;
+#endif
+    return false;
 }
 
 static __global__ void Long_Range_Virial_Correction(LTMatrix3* d_virial,
@@ -354,6 +563,10 @@ void LENNARD_JONES_INFORMATION::Parameter_Host_To_Device()
                          sizeof(float) * atom_numbers);
     Device_Malloc_Safely((void**)&crd_with_LJ_parameters_local,
                          sizeof(VECTOR_LJ) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_local_metadata_error, sizeof(int));
+#ifndef GPU_ARCH_NAME
+    Device_Malloc_Safely((void**)&d_pair_overlap_error, 3 * sizeof(int));
+#endif
 }
 
 void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
@@ -366,6 +579,14 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+        if (!Validate_Local_State(
+                "LENNARD_JONES_INFORMATION::"
+                "LJ_PME_Direct_Force_With_Atom_Energy_And_Virial",
+                atom_numbers, local_atom_numbers, ghost_numbers,
+                solvent_numbers))
+        {
+            return;
+        }
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -383,10 +604,12 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
 
         if (atom_numbers == 0 || local_atom_numbers == 0) return;
 
+        Reset_Pair_Overlap_Error();
+
         dim3 blockSize = {
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-        dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
+        dim3 gridSize = (local_atom_numbers + blockSize.y - 1) / blockSize.y;
         auto f =
             Lennard_Jones_And_Direct_Coulomb_Device<true, false, false, true>;
         if (!need_atom_energy && !need_virial)
@@ -412,7 +635,10 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             f, gridSize, blockSize, 0, NULL, local_atom_numbers,
             solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
             d_LJ_A, d_LJ_B, cutoff, frc, pme_beta, atom_energy, atom_virial,
-            atom_direct_pme_energy, d_LJ_energy_atom);
+            atom_direct_pme_energy, d_LJ_energy_atom, d_pair_overlap_error);
+        Check_Pair_Overlap_Error(
+            "LENNARD_JONES_INFORMATION::"
+            "LJ_PME_Direct_Force_With_Atom_Energy_And_Virial");
     }
 }
 

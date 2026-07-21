@@ -2,38 +2,8 @@
 
 #include "../../common.h"
 #include "../quantum_chemistry.h"
-
-static const int QC_COMP_LX_HOST[35] = {0, 1, 0, 0, 2, 1, 1, 0, 0, 0, 3, 2,
-                                        2, 1, 1, 1, 0, 0, 0, 0, 4, 3, 3, 2,
-                                        2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0};
-static const int QC_COMP_LY_HOST[35] = {0, 0, 1, 0, 0, 1, 0, 2, 1, 0, 0, 1,
-                                        0, 2, 1, 0, 3, 2, 1, 0, 0, 1, 0, 2,
-                                        1, 0, 3, 2, 1, 0, 4, 3, 2, 1, 0};
-static const int QC_COMP_LZ_HOST[35] = {0, 0, 0, 1, 0, 0, 1, 0, 1, 2, 0, 0,
-                                        1, 0, 1, 2, 0, 1, 2, 3, 0, 0, 1, 0,
-                                        1, 2, 0, 1, 2, 3, 0, 1, 2, 3, 4};
-
-#ifdef USE_GPU
-__device__ __constant__ int QC_COMP_LX_DEVICE[35] = {
-    0, 1, 0, 0, 2, 1, 1, 0, 0, 0, 3, 2, 2, 1, 1, 1, 0, 0,
-    0, 0, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0};
-__device__ __constant__ int QC_COMP_LY_DEVICE[35] = {
-    0, 0, 1, 0, 0, 1, 0, 2, 1, 0, 0, 1, 0, 2, 1, 0, 3, 2,
-    1, 0, 0, 1, 0, 2, 1, 0, 3, 2, 1, 0, 4, 3, 2, 1, 0};
-__device__ __constant__ int QC_COMP_LZ_DEVICE[35] = {
-    0, 0, 0, 1, 0, 0, 1, 0, 1, 2, 0, 0, 1, 0, 1, 2, 0, 1,
-    2, 3, 0, 0, 1, 0, 1, 2, 0, 1, 2, 3, 0, 1, 2, 3, 4};
-#else
-static const int QC_COMP_LX_DEVICE[35] = {0, 1, 0, 0, 2, 1, 1, 0, 0, 0, 3, 2,
-                                          2, 1, 1, 1, 0, 0, 0, 0, 4, 3, 3, 2,
-                                          2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0};
-static const int QC_COMP_LY_DEVICE[35] = {0, 0, 1, 0, 0, 1, 0, 2, 1, 0, 0, 1,
-                                          0, 2, 1, 0, 3, 2, 1, 0, 0, 1, 0, 2,
-                                          1, 0, 3, 2, 1, 0, 4, 3, 2, 1, 0};
-static const int QC_COMP_LZ_DEVICE[35] = {0, 0, 0, 1, 0, 0, 1, 0, 1, 2, 0, 0,
-                                          1, 0, 1, 2, 0, 1, 2, 3, 0, 0, 1, 0,
-                                          1, 2, 0, 1, 2, 3, 0, 1, 2, 3, 4};
-#endif
+#include "../structure/cartesian_components.hpp"
+#include "boys.hpp"
 
 __host__ __device__ __forceinline__ static int HR_IDX_RUNTIME(int t, int u,
                                                               int v, int n,
@@ -42,33 +12,17 @@ __host__ __device__ __forceinline__ static int HR_IDX_RUNTIME(int t, int u,
     return (((t * hr_base + u) * hr_base + v) * hr_base + n);
 }
 
-__host__ __device__ __forceinline__ static int QC_Comp_Offset(int l)
-{
-    return (l == 0   ? 0
-            : l == 1 ? 1
-            : l == 2 ? 4
-            : l == 3 ? 10
-            : l == 4 ? 20
-                     : -1);
-}
-
 __device__ __forceinline__ static void QC_Get_Lxyz_Device(int l, int idx,
                                                           int& lx, int& ly,
                                                           int& lz)
 {
-    int offset = QC_Comp_Offset(l);
-    lx = QC_COMP_LX_DEVICE[offset + idx];
-    ly = QC_COMP_LY_DEVICE[offset + idx];
-    lz = QC_COMP_LZ_DEVICE[offset + idx];
+    if (!qc_cartesian::Component(l, idx, lx, ly, lz)) lx = ly = lz = -1;
 }
 
 __forceinline__ static void QC_Get_Lxyz_Host(int l, int idx, int& lx, int& ly,
                                              int& lz)
 {
-    int offset = QC_Comp_Offset(l);
-    lx = QC_COMP_LX_HOST[offset + idx];
-    ly = QC_COMP_LY_HOST[offset + idx];
-    lz = QC_COMP_LZ_HOST[offset + idx];
+    if (!qc_cartesian::Component(l, idx, lx, ly, lz)) lx = ly = lz = -1;
 }
 
 static __device__ void get_overlap1d_arr(int l1, int l2, float PA, float PB,
@@ -118,104 +72,12 @@ static __device__ float get_kin1d(int l1, int l2, float PA, float PB,
     return t;
 }
 
-static __device__ void compute_boys(float* F, float t, int max_m)
-{
-    float exp_t = expf(-t);
-    if (t < 1e-7f)
-    {
-        for (int m = 0; m <= max_m; m++) F[m] = 1.0f / (2.0f * m + 1.0f);
-        return;
-    }
-    else
-    {
-        float st = sqrtf(t);
-        float f0 = 0.5f * sqrtf(CONSTANT_Pi) * erff(st) / st;
-        F[0] = f0;
-        float prev_f = f0;
-        for (int m = 0; m < max_m; m++)
-        {
-            float next_f = ((2.0f * m + 1.0f) * prev_f - exp_t) / (2.0f * t);
-            F[m + 1] = next_f;
-            prev_f = next_f;
-        }
-    }
-}
-
-// Double-precision Boys function. Uses downward recursion for t ≤ 30,
-// upward in double for t > 30. Output stays double for R-tensor seeding.
+// Double-precision Boys function.  The shared implementation selects upward
+// recursion by an explicit error bound and otherwise uses a tail-bounded
+// positive series followed by stable downward recursion.
 static __device__ void compute_boys_double(double* F, float t, int max_m)
 {
-    const double td = (double)t;
-    if (td < 1e-15)
-    {
-        for (int m = 0; m <= max_m; m++) F[m] = 1.0 / (2.0 * m + 1.0);
-        return;
-    }
-    const double exp_t = exp(-td);
-    const double st = sqrt(td);
-    const double f0 = 0.5 * 1.7724538509055159 * erf(st) / st;
-    if (td <= 30.0)
-    {
-        double work[64];
-        const int m_top = max_m + 25;
-        work[m_top] = 0.0;
-        for (int m = m_top - 1; m >= 0; m--)
-            work[m] = (2.0 * td * work[m + 1] + exp_t) / (2.0 * m + 1.0);
-        const double scale = f0 / work[0];
-        for (int m = 0; m <= max_m; m++) F[m] = work[m] * scale;
-    }
-    else
-    {
-        F[0] = f0;
-        double prev = f0;
-        for (int m = 0; m < max_m; m++)
-        {
-            double next = ((2.0 * m + 1.0) * prev - exp_t) / (2.0 * td);
-            F[m + 1] = next;
-            prev = next;
-        }
-    }
-}
-
-static __device__ void compute_boys_stable(float* F, float t, int max_m)
-{
-    if (t < 1e-8f)
-    {
-        for (int m = 0; m <= max_m; m++) F[m] = 1.0f / (2.0f * m + 1.0f);
-        return;
-    }
-
-    const double td = (double)t;
-    const double exp_t = exp(-td);
-    const double st = sqrt(td);
-    const double f0_exact =
-        0.5 * sqrt((double)CONSTANT_Pi) * erf(st) / fmax(st, 1e-30);
-
-    // Upward recursion is numerically fragile for small/moderate t at high m.
-    // Use Miller downward recursion in that regime and normalize by the exact
-    // F0 value; keep the cheaper upward recursion only for large t.
-    if (t <= 20.0f)
-    {
-        double work[64];
-        const int m_top = max_m + 20;
-        work[m_top] = 1.0;
-        for (int m = m_top - 1; m >= 0; m--)
-        {
-            work[m] = (2.0 * td * work[m + 1] + exp_t) / (2.0 * m + 1.0);
-        }
-        const double scale = f0_exact / work[0];
-        for (int m = 0; m <= max_m; m++) F[m] = (float)(work[m] * scale);
-        return;
-    }
-
-    F[0] = (float)f0_exact;
-    double prev_f = f0_exact;
-    for (int m = 0; m < max_m; m++)
-    {
-        double next_f = ((2.0 * m + 1.0) * prev_f - exp_t) / (2.0 * td);
-        F[m + 1] = (float)next_f;
-        prev_f = next_f;
-    }
+    QC_Compute_Boys_Double(F, t, max_m);
 }
 
 static __device__ void compute_md_coeffs(float E[6][6][11], int la_max,

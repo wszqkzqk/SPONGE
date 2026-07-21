@@ -15,6 +15,8 @@ struct REAXFF_BOND
 
     // Parameters
     int* h_atom_type = NULL;
+    // Immutable input-order table. d_atom_type is the current DD-local view.
+    int* d_atom_type_global = NULL;
     int* d_atom_type = NULL;
 
     // ReaxFF general parameters

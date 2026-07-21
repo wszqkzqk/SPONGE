@@ -18,6 +18,11 @@ struct QC_DFT
     std::vector<float> h_grid_weights;  // [max_grid_capacity]
     float* d_grid_coords = NULL;        // [max_grid_capacity * 3]
     float* d_grid_weights = NULL;       // [max_grid_capacity]
+    // Analytic atom-centred-grid response workspace.  Normalized Becke
+    // weights are rebuilt one batch at a time, avoiding O(total_grid*natm)
+    // persistent storage.
+    double* d_becke_atom_weights = NULL;  // [grid_batch_size * natm]
+    double* d_covalent_radii = NULL;      // [natm], Bohr
     int max_grid_capacity = 0;
     int max_grid_size = 0;
     int grid_batch_size = 8192;
@@ -44,6 +49,10 @@ struct QC_DFT
     float* d_Vxc = NULL;
     float* d_Vxc_beta = NULL;
     double* d_exc_total = NULL;
+    // An invalid XC input/output observed by a device kernel:
+    // [failure code, global grid index].  Keeping this on the device makes
+    // invalid mathematical domains a hard error on both CPU and GPU builds.
+    int* d_xc_failure = NULL;
 
     // AO screening: 每个壳层的最大有效距离平方
     float* d_shell_r2_screen = NULL;  // [nbas]

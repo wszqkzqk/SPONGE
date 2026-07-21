@@ -280,8 +280,8 @@ void TERSOFF_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     if (!controller->Command_Exist(this->module_name, "in_file")) return;
     controller->printf("START INITIALIZING TERSOFF FORCE\n");
     FILE* fp;
-    Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
-                     "r");
+    Open_File_Safely(
+        &fp, controller->Original_Command(this->module_name, "in_file"), "r");
     if (fscanf(fp, "%d %d", &this->atom_numbers, &this->atom_type_numbers) != 2)
     {
         controller->Throw_SPONGE_Error(

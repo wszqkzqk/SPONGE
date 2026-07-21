@@ -66,7 +66,7 @@ struct system_information
     float Get_Atom_Temperature();  // 自由度还有问题
     TARGET_SCHEDULE target_temperature_schedule;
     TARGET_SCHEDULE target_pressure_schedule;
-    void Update_Targets_By_Schedule(int current_step);
+    void Update_Targets_By_Schedule(CONTROLLER* controller, int current_step);
 
     CONECT connectivity;               // 体系的连接性信息
     PAIR_DISTANCE connected_distance;  // 连接的原子的距离

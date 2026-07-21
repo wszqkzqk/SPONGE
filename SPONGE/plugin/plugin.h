@@ -23,6 +23,7 @@ typedef void (*InitialFunction)(MD_INFORMATION* md_info, CONTROLLER* controller,
 typedef void (*SetDomainInformationFunction)(DOMAIN_INFORMATION* dd);
 typedef void (*SetBackendDeviceTypeFunction)(int device_type);
 typedef void (*RuntimeFunction)();
+typedef uint32_t (*GetForceCapabilitiesFunction)();
 
 struct SPONGE_PLUGIN
 {
@@ -43,6 +44,11 @@ struct SPONGE_PLUGIN
 
     int force_func_numbers = 0;
     RuntimeFunction* force_funcs = NULL;
+    uint32_t* force_capabilities = NULL;
+    RuntimeFunction* begin_force_transaction_funcs = NULL;
+    RuntimeFunction* commit_force_transaction_funcs = NULL;
+    RuntimeFunction* rollback_force_transaction_funcs = NULL;
+    bool force_transaction_active = false;
 
     int print_func_numbers = 0;
     RuntimeFunction* print_funcs = NULL;
@@ -55,6 +61,11 @@ struct SPONGE_PLUGIN
                  NEIGHBOR_LIST* neighbor_list);
     void Set_Domain_Information(DOMAIN_INFORMATION* dd);
     void After_Initial();
-    void Calculate_Force();
+    void Calculate_Force(bool commit_sampling_state = true,
+                         bool exact_state = false, bool needs_energy = false,
+                         bool needs_virial = false);
+    void Begin_Force_Transaction();
+    void Commit_Force_Transaction();
+    void Rollback_Force_Transaction();
     void Mdout_Print();
 };

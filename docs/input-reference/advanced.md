@@ -42,6 +42,7 @@ dynamic_dt = 1
 max_move = 0.1
 beta1 = 0.9
 epsilon = 1e-4
+learning_rate = 3e-4
 ```
 
 | Parameter | Scope | Type | Default | Description |
@@ -52,9 +53,16 @@ epsilon = 1e-4
 | `beta1` | `minimization` | float | `0.9` | First ADAM parameter used when `dynamic_dt != 0` |
 | `beta2` | `minimization` | float | `0.9` in the current source | Second ADAM parameter used when `dynamic_dt != 0` |
 | `epsilon` | `minimization` | float | `1e-4` | Numerical stabilizer used when `dynamic_dt != 0` |
+| `learning_rate` | `minimization` | float | `3e-4` | Coordinate-space ADAM learning rate in angstrom per normalized update |
 
-When `dynamic_dt != 0`, SPONGE internally resets `dt` to `3e-4 ps`. When
-`dynamic_dt = 0`, it uses a tiny fixed `dt` and the gradient-descent path.
+When `dynamic_dt != 0`, optimizer moments and coordinate moves are stored
+separately from physical velocities, accelerations, and forces. The ADAM update
+uses `learning_rate` directly and is not implicitly mass-preconditioned;
+zero-mass derived sites are refreshed by their owning virtual-site machinery
+rather than moved independently. The ordinary `dt` value remains an auxiliary
+simulation/constraint timestep and cannot override the ADAM learning rate.
+When `dynamic_dt = 0`, SPONGE uses the gradient-descent path and `dt` retains
+its ordinary timestep role.
 
 ## Rerun Mode
 
@@ -133,6 +141,14 @@ type_in_file = "atom_types.txt"
 |-----------|------|-------------|
 | `in_file` | string | ReaxFF parameter file |
 | `type_in_file` | string | Atom type mapping file |
+| `initial_bond_capacity` | positive integer | Optional initial sparse bond allocation hint (default: 32 × atom count). Storage grows automatically when the exact bond count is larger; this value never truncates interactions. |
+
+ReaxFF currently requires exactly one particle-particle (PP) rank. EEQ solves
+one globally coupled charge system with a whole-system neutrality constraint,
+and the ReaxFF bond-order state is not yet distributed across PP boundaries.
+SPONGE rejects a multi-PP ReaxFF run during initialization instead of solving
+independent rank-local systems. A separate PME rank is compatible as long as
+there is only one PP rank.
 
 ## Generalized Born
 
@@ -151,7 +167,12 @@ radii_cutoff = 25.0
 | `in_file` | `gb` | string | - | Native GB parameter file |
 | `epsilon` | `gb` | float | `78.5` | Relative dielectric constant |
 | `radii_offset` | `gb` | float | `0.09` | Offset subtracted from self radii |
-| `radii_cutoff` | `gb` | float | `cutoff` | Cutoff used when building effective Born radii |
+| `radii_cutoff` | `gb` | positive normal float | `cutoff` | Model cutoff used only for pairwise descreening when building effective Born radii |
+
+GB electrostatic energy and force use all atom pairs in the isolated system;
+`radii_cutoff` does not truncate them. SPONGE rejects invalid radius/scale
+tables, exact descreening overlaps, and non-positive or non-finite effective
+Born radii before publishing force or energy contributions.
 
 ## LJ Soft Core
 

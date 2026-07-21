@@ -2,9 +2,8 @@
 // Reference: Hay & Wadt, J. Chem. Phys. 82, 270-283 (1985)
 // Data from Basis Set Exchange
 //
-// Currently covers: Na(11) - Ar(18) with 2 core electrons [He]
-//                   K(19) - Kr(36) with 10 core electrons [Ne]
-// (placeholder - to be extended)
+// Currently contains Na, Fe, Cu, and Zn entries.  Each replaces the
+// neon-like 10-electron core.  Unsupported elements are intentionally absent.
 
 #include "../structure/ecp.h"
 
@@ -21,8 +20,8 @@ struct QC_ECP_LANL2DZ : QC_ECP_SET
     {
         if (!data.empty()) return;
 
-        // ==================== Na (Z=11, 2 core [He]) ====================
-        data["Na"] = {2, 2, {  // n_core=2, l_max=2 (d=local)
+        // ==================== Na (Z=11, 10 core [Ne]) ====================
+        data["Na"] = {10, 2, {  // n_core=10, l_max=2 (d=local)
             make_channel(0, {
                 {35.0492740f, 2, 5.6317800f},
                 {9.5765620f,  2, 3.0165200f},

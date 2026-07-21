@@ -392,8 +392,8 @@ void EAM_INFORMATION::Initial(CONTROLLER* controller, const int atom_numbers,
 
     controller->printf("START INITIALIZING EAM FORCE\n");
     FILE* fp;
-    Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
-                     "r");
+    Open_File_Safely(
+        &fp, controller->Original_Command(this->module_name, "in_file"), "r");
     char line[CHAR_LENGTH_MAX];
     fgets(line, CHAR_LENGTH_MAX, fp);
     long pos = ftell(fp);
@@ -440,7 +440,9 @@ void EAM_INFORMATION::Initial(CONTROLLER* controller, const int atom_numbers,
         FILE* fp_type;
         Open_File_Safely(
             &fp_type,
-            controller->Command(this->module_name, "atom_type_in_file"), "r");
+            controller->Original_Command(this->module_name,
+                                         "atom_type_in_file"),
+            "r");
         for (int i = 0; i < atom_numbers; i++)
         {
             int type_val;

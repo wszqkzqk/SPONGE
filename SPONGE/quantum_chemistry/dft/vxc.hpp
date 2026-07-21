@@ -5,9 +5,6 @@
 #include "grid.hpp"
 #include "xc.hpp"
 
-// 密度低于此阈值的格点视为真空（不贡献 XC）
-static constexpr double QC_DFT_RHO_CUTOFF = 1e-10;
-
 // 对 AO 值施加归一化因子
 static __global__ void QC_Apply_Norms_AO_Kernel(const int n_grid, const int nao,
                                                 const float* norms,
@@ -73,45 +70,34 @@ static __global__ void QC_Build_Weighted_AO_Kernel(
 {
     SIMPLE_DEVICE_FOR(ig, n_grid)
     {
-        if (rho[ig] < QC_DFT_RHO_CUTOFF)
+        const float w = grid_weights[ig];
+        atomicAdd(exc_total, (double)w * exc[ig]);
+        const double v_rho = vrho[ig];
+
+        if (deriv_level >= 1)
         {
+            const double v_sigma = vsigma[ig];
+            const double grx = grad_rho_x[ig];
+            const double gry = grad_rho_y[ig];
+            const double grz = grad_rho_z[ig];
             for (int i = 0; i < nao; i++)
             {
-                W_full[ig * nao + i] = 0.0f;
-                if (deriv_level >= 1) W_sigma[ig * nao + i] = 0.0f;
+                const double ai = (double)ao_norm[ig * nao + i];
+                const double sp = 2.0 * v_sigma *
+                                  (grx * (double)gx_norm[ig * nao + i] +
+                                   gry * (double)gy_norm[ig * nao + i] +
+                                   grz * (double)gz_norm[ig * nao + i]);
+                W_full[ig * nao + i] =
+                    (float)((double)w * (v_rho * ai + sp));
+                W_sigma[ig * nao + i] = (float)((double)w * sp);
             }
         }
         else
         {
-            const float w = grid_weights[ig];
-            atomicAdd(exc_total, (double)w * exc[ig]);
-            const double v_rho = vrho[ig];
-
-            if (deriv_level >= 1)
-            {
-                const double v_sigma = vsigma[ig];
-                const double grx = grad_rho_x[ig];
-                const double gry = grad_rho_y[ig];
-                const double grz = grad_rho_z[ig];
-                for (int i = 0; i < nao; i++)
-                {
-                    const double ai = (double)ao_norm[ig * nao + i];
-                    const double sp = 2.0 * v_sigma *
-                                      (grx * (double)gx_norm[ig * nao + i] +
-                                       gry * (double)gy_norm[ig * nao + i] +
-                                       grz * (double)gz_norm[ig * nao + i]);
-                    W_full[ig * nao + i] =
-                        (float)((double)w * (v_rho * ai + sp));
-                    W_sigma[ig * nao + i] = (float)((double)w * sp);
-                }
-            }
-            else
-            {
-                for (int i = 0; i < nao; i++)
-                    W_full[ig * nao + i] =
-                        (float)((double)w * v_rho *
-                                (double)ao_norm[ig * nao + i]);
-            }
+            for (int i = 0; i < nao; i++)
+                W_full[ig * nao + i] =
+                    (float)((double)w * v_rho *
+                            (double)ao_norm[ig * nao + i]);
         }
     }
 }
@@ -131,7 +117,8 @@ static void QC_Build_DFT_VXC_Impl(
     double* d_exc_total, float* d_Vxc, float* d_ao_norm, float* d_gx_norm,
     float* d_gy_norm, float* d_gz_norm, float* d_Pao, float* d_W_full,
     float* d_W_sigma, double* d_grad_rho_x, double* d_grad_rho_y,
-    double* d_grad_rho_z, const float* d_shell_r2_screen)
+    double* d_grad_rho_z, const float* d_shell_r2_screen,
+    int* d_xc_failure)
 {
     const int nao = nao_s;
     const int nao2 = nao * nao;
@@ -210,7 +197,6 @@ static void QC_Build_DFT_VXC_Impl(
                                      d_ao_grad_z, d_gz_norm);
             }
         }
-
         // 2. Pao = P @ AO_norm^T
         {
             const float one = 1.0f, zero = 0.0f;
@@ -218,20 +204,17 @@ static void QC_Build_DFT_VXC_Impl(
                             n_batch, nao, nao, &one, d_ao_norm, nao, d_P, nao,
                             &zero, d_Pao, n_batch);
         }
-
         // 3. ρ (+ σ, ∇ρ for GGA)
         Launch_Device_Kernel((QC_Eval_Rho_Kernel<deriv_level>),
                              (n_batch + threads - 1) / threads, threads, 0, 0,
                              n_batch, nao, d_ao_norm, d_gx_norm, d_gy_norm,
                              d_gz_norm, d_Pao, d_rho, d_sigma, d_grad_rho_x,
                              d_grad_rho_y, d_grad_rho_z);
-
         // 4. XC 泛函求值
         Launch_Device_Kernel(QC_Eval_XC_Derivs_Kernel,
                              (n_batch + threads - 1) / threads, threads, 0, 0,
-                             n_batch, (int)method, d_rho, d_sigma, d_exc,
-                             d_vrho, d_vsigma);
-
+                             n_batch, g0, (int)method, d_rho, d_sigma, d_exc,
+                             d_vrho, d_vsigma, d_xc_failure);
         // 5. 加权 AO
         Launch_Device_Kernel((QC_Build_Weighted_AO_Kernel<deriv_level>),
                              (n_batch + threads - 1) / threads, threads, 0, 0,
@@ -239,7 +222,6 @@ static void QC_Build_DFT_VXC_Impl(
                              d_gz_norm, d_weights_batch, d_rho, d_exc, d_vrho,
                              d_vsigma, d_grad_rho_x, d_grad_rho_y, d_grad_rho_z,
                              d_W_full, d_W_sigma, d_exc_total);
-
         // 6. Vxc 矩阵累加
         {
             const float one = 1.0f;
@@ -263,6 +245,7 @@ static void QC_Build_DFT_VXC_RKS(BLAS_HANDLE blas_handle, QC_METHOD method,
                                  const QC_CARTESIAN_TO_SPHERICAL& cart2sph,
                                  const float* d_norms, const float* d_P)
 {
+    deviceMemset(dft.d_xc_failure, 0, 2 * sizeof(int));
     auto call = [&](auto deriv_tag)
     {
         constexpr int DL = decltype(deriv_tag)::value;
@@ -278,7 +261,7 @@ static void QC_Build_DFT_VXC_RKS(BLAS_HANDLE blas_handle, QC_METHOD method,
             dft.d_vrho, dft.d_vsigma, dft.d_exc_total, dft.d_Vxc, dft.d_ao_norm,
             dft.d_gx_norm, dft.d_gy_norm, dft.d_gz_norm, dft.d_Pao,
             dft.d_W_full, dft.d_W_sigma, dft.d_grad_rho_x, dft.d_grad_rho_y,
-            dft.d_grad_rho_z, dft.d_shell_r2_screen);
+            dft.d_grad_rho_z, dft.d_shell_r2_screen, dft.d_xc_failure);
     };
     if (method == QC_METHOD::LDA)
         call(std::integral_constant<int, 0>{});
@@ -332,9 +315,9 @@ static __global__ void QC_Eval_Rho_UKS_Kernel(
             gbx *= 2.0;
             gby *= 2.0;
             gbz *= 2.0;
-            sigma_aa[ig] = gax * gax + gay * gay + gaz * gaz;
-            sigma_ab[ig] = gax * gbx + gay * gby + gaz * gbz;
-            sigma_bb[ig] = gbx * gbx + gby * gby + gbz * gbz;
+            QC_XC_Build_Gradient_Gram(gax, gay, gaz, gbx, gby, gbz,
+                                      sigma_aa[ig], sigma_ab[ig],
+                                      sigma_bb[ig]);
             gra_x[ig] = gax;
             gra_y[ig] = gay;
             gra_z[ig] = gaz;
@@ -347,32 +330,88 @@ static __global__ void QC_Eval_Rho_UKS_Kernel(
 
 // UKS: XC 泛函求值
 static __global__ void QC_Eval_XC_UKS_Kernel(
-    const int n_grid, const int method_id, const double* rho_a,
+    const int n_grid, const int grid_offset, const int method_id,
+    const int alpha_active, const int beta_active, const double* rho_a,
     const double* rho_b, const double* sigma_aa, const double* sigma_ab,
     const double* sigma_bb, double* exc, double* v_rho_a, double* v_rho_b,
-    double* v_sigma_aa, double* v_sigma_ab, double* v_sigma_bb)
+    double* v_sigma_aa, double* v_sigma_ab, double* v_sigma_bb, int* failure)
 {
     SIMPLE_DEVICE_FOR(ig, n_grid)
     {
-        if (rho_a[ig] + rho_b[ig] < QC_DFT_RHO_CUTOFF)
+        const double saa =
+            method_id == (int)QC_METHOD::LDA ? 0.0 : sigma_aa[ig];
+        const double sab =
+            method_id == (int)QC_METHOD::LDA ? 0.0 : sigma_ab[ig];
+        const double sbb =
+            method_id == (int)QC_METHOD::LDA ? 0.0 : sigma_bb[ig];
+        if (!QC_XC_Inputs_Valid_UKS(rho_a[ig], rho_b[ig], saa, sab, sbb))
         {
             exc[ig] = 0.0;
             v_rho_a[ig] = v_rho_b[ig] = 0.0;
             v_sigma_aa[ig] = v_sigma_ab[ig] = v_sigma_bb[ig] = 0.0;
+            QC_Record_XC_Failure(failure, QC_XC_INVALID_UKS_INPUT,
+                                 grid_offset + ig);
         }
         else
         {
             double e = 0.0, vra = 0.0, vrb = 0.0;
             double vsaa = 0.0, vsab = 0.0, vsbb = 0.0;
             QC_VXC_Analytical_UKS((QC_METHOD)method_id, rho_a[ig], rho_b[ig],
-                                  sigma_aa[ig], sigma_ab[ig], sigma_bb[ig], e,
-                                  vra, vrb, vsaa, vsab, vsbb);
-            exc[ig] = e;
-            v_rho_a[ig] = vra;
-            v_rho_b[ig] = vrb;
-            v_sigma_aa[ig] = vsaa;
-            v_sigma_ab[ig] = vsab;
-            v_sigma_bb[ig] = vsbb;
+                                  saa, sab, sbb, e, vra, vrb, vsaa, vsab,
+                                  vsbb);
+            const unsigned expected_infinite =
+                QC_XC_UKS_Expected_Infinite_Output_Mask(
+                    (QC_METHOD)method_id, rho_a[ig], rho_b[ig], saa, sab,
+                    sbb);
+            const bool active_endpoint_diverges =
+                (alpha_active &&
+                 (expected_infinite & QC_XC_UKS_VRHO_A_BIT) != 0u) ||
+                (beta_active &&
+                 (expected_infinite & QC_XC_UKS_VRHO_B_BIT) != 0u);
+            if (active_endpoint_diverges)
+            {
+                exc[ig] = 0.0;
+                v_rho_a[ig] = v_rho_b[ig] = 0.0;
+                v_sigma_aa[ig] = v_sigma_ab[ig] = v_sigma_bb[ig] = 0.0;
+                QC_Record_XC_Failure(failure,
+                                     QC_XC_DIVERGENT_UKS_ENDPOINT,
+                                     grid_offset + ig);
+            }
+            else
+            {
+                // A derivative with respect to a globally fixed empty spin
+                // is never consumed by the SCF or gradient.  Do not convert
+                // its exact endpoint infinity into a floating 0*Inf later.
+                if (!alpha_active &&
+                    (expected_infinite & QC_XC_UKS_VRHO_A_BIT) != 0u)
+                    vra = 0.0;
+                if (!beta_active &&
+                    (expected_infinite & QC_XC_UKS_VRHO_B_BIT) != 0u)
+                    vrb = 0.0;
+            }
+            if (!active_endpoint_diverges &&
+                (!QC_XC_Double_Is_Finite(e) ||
+                !QC_XC_Double_Is_Finite(vra) ||
+                !QC_XC_Double_Is_Finite(vrb) ||
+                !QC_XC_Double_Is_Finite(vsaa) ||
+                !QC_XC_Double_Is_Finite(vsab) ||
+                 !QC_XC_Double_Is_Finite(vsbb)))
+            {
+                exc[ig] = 0.0;
+                v_rho_a[ig] = v_rho_b[ig] = 0.0;
+                v_sigma_aa[ig] = v_sigma_ab[ig] = v_sigma_bb[ig] = 0.0;
+                QC_Record_XC_Failure(failure, QC_XC_NONFINITE_UKS_OUTPUT,
+                                     grid_offset + ig);
+            }
+            else if (!active_endpoint_diverges)
+            {
+                exc[ig] = e;
+                v_rho_a[ig] = vra;
+                v_rho_b[ig] = vrb;
+                v_sigma_aa[ig] = vsaa;
+                v_sigma_ab[ig] = vsab;
+                v_sigma_bb[ig] = vsbb;
+            }
         }
     }
 }
@@ -391,64 +430,48 @@ static __global__ void QC_Build_Weighted_AO_UKS_Kernel(
 {
     SIMPLE_DEVICE_FOR(ig, n_grid)
     {
-        if (rho_a[ig] + rho_b[ig] < QC_DFT_RHO_CUTOFF)
+        const float w = grid_weights[ig];
+        atomicAdd(exc_total, (double)w * exc[ig]);
+
+        if (deriv_level >= 1)
         {
+            const double gax = 2.0 * v_sigma_aa[ig] * gra_x[ig] +
+                               v_sigma_ab[ig] * grb_x[ig];
+            const double gay = 2.0 * v_sigma_aa[ig] * gra_y[ig] +
+                               v_sigma_ab[ig] * grb_y[ig];
+            const double gaz = 2.0 * v_sigma_aa[ig] * gra_z[ig] +
+                               v_sigma_ab[ig] * grb_z[ig];
+            const double gbx = 2.0 * v_sigma_bb[ig] * grb_x[ig] +
+                               v_sigma_ab[ig] * gra_x[ig];
+            const double gby = 2.0 * v_sigma_bb[ig] * grb_y[ig] +
+                               v_sigma_ab[ig] * gra_y[ig];
+            const double gbz = 2.0 * v_sigma_bb[ig] * grb_z[ig] +
+                               v_sigma_ab[ig] * gra_z[ig];
             for (int i = 0; i < nao; i++)
             {
-                Wa_full[ig * nao + i] = 0.0f;
-                Wb_full[ig * nao + i] = 0.0f;
-                if (deriv_level >= 1)
-                {
-                    Wa_sigma[ig * nao + i] = 0.0f;
-                    Wb_sigma[ig * nao + i] = 0.0f;
-                }
+                const double ai = (double)ao_norm[ig * nao + i];
+                const double gxi = (double)gx_norm[ig * nao + i];
+                const double gyi = (double)gy_norm[ig * nao + i];
+                const double gzi = (double)gz_norm[ig * nao + i];
+                const double spa = gax * gxi + gay * gyi + gaz * gzi;
+                const double spb = gbx * gxi + gby * gyi + gbz * gzi;
+                Wa_full[ig * nao + i] =
+                    (float)((double)w * (v_rho_a[ig] * ai + spa));
+                Wa_sigma[ig * nao + i] = (float)((double)w * spa);
+                Wb_full[ig * nao + i] =
+                    (float)((double)w * (v_rho_b[ig] * ai + spb));
+                Wb_sigma[ig * nao + i] = (float)((double)w * spb);
             }
         }
         else
         {
-            const float w = grid_weights[ig];
-            atomicAdd(exc_total, (double)w * exc[ig]);
-
-            if (deriv_level >= 1)
+            for (int i = 0; i < nao; i++)
             {
-                const double gax = 2.0 * v_sigma_aa[ig] * gra_x[ig] +
-                                   v_sigma_ab[ig] * grb_x[ig];
-                const double gay = 2.0 * v_sigma_aa[ig] * gra_y[ig] +
-                                   v_sigma_ab[ig] * grb_y[ig];
-                const double gaz = 2.0 * v_sigma_aa[ig] * gra_z[ig] +
-                                   v_sigma_ab[ig] * grb_z[ig];
-                const double gbx = 2.0 * v_sigma_bb[ig] * grb_x[ig] +
-                                   v_sigma_ab[ig] * gra_x[ig];
-                const double gby = 2.0 * v_sigma_bb[ig] * grb_y[ig] +
-                                   v_sigma_ab[ig] * gra_y[ig];
-                const double gbz = 2.0 * v_sigma_bb[ig] * grb_z[ig] +
-                                   v_sigma_ab[ig] * gra_z[ig];
-                for (int i = 0; i < nao; i++)
-                {
-                    const double ai = (double)ao_norm[ig * nao + i];
-                    const double gxi = (double)gx_norm[ig * nao + i];
-                    const double gyi = (double)gy_norm[ig * nao + i];
-                    const double gzi = (double)gz_norm[ig * nao + i];
-                    const double spa = gax * gxi + gay * gyi + gaz * gzi;
-                    const double spb = gbx * gxi + gby * gyi + gbz * gzi;
-                    Wa_full[ig * nao + i] =
-                        (float)((double)w * (v_rho_a[ig] * ai + spa));
-                    Wa_sigma[ig * nao + i] = (float)((double)w * spa);
-                    Wb_full[ig * nao + i] =
-                        (float)((double)w * (v_rho_b[ig] * ai + spb));
-                    Wb_sigma[ig * nao + i] = (float)((double)w * spb);
-                }
-            }
-            else
-            {
-                for (int i = 0; i < nao; i++)
-                {
-                    const double ai = (double)ao_norm[ig * nao + i];
-                    Wa_full[ig * nao + i] =
-                        (float)((double)w * v_rho_a[ig] * ai);
-                    Wb_full[ig * nao + i] =
-                        (float)((double)w * v_rho_b[ig] * ai);
-                }
+                const double ai = (double)ao_norm[ig * nao + i];
+                Wa_full[ig * nao + i] =
+                    (float)((double)w * v_rho_a[ig] * ai);
+                Wb_full[ig * nao + i] =
+                    (float)((double)w * v_rho_b[ig] * ai);
             }
         }
     }
@@ -459,13 +482,15 @@ static void QC_Build_DFT_VXC_UKS(BLAS_HANDLE blas_handle, QC_METHOD method,
                                  const QC_MOLECULE& mol, QC_DFT& dft,
                                  const QC_CARTESIAN_TO_SPHERICAL& cart2sph,
                                  const float* d_norms, const float* d_Pa,
-                                 const float* d_Pb)
+                                 const float* d_Pb, int alpha_active,
+                                 int beta_active)
 {
     const int nao = mol.nao;
     const int nao2 = mol.nao2;
     deviceMemset(dft.d_Vxc, 0, sizeof(float) * nao2);
     deviceMemset(dft.d_Vxc_beta, 0, sizeof(float) * nao2);
     deviceMemset(dft.d_exc_total, 0, sizeof(double));
+    deviceMemset(dft.d_xc_failure, 0, 2 * sizeof(int));
     if (dft.max_grid_size <= 0) return;
     const int batch_size = std::max(1, dft.grid_batch_size);
     const int threads = 128;
@@ -643,9 +668,10 @@ static void QC_Build_DFT_VXC_UKS(BLAS_HANDLE blas_handle, QC_METHOD method,
         // 4. UKS XC 泛函
         Launch_Device_Kernel(QC_Eval_XC_UKS_Kernel,
                              (n_batch + threads - 1) / threads, threads, 0, 0,
-                             n_batch, (int)method, d_rho_a, d_rho_b, d_sigma_aa,
-                             d_sigma_ab, d_sigma_bb, d_exc, d_vra, d_vrb,
-                             d_vsaa, d_vsab, d_vsbb);
+                             n_batch, g0, (int)method, alpha_active, beta_active,
+                             d_rho_a, d_rho_b, d_sigma_aa, d_sigma_ab,
+                             d_sigma_bb, d_exc, d_vra, d_vrb, d_vsaa, d_vsab,
+                             d_vsbb, dft.d_xc_failure);
 
         // 5. 加权 AO
         if (is_gga)

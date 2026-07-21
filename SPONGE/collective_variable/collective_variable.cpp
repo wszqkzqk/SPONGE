@@ -44,30 +44,30 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Initial(
     }
 }
 
-static int read_one_line(FILE* In_File, char* line, char* ender)
+static int CV_Read_Legacy_Segment(FILE* input, std::string* line,
+                                  std::string* delimiters)
 {
-    int line_count = 0;
-    int ender_count = 0;
-    int c;
-    while ((c = getc(In_File)) != EOF)
+    line->clear();
+    delimiters->clear();
+    int c = EOF;
+    while ((c = getc(input)) != EOF)
     {
-        if (line_count == 0 && (c == '\t' || c == ' '))
+        if (line->empty() && (c == '\t' || c == ' '))
         {
             continue;
         }
         else if (c != '\n' && c != ',' && c != '{' && c != '}' && c != '\r')
         {
-            line[line_count] = c;
-            line_count += 1;
+            line->push_back(static_cast<char>(c));
         }
         else
         {
-            ender[ender_count] = c;
-            ender_count += 1;
+            delimiters->push_back(static_cast<char>(c));
             break;
         }
     }
-    while ((c = getc(In_File)) != EOF)
+    if (ferror(input)) return 0;
+    while ((c = getc(input)) != EOF)
     {
         if (c == ' ' || c == '\t')
         {
@@ -75,22 +75,27 @@ static int read_one_line(FILE* In_File, char* line, char* ender)
         }
         else if (c != '\n' && c != ',' && c != '{' && c != '}' && c != '\r')
         {
-            fseek(In_File, -1, SEEK_CUR);
+            if (ungetc(c, input) == EOF) return 0;
             break;
         }
         else
         {
-            ender[ender_count] = c;
-            ender_count += 1;
+            delimiters->push_back(static_cast<char>(c));
         }
     }
-    line[line_count] = 0;
-    ender[ender_count] = 0;
-    if (line_count == 0 && ender_count == 0)
-    {
-        return EOF;
-    }
+    if (ferror(input)) return 0;
+    if (line->empty() && delimiters->empty()) return EOF;
     return 1;
+}
+
+static std::string CV_First_Legacy_Token(const std::string& line)
+{
+    std::istringstream stream(line);
+    std::string token;
+    std::string trailing;
+    stream >> token;
+    if (stream >> trailing) return std::string();
+    return token;
 }
 
 void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
@@ -99,7 +104,7 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
     FILE* In_File = NULL;
     if (controller->Command_Exist("cv_in_file"))
     {
-        std::string cv_path = controller->Command("cv_in_file");
+        std::string cv_path = controller->Original_Command("cv_in_file");
         std::string ext = to_lower_copy(fs::path(cv_path).extension().string());
         if (ext == ".toml")
         {
@@ -113,47 +118,91 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
     }
     if (In_File != NULL)
     {
-        char line[CHAR_LENGTH_MAX];
-        char prefix[CHAR_LENGTH_MAX] = {0};
-        char ender[CHAR_LENGTH_MAX];
+        std::string line;
+        std::string prefix;
+        std::string delimiters;
+        auto fail_legacy_input = [&](const char* reason)
+        {
+            fclose(In_File);
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat,
+                "COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File",
+                "Reason:\n\t%s\n", reason);
+        };
         while (true)
         {
-            if (read_one_line(In_File, line, ender) == EOF)
+            const int status =
+                CV_Read_Legacy_Segment(In_File, &line, &delimiters);
+            if (status == 0)
+            {
+                fail_legacy_input("I/O error while reading cv_in_file");
+            }
+            if (status == EOF)
             {
                 break;
             }
-            if (line[0] == '#')
+            if (!line.empty() && line[0] == '#')
             {
-                if (line[1] == '#')
+                if (line.size() > 1 && line[1] == '#')
                 {
-                    if (strchr(ender, '{') != NULL)
+                    if (delimiters.find('{') != std::string::npos)
                     {
-                        int scanf_ret = sscanf(line, "%s", prefix);
+                        std::istringstream comment_header(line);
+                        if (!(comment_header >> prefix))
+                        {
+                            fail_legacy_input(
+                                "invalid legacy CV comment-block header");
+                        }
                     }
-                    if (strchr(ender, '}') != NULL)
+                    if (delimiters.find('}') != std::string::npos)
                     {
-                        prefix[0] = 0;
+                        prefix.clear();
                     }
                 }
-                if (strchr(ender, '\n') == NULL)
+                if (delimiters.find('\n') == std::string::npos)
                 {
-                    int scanf_ret = fscanf(In_File, "%*[^\n]%*[\n]");
-                    fseek(In_File, -1, SEEK_CUR);
+                    int c = EOF;
+                    while ((c = getc(In_File)) != EOF && c != '\n')
+                    {
+                    }
+                    if (ferror(In_File))
+                    {
+                        fail_legacy_input(
+                            "I/O error while skipping a cv_in_file comment");
+                    }
                 }
             }
-            else if (strchr(ender, '{') != NULL)
+            else if (delimiters.find('{') != std::string::npos)
             {
-                int scanf_ret = sscanf(line, "%s", prefix);
+                prefix = CV_First_Legacy_Token(line);
+                if (prefix.empty())
+                {
+                    fail_legacy_input(
+                        "a legacy CV block header must contain exactly one "
+                        "name");
+                }
             }
-            else
+            else if (!line.empty())
             {
+                if (line.find('=') == std::string::npos)
+                {
+                    fail_legacy_input(
+                        "a legacy CV command outside a block header must "
+                        "contain '='");
+                }
                 Get_Command(line, prefix);
-                line[0] = 0;
             }
-            if (strchr(ender, '}') != NULL)
+            if (delimiters.find('}') != std::string::npos)
             {
-                prefix[0] = 0;
+                prefix.clear();
             }
+        }
+        if (fclose(In_File) != 0)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorBadFileFormat,
+                "COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File",
+                "Reason:\n\tI/O error while closing cv_in_file\n");
         }
     }
 }
@@ -163,7 +212,8 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Input_Check()
     if (!is_initialized) return;
     for (int i = 0; i < print_cv_list.size(); i++)
     {
-        controller->Step_Print_Initial(print_cv_list[i]->module_name, "%.4f");
+        controller->Step_Print_Initial(print_cv_list[i]->module_name.c_str(),
+                                       "%.4f");
     }
     if (!(Command_Exist("dont_check_input") &&
           atoi(Command("dont_check_input"))))
@@ -232,25 +282,24 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Print_Initial()
 }
 
 void COLLECTIVE_VARIABLE_CONTROLLER::Compute_CV_For_Print(
-    int atom_numbers, VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell, int steps,
-    int interval, bool print_zeroth_frame)
+    int atom_numbers, VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell,
+    LTMatrix3 reference_cell, int steps)
 {
-    if (!((print_zeroth_frame || steps) && (steps % interval == 0))) return;
     for (int i = 0; i < print_cv_list.size(); i++)
     {
         print_cv_list[i]->Compute(atom_numbers, crd, cell, rcell,
-                                  CV_NEED_CPU_VALUE, steps);
+                                  reference_cell, CV_NEED_CPU_VALUE, steps);
     }
 }
 
 void COLLECTIVE_VARIABLE_CONTROLLER::Step_Print()
 {
     if (!is_initialized) return;
-    if (CONTROLLER::MPI_size == 1 && CONTROLLER::PM_MPI_size == 1)
+    if (CONTROLLER::MPI_size == 1)
     {
         for (int i = 0; i < print_cv_list.size(); i++)
         {
-            controller->Step_Print(print_cv_list[i]->module_name,
+            controller->Step_Print(print_cv_list[i]->module_name.c_str(),
                                    print_cv_list[i]->value);
         }
         return;
@@ -265,7 +314,7 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Step_Print()
                 MPI_Recv(&print_cv_list[i]->value, 1, MPI_FLOAT,
                          CONTROLLER::MPI_size - 1, 0, MPI_COMM_WORLD,
                          MPI_STATUS_IGNORE);
-                controller->Step_Print(print_cv_list[i]->module_name,
+                controller->Step_Print(print_cv_list[i]->module_name.c_str(),
                                        print_cv_list[i]->value);
             }
             if (CONTROLLER::MPI_rank == CONTROLLER::MPI_size - 1)
@@ -444,7 +493,18 @@ int* COLLECTIVE_VARIABLE_CONTROLLER::Ask_For_Int_Parameter(
         this->printf("reading %d %s(s) for %s\n", N, parameter_name, name);
     }
     Malloc_Safely((void**)&t, sizeof(int) * N);
-    std::vector<std::string> parameters = string_split(command, " ");
+    std::vector<std::string> parameters;
+    if (N == 1 && !command.empty())
+    {
+        // A scalar string is one value even when it contains whitespace (for
+        // example, a path from a quoted TOML string).  Multi-value string
+        // parameters retain the legacy whitespace-delimited representation.
+        parameters.push_back(command);
+    }
+    else
+    {
+        parameters = string_split(command, " ");
+    }
     if (parameters.size() < N && raise_error_when_missing)
     {
         std::string error_reason = string_format(
@@ -716,7 +776,7 @@ COLLECTIVE_VARIABLE_CONTROLLER::Ask_For_Indefinite_Length_Int_Parameter(
     }
     else if (Command_Exist(name, file_name.c_str()))
     {
-        ss = new std::ifstream(Command(name, file_name.c_str()));
+        ss = new std::ifstream(Original_Command(name, file_name.c_str()));
     }
     if (ss != NULL)
     {
@@ -766,7 +826,7 @@ COLLECTIVE_VARIABLE_CONTROLLER::Ask_For_Indefinite_Length_Float_Parameter(
     }
     else if (Command_Exist(name, file_name.c_str()))
     {
-        ss = new std::ifstream(Command(name, file_name.c_str()));
+        ss = new std::ifstream(Original_Command(name, file_name.c_str()));
     }
     if (ss != NULL)
     {
@@ -818,6 +878,26 @@ int COLLECTIVE_VARIABLE_PROTOTYPE::Check_Whether_Computed_At_This_Step(int step,
     return need;
 }
 
+void COLLECTIVE_VARIABLE_PROTOTYPE::Invalidate_Evaluation_Cache()
+{
+    last_update_step[CV_NEED_GPU_VALUE] = -1;
+    last_update_step[CV_NEED_CPU_VALUE] = -1;
+    last_update_step[CV_NEED_CRD_GRADS] = -1;
+    last_update_step[CV_NEED_VIRIAL] = -1;
+}
+
+void COLLECTIVE_VARIABLE_CONTROLLER::Invalidate_Evaluation_Caches()
+{
+    if (CV_INSTANCE_MAP == NULL) return;
+    for (auto& entry : *CV_INSTANCE_MAP)
+    {
+        if (entry.second != NULL)
+        {
+            entry.second->Invalidate_Evaluation_Cache();
+        }
+    }
+}
+
 void COLLECTIVE_VARIABLE_PROTOTYPE::Record_Update_Step_Of_Slow_Computing_CV(
     int step, int need)
 {
@@ -840,7 +920,14 @@ void COLLECTIVE_VARIABLE_PROTOTYPE::Super_Initial(
     COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
     const char* module_name)
 {
-    strcpy(this->module_name, module_name);
+    if (module_name == NULL)
+    {
+        manager->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "COLLECTIVE_VARIABLE_PROTOTYPE::Super_Initial",
+            "Reason:\n\ta collective-variable instance name cannot be null\n");
+    }
+    this->module_name = module_name;
     int total_atom_numbers = atom_numbers;
     if (manager != NULL)
     {
@@ -855,10 +942,7 @@ void COLLECTIVE_VARIABLE_PROTOTYPE::Super_Initial(
 #ifdef GPU_ARCH_NAME
     deviceStreamCreate(&device_stream);
 #endif
-    last_update_step[CV_NEED_GPU_VALUE] = -1;
-    last_update_step[CV_NEED_CPU_VALUE] = -1;
-    last_update_step[CV_NEED_CRD_GRADS] = -1;
-    last_update_step[CV_NEED_VIRIAL] = -1;
+    Invalidate_Evaluation_Cache();
 }
 
 void COLLECTIVE_VARIABLE_PROTOTYPE::Initial(

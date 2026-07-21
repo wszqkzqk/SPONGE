@@ -133,7 +133,7 @@ void LISTED_FORCES::Initial(CONTROLLER* controller, CONECT* connectivity,
     {
         controller->printf("START INITIALIZING LISTED FORCES:\n");
         Configuration_Reader cfg;
-        cfg.Open(controller->Command(this->module_name, "in_file"));
+        cfg.Open(controller->Original_Command(this->module_name, "in_file"));
         cfg.Close();
         if (!cfg.error_reason.empty())
         {
@@ -558,8 +558,8 @@ void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
                                        error_reason.c_str());
     }
     controller->printf("    Initializing %s\n", this->module_name);
-    Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
-                     "r");
+    Open_File_Safely(
+        &fp, controller->Original_Command(this->module_name, "in_file"), "r");
     if (fscanf(fp, "%d", &item_numbers) != 1)
     {
         std::string error_reason = std::string(

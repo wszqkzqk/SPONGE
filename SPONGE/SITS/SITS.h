@@ -20,8 +20,6 @@ struct SELECT
     std::vector<float*> select_atom_energy;
     std::vector<float*> select_energy;
     std::vector<VECTOR*> select_force;
-    std::vector<float*> select_atom_virial;
-    std::vector<float*> select_virial;
     std::vector<LTMatrix3*> select_atom_virial_tensor;
     std::vector<LTMatrix3*> select_virial_tensor;
 
@@ -37,6 +35,16 @@ struct SELECT
 struct CLASSIC_SITS_INFORMATION;
 struct SITS_INFORMATION;
 
+struct SITS_STATE_SNAPSHOT
+{
+    float enhancing_energy = 0.0f;
+    float bias = 0.0f;
+    float factor = 1.0f;
+    float fb_reference_energy = 0.0f;
+    float fb_reference_bias = 0.0f;
+    float effective_potential = 0.0f;
+};
+
 struct CLASSIC_SITS_INFORMATION
 {
     int is_initialized = 0;
@@ -49,6 +57,8 @@ struct CLASSIC_SITS_INFORMATION
     float* sum_a;
     float* sum_b;
     float* factor;
+    float* fb_reference_energy;
+    float* fb_reference_bias;
 
     int record_count;
     int record_interval;
@@ -86,10 +96,11 @@ struct CLASSIC_SITS_INFORMATION
     int nk_fix = 0;
 
     // record
-    FILE* nk_traj_file;
-    FILE* nk_rest_file;
+    FILE* nk_traj_file = NULL;
+    FILE* nk_rest_file = NULL;
 
-    char nk_rest_file_name[CHAR_LENGTH_MAX];
+    std::string nk_rest_file_name;
+    std::string nk_traj_file_name;
 
     float* nk_record_cpu;
     float* log_norm_record_cpu;
@@ -130,12 +141,15 @@ struct SITS_INFORMATION
     char print_bias_name[CHAR_LENGTH_MAX];
     char print_fb_name[CHAR_LENGTH_MAX];
     int is_initialized = 0;
+    CONTROLLER* controller = NULL;
     int sits_mode = 0;
     int atom_numbers;
     int* atom_sys_mark;  // 标记溶剂，0为体系，1为溶剂
     int* atom_sys_mark_local = NULL;
     int local_atom_numbers = 0;
     int ghost_numbers = 0;
+    int* d_local_metadata_error = NULL;
+    bool local_metadata_is_ready = false;
 
     float pwwp_enhance_factor = 0.5;
     float h_factor = 1.0;
@@ -154,7 +168,12 @@ struct SITS_INFORMATION
     void Reset_Force_Energy(int* md_need_potential);
     void Update_And_Enhance(const int step, float* d_total_potential,
                             const int need_pressure, LTMatrix3* d_total_virial,
-                            VECTOR* frc, float beta0);
+                            VECTOR* frc, float beta0,
+                            bool update_statistics = true);
+    void Save_State(SITS_STATE_SNAPSHOT* snapshot,
+                    const float* d_effective_potential);
+    void Restore_State(const SITS_STATE_SNAPSHOT& snapshot,
+                       float* d_effective_potential);
 
     void SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
@@ -183,4 +202,6 @@ struct SITS_INFORMATION
         以下用于区域分解
     */
     void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers);
+    bool Validate_Local_State(const char* error_by, int global_atom_numbers,
+                              int local_atom_numbers, int ghost_numbers);
 };

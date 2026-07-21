@@ -174,7 +174,7 @@ def test_gromacs_alanine_dipeptide_charmm_tip3p_flexible_run0(
     PERTURB_CASES,
     ids=[f"direct_iter{it}_pert{pert:.2f}" for it, pert in PERTURB_CASES],
 )
-def test_gromacs_alanine_dipeptide_direct_topgro_energy_run0(
+def test_gromacs_alanine_dipeptide_direct_topgro_energy_and_force_run0(
     iteration,
     perturbation,
     statics_path,
@@ -202,12 +202,17 @@ def test_gromacs_alanine_dipeptide_direct_topgro_energy_run0(
     write_sponge_direct_gromacs_run0_mdin(case_dir)
 
     gmx_terms = load_gromacs_reference_terms(statics_path, case_name, iteration)
+    gmx_forces = load_gromacs_reference_forces(
+        statics_path, case_name, iteration
+    )
     Runner.run_sponge(
         case_dir,
         mpi_np=mpi_np,
         mdin_name="sponge.direct.toml",
     )
     sponge_terms = extract_sponge_terms(case_dir)
+    sponge_forces = extract_sponge_forces(case_dir, natom=gmx_forces.shape[0])
+    stats = force_stats(gmx_forces, sponge_forces)
 
     assert abs(gmx_terms["bond"] - sponge_terms["bond"]) <= 0.5
     assert (
@@ -236,3 +241,6 @@ def test_gromacs_alanine_dipeptide_direct_topgro_energy_run0(
         <= 2.0
     )
     assert abs(gmx_terms["potential"] - sponge_terms["potential"]) <= 40.0
+    assert stats["max_abs_diff"] <= 0.07
+    assert stats["rms_diff"] <= 0.01
+    assert stats["cosine_similarity"] >= 0.999

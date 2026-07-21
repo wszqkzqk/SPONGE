@@ -98,6 +98,15 @@ void PRESSURE_BASED_BAROSTAT_INFORMATION::Initial(
         update_interval =
             atoi(controller->Command("barostat", "update_interval"));
     }
+    if (update_interval <= 0)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "PRESSURE_BASED_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tbarostat_update_interval must be positive "
+            "(received %d)\n",
+            update_interval);
+    }
     controller->printf("    The update interval is %d\n", update_interval);
 
     float d = powf(V0, 2.0f);
@@ -236,7 +245,8 @@ void PRESSURE_BASED_BAROSTAT_INFORMATION::Control_Velocity_Of_Box(
 void PRESSURE_BASED_BAROSTAT_INFORMATION::Ask_For_Calculate_Pressure(
     int steps, int* need_pressure)
 {
-    if (is_initialized && (steps + 1) % update_interval == 0)
+    if (is_initialized &&
+        Next_Step_Is_Interval_Boundary(steps, update_interval))
     {
         *need_pressure += 1;
     }
@@ -246,7 +256,8 @@ void PRESSURE_BASED_BAROSTAT_INFORMATION::Regulate_Pressure(
     int steps, LTMatrix3 h_stress, LTMatrix3 cell, float dt,
     float target_pressure, float target_temperature)
 {
-    if (is_initialized && (steps + 1) % update_interval == 0)
+    if (is_initialized &&
+        Next_Step_Is_Interval_Boundary(steps, update_interval))
     {
         if (CONTROLLER::MPI_rank == 0)
         {

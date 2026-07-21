@@ -117,6 +117,15 @@ set_source_files_properties(
   PROPERTIES LANGUAGE CXX)
 target_include_directories(sponge_toml PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
 target_link_libraries(sponge_toml PUBLIC tomlplusplus::tomlplusplus)
+# toml++ must preserve IEEE-754 NaN/Inf tokens until command-specific
+# validation rejects them.  The project-wide fast-math flags let the parser
+# assume those values do not exist and can corrupt them into finite bit
+# patterns before validation sees them.
+if(MSVC)
+  target_compile_options(sponge_toml PRIVATE /fp:precise)
+else()
+  target_compile_options(sponge_toml PRIVATE -fno-fast-math)
+endif()
 
 add_executable(${CURRENT_TARGET} ${SOURCES})
 target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_toml)

@@ -27,7 +27,7 @@ struct COLLECTIVE_VARIABLE_CONTROLLER;
 // CV计算的原型结构体
 struct COLLECTIVE_VARIABLE_PROTOTYPE
 {
-    char module_name[CHAR_LENGTH_MAX];
+    std::string module_name;
     int last_modify_date = 20260216;
 
     // CV类型的名字
@@ -46,6 +46,11 @@ struct COLLECTIVE_VARIABLE_PROTOTYPE
     // 没有virtual的不是接口，只是辅助初始化、记录更新步的函数，不会被默认调用
     // 判断此步是否更新过，避免重新计算
     int Check_Whether_Computed_At_This_Step(int step, int need);
+    // A physical MD step may contain several force evaluations (for example,
+    // an MC old-state and trial-state evaluation).  Their coordinates and box
+    // are different even though the physical step is the same, so the cache
+    // must be invalidated at the force-evaluation boundary.
+    void Invalidate_Evaluation_Cache();
     // 快慢的区别在于是否需要print
     // 记录快速计算CV的更新步（同时计算CV值、力和维里）
     void Record_Update_Step_Of_Fast_Computing_CV(int step, int need);
@@ -60,7 +65,8 @@ struct COLLECTIVE_VARIABLE_PROTOTYPE
                          int atom_numbers, const char* module_name) = 0;
     // 子类计算CV的具体实现细节
     virtual void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                         const LTMatrix3 rcell, int need, int step) = 0;
+                         const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                         int need, int step) = 0;
 };
 
 // 所有CV的列表
@@ -102,8 +108,9 @@ struct COLLECTIVE_VARIABLE_CONTROLLER : public CONTROLLER
     void Step_Print();
     // 为打印计算
     void Compute_CV_For_Print(int atom_numbers, VECTOR* crd, LTMatrix3 cell,
-                              LTMatrix3 rcell, int steps, int interval,
-                              bool print_zeroth_frame);
+                              LTMatrix3 rcell, LTMatrix3 reference_cell,
+                              int steps);
+    void Invalidate_Evaluation_Caches();
     // 通过CV的名字获取一个新建立的CV结构体
     COLLECTIVE_VARIABLE_PROTOTYPE* get_CV(const char* cv_name);
 

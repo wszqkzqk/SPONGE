@@ -34,6 +34,7 @@ float erfcxf(float);
 float atomicAdd(float*, float);
 double atomicAdd(double*, double);
 int atomicAdd(int*, int);
+unsigned long long atomicAdd(unsigned long long*, unsigned long long);
 int atomicExch(int* address, int val);
 enum deviceMemcpyKind
 {
@@ -138,8 +139,8 @@ enum deviceEigMode_t
     DEVICE_EIG_MODE_VECTOR
 };
 
-#define deviceBlasCreate(handle)
-#define deviceBlasDestroy(handle)
+#define deviceBlasCreate(handle) ((*(handle) = 0), BLAS_SUCCESS)
+#define deviceBlasDestroy(handle) ((void)(handle), BLAS_SUCCESS)
 
 #if defined(USE_MKL) || defined(USE_OPENBLAS)
 #define deviceBlasSgeam(handle, transa, transb, m, n, alpha, A, lda, beta, B, \
@@ -184,8 +185,8 @@ enum deviceEigMode_t
 #define SOLVER_HANDLE int
 #define SOLVER_SUCCESS 0
 
-#define deviceSolverCreate(handle)
-#define deviceSolverDestroy(handle)
+#define deviceSolverCreate(handle) ((*(handle) = 0), SOLVER_SUCCESS)
+#define deviceSolverDestroy(handle) ((void)(handle), SOLVER_SUCCESS)
 
 #define deviceSolverDsyevdBufferSize(handle, jobz, uplo, n, A, lda, W, lwork) \
     [&]() -> int                                                              \

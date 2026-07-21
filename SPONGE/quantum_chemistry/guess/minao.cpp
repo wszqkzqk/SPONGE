@@ -1,63 +1,12 @@
 ﻿#include "minao.h"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
+
 #include "../quantum_chemistry.h"
-
-// 基态电子构型：每个子壳层的角动量和电子数
-// 子壳层按 1s, 2s, 2p, 3s, 3p, 4s, 3d, 4p 排列
-static const int MAX_SUBSHELLS = 8;
-
-struct AtomConfig
-{
-    int n_subshells;
-    int l[MAX_SUBSHELLS];
-    int occ[MAX_SUBSHELLS];
-};
-
-// clang-format off
-static const AtomConfig ATOM_CONFIGS[] = {
-    {0, {}, {}},                                         // Z=0  dummy
-    {1, {0},                         {1}},               // Z=1  H
-    {1, {0},                         {2}},               // Z=2  He
-    {2, {0, 0},                      {2, 1}},            // Z=3  Li
-    {2, {0, 0},                      {2, 2}},            // Z=4  Be
-    {3, {0, 0, 1},                   {2, 2, 1}},         // Z=5  B
-    {3, {0, 0, 1},                   {2, 2, 2}},         // Z=6  C
-    {3, {0, 0, 1},                   {2, 2, 3}},         // Z=7  N
-    {3, {0, 0, 1},                   {2, 2, 4}},         // Z=8  O
-    {3, {0, 0, 1},                   {2, 2, 5}},         // Z=9  F
-    {3, {0, 0, 1},                   {2, 2, 6}},         // Z=10 Ne
-    {4, {0, 0, 1, 0},               {2, 2, 6, 1}},      // Z=11 Na
-    {4, {0, 0, 1, 0},               {2, 2, 6, 2}},      // Z=12 Mg
-    {5, {0, 0, 1, 0, 1},            {2, 2, 6, 2, 1}},   // Z=13 Al
-    {5, {0, 0, 1, 0, 1},            {2, 2, 6, 2, 2}},   // Z=14 Si
-    {5, {0, 0, 1, 0, 1},            {2, 2, 6, 2, 3}},   // Z=15 P
-    {5, {0, 0, 1, 0, 1},            {2, 2, 6, 2, 4}},   // Z=16 S
-    {5, {0, 0, 1, 0, 1},            {2, 2, 6, 2, 5}},   // Z=17 Cl
-    {5, {0, 0, 1, 0, 1},            {2, 2, 6, 2, 6}},   // Z=18 Ar
-    // 第四周期 K-Kr: 子壳层顺序 1s, 2s, 2p, 3s, 3p, 4s, 3d, 4p
-    {6, {0, 0, 1, 0, 1, 0},         {2, 2, 6, 2, 6, 1}},          // Z=19 K   [Ar]4s1
-    {6, {0, 0, 1, 0, 1, 0},         {2, 2, 6, 2, 6, 2}},          // Z=20 Ca  [Ar]4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 1}},       // Z=21 Sc  [Ar]3d1 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 2}},       // Z=22 Ti  [Ar]3d2 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 3}},       // Z=23 V   [Ar]3d3 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 1, 5}},       // Z=24 Cr  [Ar]3d5 4s1
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 5}},       // Z=25 Mn  [Ar]3d5 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 6}},       // Z=26 Fe  [Ar]3d6 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 7}},       // Z=27 Co  [Ar]3d7 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 8}},       // Z=28 Ni  [Ar]3d8 4s2
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 1, 10}},      // Z=29 Cu  [Ar]3d10 4s1
-    {7, {0, 0, 1, 0, 1, 0, 2},      {2, 2, 6, 2, 6, 2, 10}},      // Z=30 Zn  [Ar]3d10 4s2
-    {8, {0, 0, 1, 0, 1, 0, 2, 1},   {2, 2, 6, 2, 6, 2, 10, 1}},   // Z=31 Ga  [Ar]3d10 4s2 4p1
-    {8, {0, 0, 1, 0, 1, 0, 2, 1},   {2, 2, 6, 2, 6, 2, 10, 2}},   // Z=32 Ge  [Ar]3d10 4s2 4p2
-    {8, {0, 0, 1, 0, 1, 0, 2, 1},   {2, 2, 6, 2, 6, 2, 10, 3}},   // Z=33 As  [Ar]3d10 4s2 4p3
-    {8, {0, 0, 1, 0, 1, 0, 2, 1},   {2, 2, 6, 2, 6, 2, 10, 4}},   // Z=34 Se  [Ar]3d10 4s2 4p4
-    {8, {0, 0, 1, 0, 1, 0, 2, 1},   {2, 2, 6, 2, 6, 2, 10, 5}},   // Z=35 Br  [Ar]3d10 4s2 4p5
-    {8, {0, 0, 1, 0, 1, 0, 2, 1},   {2, 2, 6, 2, 6, 2, 10, 6}},   // Z=36 Kr  [Ar]3d10 4s2 4p6
-};
-// clang-format on
-
-static const int MAX_SUPPORTED_Z =
-    (int)(sizeof(ATOM_CONFIGS) / sizeof(ATOM_CONFIGS[0])) - 1;
+#include "minao_occupancy.hpp"
 
 // 设备核函数：将 AO 占据数写入密度矩阵对角线
 static __global__ void QC_Set_Diagonal_Kernel(const int count, const int nao,
@@ -77,89 +26,189 @@ void QC_Build_Minao_Guess(const QC_MOLECULE& mol,
     const int nao = mol.nao;
     const bool unrestricted = runtime.unrestricted;
     const bool is_spherical = mol.is_spherical;
+    if (mol.natm <= 0 || mol.nbas < 0 || nao <= 0 || mol.nao2 <= 0 ||
+        d_P == nullptr || (unrestricted && d_P_beta == nullptr))
+        throw std::domain_error("invalid MINAO molecule or density storage");
+    if (nao > std::numeric_limits<int>::max() / nao || mol.nao2 != nao * nao)
+        throw std::logic_error("MINAO AO square dimension is inconsistent");
+    const std::size_t atom_count = static_cast<std::size_t>(mol.natm);
+    const std::size_t shell_count = static_cast<std::size_t>(mol.nbas);
+    if (shell_count > std::numeric_limits<std::size_t>::max() / 8U ||
+        mol.h_bas.size() < 8U * shell_count ||
+        mol.h_l_list.size() < shell_count ||
+        mol.h_ao_offsets.size() < shell_count ||
+        mol.h_ao_offsets_sph.size() < shell_count ||
+        mol.h_atomic_numbers.size() != atom_count ||
+        mol.h_Z.size() != atom_count || mol.h_ecp_n_core.size() != atom_count)
+        throw std::logic_error("MINAO molecule metadata is incomplete");
+
+    auto shell_ao_dimension = [&](int angular_momentum)
+    {
+        if (angular_momentum < 0)
+            throw std::domain_error(
+                "MINAO shell angular momentum cannot be negative");
+        const long long dimension =
+            is_spherical
+                ? 2LL * angular_momentum + 1LL
+                : (static_cast<long long>(angular_momentum) + 1LL) *
+                      (static_cast<long long>(angular_momentum) + 2LL) / 2LL;
+        if (dimension <= 0 || dimension > std::numeric_limits<int>::max())
+            throw std::overflow_error("MINAO shell AO dimension overflows int");
+        return static_cast<int>(dimension);
+    };
 
     // 按原子分组壳层
     std::vector<std::vector<int>> atom_shells(mol.natm);
     for (int ish = 0; ish < mol.nbas; ish++)
     {
-        int iatm = mol.h_bas[ish * 8 + 0];
+        const int iatm = mol.h_bas[(std::size_t)ish * 8U];
+        if (iatm < 0 || iatm >= mol.natm)
+            throw std::logic_error("MINAO shell atom index is out of range");
         atom_shells[iatm].push_back(ish);
     }
 
-    // 在主机侧计算每个 AO 的占据数
-    std::vector<int> h_ao_idx_alpha, h_ao_idx_beta;
-    std::vector<float> h_occ_alpha, h_occ_beta;
+    // Build the neutral-atom/ECP-core-removed preference first. Molecular
+    // charge and multiplicity are global constraints and must not be imposed
+    // independently atom by atom.
+    std::vector<double> preferred_total(static_cast<std::size_t>(nao), 0.0);
+    std::vector<unsigned char> ao_seen(static_cast<std::size_t>(nao), 0U);
 
     for (int iatm = 0; iatm < mol.natm; iatm++)
     {
-        int Z = mol.h_Z[iatm];
-        if (Z <= 0 || Z > MAX_SUPPORTED_Z) continue;
-        const AtomConfig& config = ATOM_CONFIGS[Z];
+        const int atomic_number = mol.Atomic_Number(iatm);
+        const std::array<int, 4> electrons_by_l =
+            sponge_qc_minao::Explicit_Electrons_By_Angular_Momentum(
+                atomic_number, mol.h_ecp_n_core[iatm]);
+        int explicit_electron_count = 0;
+        for (int count : electrons_by_l) explicit_electron_count += count;
+        if (explicit_electron_count != mol.Effective_Nuclear_Charge(iatm))
+            throw std::logic_error(
+                "MINAO explicit-electron count differs from the effective "
+                "nuclear charge");
 
         // 按角动量统计该原子在当前基组中的 AO 总数
         const int l_max = 3;
         int nao_per_l[4] = {0, 0, 0, 0};
         for (int ish : atom_shells[iatm])
         {
-            int l = mol.h_l_list[ish];
+            const int l = mol.h_l_list[ish];
+            const int dimension = shell_ao_dimension(l);
             if (l > l_max) continue;
-            nao_per_l[l] +=
-                is_spherical ? (2 * l + 1) : ((l + 1) * (l + 2) / 2);
+            if (nao_per_l[l] > std::numeric_limits<int>::max() - dimension)
+                throw std::overflow_error(
+                    "MINAO per-angular-momentum AO count overflows int");
+            nao_per_l[l] += dimension;
         }
-
-        // 按角动量汇总原子构型中的电子数
-        int elec_per_l[4] = {0, 0, 0, 0};
-        for (int s = 0; s < config.n_subshells; s++)
+        for (int l = 0; l <= l_max; ++l)
         {
-            int l = config.l[s];
-            if (l <= l_max) elec_per_l[l] += config.occ[s];
+            if (electrons_by_l[l] != 0 && nao_per_l[l] == 0)
+                throw std::domain_error(
+                    "MINAO cannot represent " +
+                    std::to_string(electrons_by_l[l]) +
+                    " explicit electron(s) with angular momentum l=" +
+                    std::to_string(l) + " for atomic number " +
+                    std::to_string(atomic_number));
+            if (static_cast<long long>(electrons_by_l[l]) > 2LL * nao_per_l[l])
+                throw std::domain_error(
+                    "MINAO cannot place " + std::to_string(electrons_by_l[l]) +
+                    " explicit electron(s) into the available l=" +
+                    std::to_string(l) + " AO capacity for atomic number " +
+                    std::to_string(atomic_number));
         }
 
-        // 对每个壳层的每个 AO 均匀分配
+        // Spread each neutral explicit-atom angular population over the AOs
+        // of that l. Higher-l polarization AOs carry zero preference but are
+        // retained as legitimate capacity for an anionic molecular target.
         for (int ish : atom_shells[iatm])
         {
-            int l = mol.h_l_list[ish];
-            if (l > l_max || nao_per_l[l] == 0) continue;
-            int nao_shell =
-                is_spherical ? (2 * l + 1) : ((l + 1) * (l + 2) / 2);
-            int ao_start = is_spherical ? mol.h_ao_offsets_sph[ish]
-                                        : mol.h_ao_offsets[ish];
-            float total_occ = (float)elec_per_l[l] / (float)nao_per_l[l];
+            const int l = mol.h_l_list[ish];
+            const int nao_shell = shell_ao_dimension(l);
+            const int ao_start = is_spherical ? mol.h_ao_offsets_sph[ish]
+                                              : mol.h_ao_offsets[ish];
+            if (ao_start < 0 || ao_start > nao || nao_shell > nao - ao_start)
+                throw std::logic_error("MINAO shell AO range is out of bounds");
+            const double total_occ =
+                l <= l_max ? static_cast<double>(electrons_by_l[l]) /
+                                 static_cast<double>(nao_per_l[l])
+                           : 0.0;
 
             for (int k = 0; k < nao_shell; k++)
             {
-                int ao = ao_start + k;
-                if (!unrestricted)
-                {
-                    h_ao_idx_alpha.push_back(ao);
-                    h_occ_alpha.push_back(total_occ / runtime.occ_factor);
-                }
-                else
-                {
-                    float a_occ = (total_occ + 1.0f) * 0.5f;
-                    if (a_occ > 1.0f) a_occ = 1.0f;
-                    float b_occ = total_occ - a_occ;
-                    if (b_occ < 0.0f) b_occ = 0.0f;
-                    h_ao_idx_alpha.push_back(ao);
-                    h_occ_alpha.push_back(a_occ);
-                    h_ao_idx_beta.push_back(ao);
-                    h_occ_beta.push_back(b_occ);
-                }
+                const int ao = ao_start + k;
+                if (ao < 0 || ao >= nao || ao_seen[(std::size_t)ao] != 0U)
+                    throw std::logic_error(
+                        "MINAO AO layout is overlapping or out of range");
+                ao_seen[(std::size_t)ao] = 1U;
+                preferred_total[(std::size_t)ao] = total_occ;
             }
         }
     }
 
+    for (unsigned char seen : ao_seen)
+        if (seen == 0U)
+            throw std::logic_error("MINAO AO layout does not cover every AO");
+
+    const long long runtime_electron_target =
+        unrestricted ? static_cast<long long>(runtime.n_alpha) + runtime.n_beta
+                     : 2LL * runtime.n_alpha;
+    if (runtime_electron_target != mol.nelectron)
+        throw std::logic_error(
+            "MINAO runtime occupations do not match the molecular electron "
+            "count");
+
+    const sponge_qc_minao::Global_AO_Occupancies occupations =
+        sponge_qc_minao::Allocate_Global_AO_Occupancies(
+            preferred_total, unrestricted, runtime.n_alpha, runtime.n_beta,
+            runtime.occ_factor);
+    if (occupations.alpha.size() != static_cast<std::size_t>(nao) ||
+        (unrestricted &&
+         occupations.beta.size() != static_cast<std::size_t>(nao)))
+        throw std::logic_error("MINAO global occupation size mismatch");
+
+    std::vector<int> h_ao_indices(static_cast<std::size_t>(nao));
+    std::vector<float> h_occ_alpha(static_cast<std::size_t>(nao), 0.0f);
+    std::vector<float> h_occ_beta(
+        unrestricted ? static_cast<std::size_t>(nao) : 0U, 0.0f);
+    double staged_alpha_sum = 0.0;
+    double staged_beta_sum = 0.0;
+    for (int ao = 0; ao < nao; ++ao)
+    {
+        h_ao_indices[(std::size_t)ao] = ao;
+        h_occ_alpha[(std::size_t)ao] =
+            static_cast<float>(occupations.alpha[(std::size_t)ao]);
+        staged_alpha_sum += h_occ_alpha[(std::size_t)ao];
+        if (unrestricted)
+        {
+            h_occ_beta[(std::size_t)ao] =
+                static_cast<float>(occupations.beta[(std::size_t)ao]);
+            staged_beta_sum += h_occ_beta[(std::size_t)ao];
+        }
+    }
+    const double target_alpha =
+        unrestricted ? runtime.n_alpha : runtime.occ_factor * runtime.n_alpha;
+    const double target_beta = unrestricted ? runtime.n_beta : 0.0;
+    const double float_rounding_bound =
+        8.0 * std::numeric_limits<float>::epsilon() *
+        std::max({1.0, static_cast<double>(nao), target_alpha, target_beta});
+    if (std::fabs(staged_alpha_sum - target_alpha) > float_rounding_bound ||
+        std::fabs(staged_beta_sum - target_beta) > float_rounding_bound)
+        throw std::logic_error(
+            "MINAO float occupations do not preserve molecular electrons");
+
     // 用设备核函数写入密度矩阵对角线
     const int threads = 256;
+    deviceMemset(d_P, 0, sizeof(float) * (std::size_t)mol.nao2);
+    if (unrestricted && d_P_beta != nullptr)
+        deviceMemset(d_P_beta, 0, sizeof(float) * (std::size_t)mol.nao2);
 
-    if (!h_ao_idx_alpha.empty())
+    if (!h_ao_indices.empty())
     {
-        const int n = (int)h_ao_idx_alpha.size();
+        const int n = (int)h_ao_indices.size();
         int* d_idx = nullptr;
         float* d_occ = nullptr;
         Device_Malloc_Safely((void**)&d_idx, sizeof(int) * n);
         Device_Malloc_Safely((void**)&d_occ, sizeof(float) * n);
-        deviceMemcpy(d_idx, h_ao_idx_alpha.data(), sizeof(int) * n,
+        deviceMemcpy(d_idx, h_ao_indices.data(), sizeof(int) * n,
                      deviceMemcpyHostToDevice);
         deviceMemcpy(d_occ, h_occ_alpha.data(), sizeof(float) * n,
                      deviceMemcpyHostToDevice);
@@ -170,14 +219,14 @@ void QC_Build_Minao_Guess(const QC_MOLECULE& mol,
         deviceFree(d_occ);
     }
 
-    if (unrestricted && d_P_beta && !h_ao_idx_beta.empty())
+    if (unrestricted && d_P_beta && !h_ao_indices.empty())
     {
-        const int n = (int)h_ao_idx_beta.size();
+        const int n = (int)h_ao_indices.size();
         int* d_idx = nullptr;
         float* d_occ = nullptr;
         Device_Malloc_Safely((void**)&d_idx, sizeof(int) * n);
         Device_Malloc_Safely((void**)&d_occ, sizeof(float) * n);
-        deviceMemcpy(d_idx, h_ao_idx_beta.data(), sizeof(int) * n,
+        deviceMemcpy(d_idx, h_ao_indices.data(), sizeof(int) * n,
                      deviceMemcpyHostToDevice);
         deviceMemcpy(d_occ, h_occ_beta.data(), sizeof(float) * n,
                      deviceMemcpyHostToDevice);

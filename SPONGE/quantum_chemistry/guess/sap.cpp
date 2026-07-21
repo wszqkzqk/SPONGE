@@ -582,7 +582,7 @@ static __device__ const int SAP_MAX_Z =
 // V_SAP 积分核函数
 // 基于 arXiv:2603.16989 的方法：对核吸引积分的 Boys 函数做修正
 // 标准核吸引: F_m(T), T = g * R_PC²
-// SAP 修正:   F_m(T) → F_m(T) - Σ_k c̃_k (α_k/(g+α_k))^(m+1/2)
+// SAP 修正:   F_m(T) → F_m(T) + Σ_k c̃_k (α_k/(g+α_k))^(m+1/2)
 // F_m(T·α_k/(g+α_k)) 其中 c̃_k = c_k / Z_C
 // 前因子 (-Z * 2π/g) 和 R tensor 递推完全不变
 
@@ -621,8 +621,9 @@ static __global__ void SAP_Kernel(const int n_tasks, const QC_ONE_E_TASK* tasks,
                                   const int* shell_offsets,
                                   const int* shell_sizes, const int* ao_offsets,
                                   const int* atm, const float* env, int natm,
-                                  const int* d_Z, float* out_V_SAP,
-                                  int nao_total)
+                                  const int* atomic_numbers,
+                                  const int* effective_nuclear_charges,
+                                  float* out_V_SAP, int nao_total)
 {
     SIMPLE_DEVICE_FOR(task_id, n_tasks)
     {
@@ -673,8 +674,13 @@ static __global__ void SAP_Kernel(const int n_tasks, const QC_ONE_E_TASK* tasks,
 
                         for (int iat = 0; iat < natm; iat++)
                         {
-                            int Z = d_Z[iat];
-                            if (Z <= 0 || Z > SAP_MAX_Z) continue;
+                            const int atomic_number = atomic_numbers[iat];
+                            const int effective_nuclear_charge =
+                                effective_nuclear_charges[iat];
+                            if (atomic_number <= 0 ||
+                                atomic_number > SAP_MAX_Z ||
+                                effective_nuclear_charge <= 0)
+                                continue;
 
                             int ptr_coord = atm[iat * 6 + 1];
                             float Cx = env[ptr_coord];
@@ -688,8 +694,14 @@ static __global__ void SAP_Kernel(const int n_tasks, const QC_ONE_E_TASK* tasks,
 
                             double F_vals[ONEE_MD_BASE];
                             compute_boys_double(F_vals, T, L_tot);
+                            // Select the radial SAP shape by real element. For
+                            // an ECP atom the nuclear prefactor is Z_eff while
+                            // normalizing the full-atom screening fit by the
+                            // real Z scales its electron screening to Z_eff/Z
+                            // instead of masquerading as another element.
                             apply_sap_correction(F_vals, L_tot, T, (float)g,
-                                                 SAP_DATA[Z], Z);
+                                                 SAP_DATA[atomic_number],
+                                                 atomic_number);
 
                             float R_vals[ONEE_MD_BASE * ONEE_MD_BASE *
                                          ONEE_MD_BASE * ONEE_MD_BASE];
@@ -716,8 +728,10 @@ static __global__ void SAP_Kernel(const int n_tasks, const QC_ONE_E_TASK* tasks,
                                     }
                                 }
                             }
-                            total_V += ci * cj * Kab * -(float)Z *
-                                       (2.0f * CONSTANT_Pi / g) * (float)v_sum;
+                            total_V +=
+                                ci * cj * Kab *
+                                -(float)effective_nuclear_charge *
+                                (2.0f * CONSTANT_Pi / g) * (float)v_sum;
                         }
                     }
                 }
@@ -743,6 +757,7 @@ void QC_Compute_V_SAP(const QC_MOLECULE& mol, const QC_INTEGRAL_TASKS& task_ctx,
             SAP_Kernel, (current_chunk + 63) / 64, 64, 0, 0, current_chunk,
             task_ptr, mol.d_centers, mol.d_l_list, mol.d_exps, mol.d_coeffs,
             mol.d_shell_offsets, mol.d_shell_sizes, mol.d_ao_offsets, mol.d_atm,
-            mol.d_env, mol.natm, mol.d_Z, d_V_SAP, nao_c);
+            mol.d_env, mol.natm, mol.d_atomic_numbers, mol.d_Z, d_V_SAP,
+            nao_c);
     }
 }

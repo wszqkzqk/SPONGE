@@ -449,6 +449,7 @@ void RESTRAIN_INFORMATION::Initial(CONTROLLER* controller,
                                    const int atom_numbers, const VECTOR* crd,
                                    const char* module_name)
 {
+    this->controller = controller;
     if (module_name == NULL)
     {
         strcpy(this->module_name, "restrain");
@@ -477,8 +478,9 @@ void RESTRAIN_INFORMATION::Initial(CONTROLLER* controller,
         controller->printf("    reading %s_atom_id\n", this->module_name);
         this->restrain_numbers = 0;
         FILE* fr = NULL;
-        Open_File_Safely(&fr, controller->Command(this->module_name, "atom_id"),
-                         "r");
+        Open_File_Safely(
+            &fr, controller->Original_Command(this->module_name, "atom_id"),
+            "r");
 
         while (fscanf(fr, "%d", &temp_atom) != EOF)
         {
@@ -567,13 +569,15 @@ void RESTRAIN_INFORMATION::Initial(CONTROLLER* controller,
         {
             controller->printf(
                 "    reading restrain reference from %s\n",
-                controller->Command(this->module_name, "coordinate_in_file"));
+                controller->Original_Command(this->module_name,
+                                             "coordinate_in_file"));
             VECTOR* h_crd = NULL;
             Malloc_Safely((void**)&h_crd, sizeof(VECTOR) * atom_numbers);
             FILE* fp = NULL;
             Open_File_Safely(
                 &fp,
-                controller->Command(this->module_name, "coordinate_in_file"),
+                controller->Original_Command(this->module_name,
+                                             "coordinate_in_file"),
                 "r");
             int temp_atom_numbers = 0;
             int scanf_ret = fscanf(fp, "%d", &temp_atom_numbers);
@@ -595,9 +599,9 @@ void RESTRAIN_INFORMATION::Initial(CONTROLLER* controller,
         {
             controller->printf(
                 "    reading restrain reference from %s\n",
-                controller->Command(this->module_name, "amber_rst7"));
+                controller->Original_Command(this->module_name, "amber_rst7"));
             Import_Information_From_Rst7(
-                controller->Command(this->module_name, "amber_rst7"),
+                controller->Original_Command(this->module_name, "amber_rst7"),
                 &temp_atom, &ref_time, &d_ref_crd_all, &d_vel, &h_boxlength,
                 controller[0]);
         }
@@ -643,7 +647,9 @@ void RESTRAIN_INFORMATION::Initial(CONTROLLER* controller,
 
             FILE* wr = NULL;
             Open_File_Safely(
-                &wr, controller->Command(this->module_name, "weight_in_file"),
+                &wr,
+                controller->Original_Command(this->module_name,
+                                             "weight_in_file"),
                 "r");
             for (int i = 0; i < this->restrain_numbers; i++)
             {
@@ -705,7 +711,11 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
                 md_info->res.d_res_start == NULL ||
                 md_info->res.d_res_end == NULL || md_info->d_mass == NULL)
             {
-                printf("restrain refcoord_scaling com_res is not ready.\n");
+                controller->Throw_SPONGE_Error(
+                    spongeErrorSimulationBreakDown,
+                    "RESTRAIN_INFORMATION::Update_Refcoord_Scaling",
+                    "Reason:\n\trestrain refcoord_scaling=com_res has "
+                    "incomplete residue or mass state\n");
                 return;
             }
             Launch_Device_Kernel(Rescale_Ref_By_Group_Range_Device,
@@ -724,7 +734,11 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
                 md_info->mol.d_atom_start == NULL ||
                 md_info->mol.d_atom_end == NULL || md_info->d_mass == NULL)
             {
-                printf("restrain refcoord_scaling com_mol is not ready.\n");
+                controller->Throw_SPONGE_Error(
+                    spongeErrorSimulationBreakDown,
+                    "RESTRAIN_INFORMATION::Update_Refcoord_Scaling",
+                    "Reason:\n\trestrain refcoord_scaling=com_mol has "
+                    "incomplete molecule or mass state\n");
                 return;
             }
             Launch_Device_Kernel(Rescale_Ref_By_Group_Range_Device,
@@ -741,7 +755,11 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
             if (md_info->ug.ug_numbers <= 0 || md_info->ug.d_ug == NULL ||
                 md_info->d_mass == NULL)
             {
-                printf("restrain refcoord_scaling com_ug is not ready.\n");
+                controller->Throw_SPONGE_Error(
+                    spongeErrorSimulationBreakDown,
+                    "RESTRAIN_INFORMATION::Update_Refcoord_Scaling",
+                    "Reason:\n\trestrain refcoord_scaling=com_ug has "
+                    "incomplete update-group or mass state\n");
                 return;
             }
             Launch_Device_Kernel(
@@ -756,13 +774,68 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
             return;
     }
 
-    Launch_Device_Kernel(
-        Gather_Ref_From_All_Device,
-        (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
-            CONTROLLER::device_max_thread,
-        CONTROLLER::device_max_thread, 0, NULL, this->restrain_numbers,
-        this->d_lists, this->d_ref_crd_all, this->crd_ref);
+    if (restrain_numbers > 0)
+    {
+        Launch_Device_Kernel(
+            Gather_Ref_From_All_Device,
+            (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, this->restrain_numbers,
+            this->d_lists, this->d_ref_crd_all, this->crd_ref);
+    }
 
+    if (atom_local_label != NULL && atom_local_id != NULL)
+    {
+        Get_Local(atom_local, local_atom_numbers, atom_local_label,
+                  atom_local_id);
+    }
+}
+
+void RESTRAIN_INFORMATION::Save_Refcoord_Transaction_State()
+{
+    if (!is_initialized || refcoord_scaling == REFCOORD_SCALING_NO) return;
+    if (d_ref_crd_all == NULL || atom_numbers <= 0)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "RESTRAIN_INFORMATION::Save_Refcoord_Transaction_State",
+            "Reason:\n\trestrain reference coordinates are not initialized\n");
+        return;
+    }
+    if (d_ref_crd_all_transaction_backup == NULL)
+    {
+        Device_Malloc_Safely((void**)&d_ref_crd_all_transaction_backup,
+                             sizeof(VECTOR) * atom_numbers);
+    }
+    deviceMemcpy(d_ref_crd_all_transaction_backup, d_ref_crd_all,
+                 sizeof(VECTOR) * atom_numbers, deviceMemcpyDeviceToDevice);
+}
+
+void RESTRAIN_INFORMATION::Restore_Refcoord_Transaction_State(
+    int* atom_local, int local_atom_numbers, char* atom_local_label,
+    int* atom_local_id)
+{
+    if (!is_initialized || refcoord_scaling == REFCOORD_SCALING_NO) return;
+    if (d_ref_crd_all_transaction_backup == NULL || d_ref_crd_all == NULL)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "RESTRAIN_INFORMATION::Restore_Refcoord_Transaction_State",
+            "Reason:\n\tno restrain reference-coordinate transaction was "
+            "saved\n");
+        return;
+    }
+    deviceMemcpy(d_ref_crd_all, d_ref_crd_all_transaction_backup,
+                 sizeof(VECTOR) * atom_numbers, deviceMemcpyDeviceToDevice);
+    if (restrain_numbers > 0)
+    {
+        Launch_Device_Kernel(
+            Gather_Ref_From_All_Device,
+            (restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, restrain_numbers, d_lists,
+            d_ref_crd_all, crd_ref);
+    }
     if (atom_local_label != NULL && atom_local_id != NULL)
     {
         Get_Local(atom_local, local_atom_numbers, atom_local_label,

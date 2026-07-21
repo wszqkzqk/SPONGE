@@ -75,10 +75,19 @@ jobs:
       - name: Benchmark validation/thermostat
         run: pixi run -e ${{ matrix.env_name }} vali-thermostat
 
+      - name: Benchmark validation/topology
+        run: pixi run -e ${{ matrix.env_name }} vali-topology
+
       - name: Benchmark validation/misc (except prips and minimization)
         run: >-
           pixi run -e ${{ matrix.env_name }} vali-misc -k
           "not prips and not minimization"
+
+      - name: Benchmark validation/minimization contracts
+        run: >-
+          pixi run -e ${{ matrix.env_name }} python -X utf8 -m pytest
+          benchmarks/validation/misc/tests/test_min.py -s --tb=short -k
+          "not test_tip3p_bad_coordinate_minimization_runs"
 
   benchmark-cpu-prips:
     name: PRIPS-CPU Benchmark (${{ matrix.target }})
@@ -288,10 +297,19 @@ jobs:
       - name: Benchmark validation/thermostat (MPI np=2)
         run: pixi run -e ${{ matrix.env_name }} vali-thermostat --mpi 2
 
-      - name: Benchmark validation/misc (walls and softcore, MPI np=2)
+      - name: Benchmark validation/topology (MPI np=2)
+        run: pixi run -e ${{ matrix.env_name }} vali-topology --mpi 2
+
+      - name: Benchmark validation/misc (transaction and force contracts; MPI np=2)
         run: >-
           pixi run -e ${{ matrix.env_name }} vali-misc --mpi 2 -k
-          "walls or softcore"
+          "walls or softcore or pme_excluded or reaxff_dd or mc_meta or qc_force"
+
+      - name: Benchmark validation/minimization contracts (MPI np=2)
+        run: >-
+          pixi run -e ${{ matrix.env_name }} python -X utf8 -m pytest
+          benchmarks/validation/misc/tests/test_min.py -s --tb=short --mpi 2 -k
+          "not test_tip3p_bad_coordinate_minimization_runs"
 
   benchmark-cpu-mpi-np2-barostat:
     name: benchmark-cpu-mpi-np2-barostat (${{ matrix.label }})
@@ -416,7 +434,7 @@ jobs:
       - name: Benchmark validation/cv (MPI np=3)
         run: pixi run -e ${{ matrix.env_name }} vali-cv --mpi 3
 
-      - name: Benchmark validation/misc (walls and softcore, MPI np=3)
+      - name: Benchmark validation/misc (walls, softcore, PME exclusions; MPI np=3)
         run: >-
           pixi run -e ${{ matrix.env_name }} vali-misc --mpi 3 -k
-          "walls or softcore"
+          "walls or softcore or pme_excluded"

@@ -7,8 +7,8 @@
 //   grad_A -= Tr[W · dS/dR_A]      (Pulay)
 //   grad_A += Tr[P · dT/dR_A]      (动能)
 //   grad_A += Tr[P · dV/dR_A]      (核吸引)
-// 全矩阵遍历只计算 bra 侧导数，乘以 2 补偿 ket 侧
-// (等价于 PySCF 的 h1ao + h1ao.T 对称化)
+// 每个 AO 对显式分配 bra、ket 和吸引核中心的响应。ket 响应由其余响应
+// 的负和构造，使每个积分贡献在进入全局累加前即满足平移不变性。
 //
 // McMurchie-Davidson 导数公式:
 //   dS(a,b)/dA_x = 2αi·S(a+1,b) - a·S(a-1,b)  [重叠]
@@ -23,6 +23,39 @@
 #define GRAD_R_BASE 10
 #define GRAD_R_IDX(t, u, v, n) \
     ((((t) * GRAD_R_BASE + (u)) * GRAD_R_BASE + (v)) * GRAD_R_BASE + (n))
+
+// Accumulate one integral contribution whose responses belong to the bra
+// centre, ket centre, and attraction centre.  response_b is constructed as
+// -(response_a + response_c), so every primitive contribution is
+// translationally invariant before unrelated floating-point sums are mixed.
+static __device__ __forceinline__ void QC_Accumulate_OneE_Response_Triplet(
+    double* grad, int atom_a, int atom_b, int atom_c, int axis,
+    double response_a, double response_c)
+{
+    const double response_b = -(response_a + response_c);
+    if (atom_a == atom_b)
+    {
+        if (atom_a == atom_c) return;
+        atomicAdd(&grad[atom_a * 3 + axis], -response_c);
+        atomicAdd(&grad[atom_c * 3 + axis], response_c);
+    }
+    else if (atom_a == atom_c)
+    {
+        atomicAdd(&grad[atom_a * 3 + axis], -response_b);
+        atomicAdd(&grad[atom_b * 3 + axis], response_b);
+    }
+    else if (atom_b == atom_c)
+    {
+        atomicAdd(&grad[atom_a * 3 + axis], response_a);
+        atomicAdd(&grad[atom_b * 3 + axis], -response_a);
+    }
+    else
+    {
+        atomicAdd(&grad[atom_a * 3 + axis], response_a);
+        atomicAdd(&grad[atom_b * 3 + axis], response_b);
+        atomicAdd(&grad[atom_c * 3 + axis], response_c);
+    }
+}
 
 static __device__ void compute_r_tensor_1e_grad(float* R, double* F,
                                                 float alpha, float PC[3],
@@ -95,6 +128,7 @@ static __global__ void OneE_ST_Grad_Kernel(
         int ni = (li + 1) * (li + 2) / 2, nj = (lj + 1) * (lj + 2) / 2;
         int off_i = ao_offsets[i_sh], off_j = ao_offsets[j_sh];
         int atom_i = shell_atom[i_sh];
+        int atom_j = shell_atom[j_sh];
         const VECTOR A = centers[i_sh];
         const VECTOR B = centers[j_sh];
         float Ax = A.x, Ay = A.y, Az = A.z;
@@ -155,16 +189,6 @@ static __global__ void OneE_ST_Grad_Kernel(
                         if (lz_i > 0)
                             dsz -= (float)lz_i * res_z[lz_i - 1][lz_j];
 
-                        atomicAdd(&grad[atom_i * 3 + 0],
-                                  -2.0 * (double)w_val *
-                                      (double)(cc * dsx * sy * sz));
-                        atomicAdd(&grad[atom_i * 3 + 1],
-                                  -2.0 * (double)w_val *
-                                      (double)(cc * sx * dsy * sz));
-                        atomicAdd(&grad[atom_i * 3 + 2],
-                                  -2.0 * (double)w_val *
-                                      (double)(cc * sx * sy * dsz));
-
                         // dT/dA
                         auto kin1d = [&](float res[7][7], int la, int lb,
                                          float ai, float bj) -> float
@@ -198,21 +222,38 @@ static __global__ void OneE_ST_Grad_Kernel(
                             dtz -= (float)lz_i *
                                    kin1d(res_z, lz_i - 1, lz_j, ei, ej);
 
-                        atomicAdd(
-                            &grad[atom_i * 3 + 0],
-                            2.0 * (double)p_val *
-                                (double)(cc * (dtx * sy * sz + dsx * ty * sz +
-                                               dsx * sy * tz)));
-                        atomicAdd(
-                            &grad[atom_i * 3 + 1],
-                            2.0 * (double)p_val *
-                                (double)(cc * (tx * dsy * sz + sx * dty * sz +
-                                               sx * dsy * tz)));
-                        atomicAdd(
-                            &grad[atom_i * 3 + 2],
-                            2.0 * (double)p_val *
-                                (double)(cc * (tx * sy * dsz + sx * ty * dsz +
-                                               sx * sy * dtz)));
+                        if (atom_i != atom_j)
+                        {
+                            const double response_a[3] = {
+                                -(double)w_val *
+                                        (double)(cc * dsx * sy * sz) +
+                                    (double)p_val *
+                                        (double)(cc *
+                                                 (dtx * sy * sz +
+                                                  dsx * ty * sz +
+                                                  dsx * sy * tz)),
+                                -(double)w_val *
+                                        (double)(cc * sx * dsy * sz) +
+                                    (double)p_val *
+                                        (double)(cc *
+                                                 (tx * dsy * sz +
+                                                  sx * dty * sz +
+                                                  sx * dsy * tz)),
+                                -(double)w_val *
+                                        (double)(cc * sx * sy * dsz) +
+                                    (double)p_val *
+                                        (double)(cc *
+                                                 (tx * sy * dsz +
+                                                  sx * ty * dsz +
+                                                  sx * sy * dtz))};
+                            for (int axis = 0; axis < 3; ++axis)
+                            {
+                                atomicAdd(&grad[atom_i * 3 + axis],
+                                          response_a[axis]);
+                                atomicAdd(&grad[atom_j * 3 + axis],
+                                          -response_a[axis]);
+                            }
+                        }
                     }
                 }
             }
@@ -243,6 +284,7 @@ static __global__ void OneE_V_Grad_Kernel(
         int ni = (li + 1) * (li + 2) / 2, nj = (lj + 1) * (lj + 2) / 2;
         int off_i = ao_offsets[i_sh], off_j = ao_offsets[j_sh];
         int atom_i = shell_atom[i_sh];
+        int atom_j = shell_atom[j_sh];
         const VECTOR A = centers[i_sh];
         const VECTOR B = centers[j_sh];
         float Ax = A.x, Ay = A.y, Az = A.z;
@@ -432,15 +474,18 @@ static __global__ void OneE_V_Grad_Kernel(
                         dv_dCy *= (double)prefac;
                         dv_dCz *= (double)prefac;
 
-                        atomicAdd(&grad[atom_i * 3 + 0],
-                                  2.0 * (double)p_val * dv_dAx);
-                        atomicAdd(&grad[atom_i * 3 + 1],
-                                  2.0 * (double)p_val * dv_dAy);
-                        atomicAdd(&grad[atom_i * 3 + 2],
-                                  2.0 * (double)p_val * dv_dAz);
-                        atomicAdd(&grad[iat * 3 + 0], (double)p_val * dv_dCx);
-                        atomicAdd(&grad[iat * 3 + 1], (double)p_val * dv_dCy);
-                        atomicAdd(&grad[iat * 3 + 2], (double)p_val * dv_dCz);
+                        QC_Accumulate_OneE_Response_Triplet(
+                            grad, atom_i, atom_j, iat, 0,
+                            (double)p_val * dv_dAx,
+                            (double)p_val * dv_dCx);
+                        QC_Accumulate_OneE_Response_Triplet(
+                            grad, atom_i, atom_j, iat, 1,
+                            (double)p_val * dv_dAy,
+                            (double)p_val * dv_dCy);
+                        QC_Accumulate_OneE_Response_Triplet(
+                            grad, atom_i, atom_j, iat, 2,
+                            (double)p_val * dv_dAz,
+                            (double)p_val * dv_dCz);
                     }
                 }
             }
@@ -448,7 +493,10 @@ static __global__ void OneE_V_Grad_Kernel(
     }
 }
 
-// Legacy combined kernel (kept for CPU path reference)
+// Unused combined kernel kept as a reference for the split device kernels.
+// It follows the same explicit centre-response allocation as the production
+// kernels above so that re-enabling it cannot restore the old bra-times-two
+// cancellation path.
 static __global__ void OneE_Grad_Kernel(
     const int n_tasks, const QC_ONE_E_TASK* tasks, const VECTOR* centers,
     const int* l_list, const float* exps, const float* coeffs,
@@ -470,6 +518,7 @@ static __global__ void OneE_Grad_Kernel(
         int ni = (li + 1) * (li + 2) / 2, nj = (lj + 1) * (lj + 2) / 2;
         int off_i = ao_offsets[i_sh], off_j = ao_offsets[j_sh];
         int atom_i = shell_atom[i_sh];
+        int atom_j = shell_atom[j_sh];
         const VECTOR A = centers[i_sh];
         const VECTOR B = centers[j_sh];
         float Ax = A.x, Ay = A.y, Az = A.z;
@@ -538,14 +587,6 @@ static __global__ void OneE_Grad_Kernel(
                         float ds_dAy = cc * sx * dsy_dAy * sz;
                         float ds_dAz = cc * sx * sy * dsz_dAz;
 
-                        // Pulay: grad -= Tr[W · dS/dR_A] (bra ×2)
-                        atomicAdd(&grad[atom_i * 3 + 0],
-                                  -2.0 * (double)w_val * (double)ds_dAx);
-                        atomicAdd(&grad[atom_i * 3 + 1],
-                                  -2.0 * (double)w_val * (double)ds_dAy);
-                        atomicAdd(&grad[atom_i * 3 + 2],
-                                  -2.0 * (double)w_val * (double)ds_dAz);
-
                         // === dT/dA ===
                         auto kin1d = [&](float res[7][7], int la, int lb,
                                          float ai, float bj) -> float
@@ -592,13 +633,23 @@ static __global__ void OneE_Grad_Kernel(
                             cc * (tx * sy * dsz_dAz + sx * ty * dsz_dAz +
                                   sx * sy * dtz_dAz);
 
-                        // grad += Tr[P · dT/dR_A] (bra ×2)
-                        atomicAdd(&grad[atom_i * 3 + 0],
-                                  2.0 * (double)p_val * (double)dt_dAx);
-                        atomicAdd(&grad[atom_i * 3 + 1],
-                                  2.0 * (double)p_val * (double)dt_dAy);
-                        atomicAdd(&grad[atom_i * 3 + 2],
-                                  2.0 * (double)p_val * (double)dt_dAz);
+                        if (atom_i != atom_j)
+                        {
+                            const double response_a[3] = {
+                                -(double)w_val * (double)ds_dAx +
+                                    (double)p_val * (double)dt_dAx,
+                                -(double)w_val * (double)ds_dAy +
+                                    (double)p_val * (double)dt_dAy,
+                                -(double)w_val * (double)ds_dAz +
+                                    (double)p_val * (double)dt_dAz};
+                            for (int axis = 0; axis < 3; ++axis)
+                            {
+                                atomicAdd(&grad[atom_i * 3 + axis],
+                                          response_a[axis]);
+                                atomicAdd(&grad[atom_j * 3 + axis],
+                                          -response_a[axis]);
+                            }
+                        }
 
                         // === dV/dR_A ===
                         float Ex0[6][6][11], Ey0[6][6][11], Ez0[6][6][11];
@@ -772,20 +823,18 @@ static __global__ void OneE_Grad_Kernel(
                             dv_dCy *= (double)prefac;
                             dv_dCz *= (double)prefac;
 
-                            // V AO 中心导数 (bra ×2)
-                            atomicAdd(&grad[atom_i * 3 + 0],
-                                      2.0 * (double)p_val * dv_dAx);
-                            atomicAdd(&grad[atom_i * 3 + 1],
-                                      2.0 * (double)p_val * dv_dAy);
-                            atomicAdd(&grad[atom_i * 3 + 2],
-                                      2.0 * (double)p_val * dv_dAz);
-                            // V 核中心导数 (全矩阵求和已正确)
-                            atomicAdd(&grad[iat * 3 + 0],
-                                      (double)p_val * dv_dCx);
-                            atomicAdd(&grad[iat * 3 + 1],
-                                      (double)p_val * dv_dCy);
-                            atomicAdd(&grad[iat * 3 + 2],
-                                      (double)p_val * dv_dCz);
+                            QC_Accumulate_OneE_Response_Triplet(
+                                grad, atom_i, atom_j, iat, 0,
+                                (double)p_val * dv_dAx,
+                                (double)p_val * dv_dCx);
+                            QC_Accumulate_OneE_Response_Triplet(
+                                grad, atom_i, atom_j, iat, 1,
+                                (double)p_val * dv_dAy,
+                                (double)p_val * dv_dCy);
+                            QC_Accumulate_OneE_Response_Triplet(
+                                grad, atom_i, atom_j, iat, 2,
+                                (double)p_val * dv_dAz,
+                                (double)p_val * dv_dCz);
                         }
                     }
                 }
@@ -875,7 +924,9 @@ static inline void QC_Build_OneE_Gradient_Spherical_CPU(
     std::vector<float> dS_cart, dT_cart, dV_A_cart, dV_C_cart;
     std::vector<float> sph_buf0, sph_buf1;
     std::vector<float> dS_sph, dT_sph, dV_A_sph, dV_C_sph_one;
+    std::vector<float> dV_C_sph_all;
     std::vector<float> src3;
+    std::vector<double> atom_response((size_t)natm, 0.0);
 
     for (const QC_ONE_E_TASK& sh_idx : tasks)
     {
@@ -1187,6 +1238,21 @@ static inline void QC_Build_OneE_Gradient_Spherical_CPU(
             ni_cart, nj_cart, ni_sph, nj_sph, dV_A_cart, dV_A_sph, sph_buf0,
             sph_buf1);
 
+        const size_t shell_size_sph = (size_t)ni_sph * nj_sph;
+        dV_C_sph_all.assign((size_t)natm * shell_size_sph * 3, 0.0f);
+        for (int iat = 0; iat < natm; iat++)
+        {
+            const float* src_iat =
+                dV_C_cart.data() + (size_t)iat * shell_size_cart * 3;
+            src3.assign(src_iat, src_iat + (size_t)shell_size_cart * 3);
+            QC_Cart2Sph_Shell_OneE_Block3_CPU(
+                cart2sph_mat, nao_sph, off_i_cart, off_j_cart, off_i_sph,
+                off_j_sph, ni_cart, nj_cart, ni_sph, nj_sph, src3,
+                dV_C_sph_one, sph_buf0, sph_buf1);
+            memcpy(dV_C_sph_all.data() + (size_t)iat * shell_size_sph * 3,
+                   dV_C_sph_one.data(), shell_size_sph * 3 * sizeof(float));
+        }
+
         for (int ci = 0; ci < ni_sph; ci++)
         {
             const int p = off_i_sph + ci;
@@ -1207,38 +1273,33 @@ static inline void QC_Build_OneE_Gradient_Spherical_CPU(
                         (double)dT_sph[(size_t)idx * 3 + d] * (double)scale;
                     const double dvA =
                         (double)dV_A_sph[(size_t)idx * 3 + d] * (double)scale;
-                    grad[atom_i * 3 + d] += -2.0 * (double)w_val * ds +
-                                            2.0 * (double)p_val * (dt + dvA);
-                }
-            }
-        }
-
-        for (int iat = 0; iat < natm; iat++)
-        {
-            const float* src_iat =
-                dV_C_cart.data() + (size_t)iat * shell_size_cart * 3;
-            src3.assign(src_iat, src_iat + (size_t)shell_size_cart * 3);
-            QC_Cart2Sph_Shell_OneE_Block3_CPU(
-                cart2sph_mat, nao_sph, off_i_cart, off_j_cart, off_i_sph,
-                off_j_sph, ni_cart, nj_cart, ni_sph, nj_sph, src3, dV_C_sph_one,
-                sph_buf0, sph_buf1);
-            for (int ci = 0; ci < ni_sph; ci++)
-            {
-                const int p = off_i_sph + ci;
-                const float norm_p = norms[p];
-                const int pn = p * nao_sph;
-                for (int cj = 0; cj < nj_sph; cj++)
-                {
-                    const int q = off_j_sph + cj;
-                    const double scale = (double)norm_p * (double)norms[q];
-                    const float p_val = P[pn + q];
-                    const int idx = ci * nj_sph + cj;
-                    for (int d = 0; d < 3; d++)
+                    const double response_a =
+                        -(double)w_val * ds + (double)p_val * (dt + dvA);
+                    std::fill(atom_response.begin(), atom_response.end(), 0.0);
+                    atom_response[(size_t)atom_i] += response_a;
+                    for (int iat = 0; iat < natm; ++iat)
                     {
-                        grad[iat * 3 + d] +=
-                            (double)p_val *
-                            ((double)dV_C_sph_one[(size_t)idx * 3 + d] * scale);
+                        const double dvC =
+                            (double)dV_C_sph_all
+                                [((size_t)iat * shell_size_sph + (size_t)idx) *
+                                     3 +
+                                 d] *
+                            (double)scale;
+                        atom_response[(size_t)iat] += (double)p_val * dvC;
                     }
+
+                    // The ket-centre response is the negative of every other
+                    // response.  Set the ket atom after coincident centres
+                    // have been combined so the published shell contribution
+                    // is translationally invariant by construction.
+                    double other_atoms = 0.0;
+                    for (int iat = 0; iat < natm; ++iat)
+                        if (iat != shell_atom[(size_t)j_sh])
+                            other_atoms += atom_response[(size_t)iat];
+                    atom_response[(size_t)shell_atom[(size_t)j_sh]] =
+                        -other_atoms;
+                    for (int iat = 0; iat < natm; ++iat)
+                        grad[iat * 3 + d] += atom_response[(size_t)iat];
                 }
             }
         }

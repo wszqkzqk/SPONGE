@@ -180,7 +180,7 @@ when the stop step is not zero (%stop_step%)",
 void RESTRAIN_CV::Step_Print(CONTROLLER* controller)
 {
     if (!is_initialized) return;
-    if (CONTROLLER::MPI_size == 1 && CONTROLLER::PM_MPI_size == 1)
+    if (CONTROLLER::MPI_size == 1)
     {
         float ret = 0;
         deviceMemcpy(h_ene, d_ene, sizeof(float) * CV_numbers,
@@ -217,8 +217,8 @@ void RESTRAIN_CV::Step_Print(CONTROLLER* controller)
 }
 
 void RESTRAIN_CV::Restraint(int atom_numbers, VECTOR* crd, LTMatrix3 cell,
-                            LTMatrix3 rcell, int step, float* d_ene,
-                            LTMatrix3* d_virial, VECTOR* frc,
+                            LTMatrix3 rcell, LTMatrix3 reference_cell, int step,
+                            float* d_ene, LTMatrix3* d_virial, VECTOR* frc,
                             int need_potential, int need_pressure)
 {
     if (!is_initialized) return;
@@ -238,7 +238,7 @@ void RESTRAIN_CV::Restraint(int atom_numbers, VECTOR* crd, LTMatrix3 cell,
             local_weight *=
                 (float)(stop_step[i] - step) / (stop_step[i] - reduce_step[i]);
         cv = cv_list[i];
-        cv->Compute(atom_numbers, crd, cell, rcell, need, step);
+        cv->Compute(atom_numbers, crd, cell, rcell, reference_cell, need, step);
         if (!need_pressure)
         {
             Launch_Device_Kernel(

@@ -145,20 +145,9 @@ __global__ void QC_Fock_ssss_Kernel(
                             const float T =
                                 alpha * (PQx * PQx + PQy * PQy + PQz * PQz);
 
-                            // Boys F0 only
-                            const double td = (double)T;
-                            double F0_d;
-                            if (td < 1e-7)
-                                F0_d =
-                                    1.0 - td * (1.0 / 3.0 -
-                                                td * (1.0 / 10.0 - td / 42.0));
-                            else
-                            {
-                                const double st = sqrt(td);
-                                F0_d = 0.5 * 1.7724538509055159 * erf(st) / st;
-                            }
-
-                            eri += n_abcd * (float)F0_d;
+                            double boys[1];
+                            eri_boys(boys, T, 0);
+                            eri += n_abcd * (float)boys[0];
                         }
                     }
                 }

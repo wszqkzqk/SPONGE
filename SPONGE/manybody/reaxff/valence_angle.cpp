@@ -1,6 +1,8 @@
 ﻿#include "valence_angle.h"
 
 #include "bond_order.h"  // for find_bond_index
+#include "reaxff_geometry.h"
+#include "reaxff_input.h"
 
 static __global__ void Calculate_Valence_Angle_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_type,
@@ -15,12 +17,12 @@ static __global__ void Calculate_Valence_Angle_Kernel(
     float* atom_energy, VECTOR* frc, LTMatrix3* atom_virial,
     float* d_energy_ang_sum, float* d_energy_pen_sum, float* d_energy_coa_sum,
     const int* bond_count, const int* bond_offset, const int* bond_nbr,
-    const int* bond_idx_arr)
+    const int* bond_idx_arr, int* geometry_error)
 {
     SIMPLE_DEVICE_FOR(j, atom_numbers)
     {
         int type_j = atom_type[j];
-        if (type_j >= 0)
+        if (type_j >= 0 && type_j < atom_type_numbers)
         {
             VECTOR rj = crd[j];
 
@@ -81,6 +83,13 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                 int b_ij = bond_idx_arr[bo_j + bi];
                 int i = bond_nbr[bo_j + bi];
                 int type_i = atom_type[i];
+                if (type_i < 0 || type_i >= atom_type_numbers)
+                {
+                    Record_ReaxFF_Geometry_Error(
+                        geometry_error, REAXFF_INVALID_ATOM_TYPE, i, j,
+                        type_i, type_j);
+                    continue;
+                }
                 float bo_ij_val = bo_s[b_ij] + bo_pi[b_ij] + bo_pi2[b_ij];
                 float boa_ij_val = bo_ij_val - p.thb_cut;
 
@@ -88,13 +97,19 @@ static __global__ void Calculate_Valence_Angle_Kernel(
 
                 VECTOR ri = crd[i];
                 VECTOR dji = Get_Periodic_Displacement(rj, ri, cell, rcell);
-                float r_ij = norm3df(dji.x, dji.y, dji.z);
 
                 for (int bk = bi + 1; bk < bc_j; bk++)
                 {
                     int b_kj = bond_idx_arr[bo_j + bk];
                     int k = bond_nbr[bo_j + bk];
                     int type_k = atom_type[k];
+                    if (type_k < 0 || type_k >= atom_type_numbers)
+                    {
+                        Record_ReaxFF_Geometry_Error(
+                            geometry_error, REAXFF_INVALID_ATOM_TYPE, i, j, k,
+                            type_k);
+                        continue;
+                    }
                     float bo_jk_val = bo_s[b_kj] + bo_pi[b_kj] + bo_pi2[b_kj];
                     float boa_jk_val = bo_jk_val - p.thb_cut;
 
@@ -103,14 +118,15 @@ static __global__ void Calculate_Valence_Angle_Kernel(
 
                     VECTOR rk = crd[k];
                     VECTOR djk = Get_Periodic_Displacement(rj, rk, cell, rcell);
-                    float r_jk = norm3df(djk.x, djk.y, djk.z);
 
-                    float cos_theta =
-                        (dji.x * djk.x + dji.y * djk.y + dji.z * djk.z) /
-                        (r_ij * r_jk);
-                    if (cos_theta > 1.0f) cos_theta = 1.0f;
-                    if (cos_theta < -1.0f) cos_theta = -1.0f;
-                    float theta = acosf(cos_theta);
+                    REAXFF_ANGLE_GEOMETRY geometry;
+                    if (!Compute_ReaxFF_Angle_Geometry(dji, djk, &geometry))
+                    {
+                        Record_ReaxFF_Geometry_Error(
+                            geometry_error, REAXFF_ANGLE_UNDEFINED, i, j, k);
+                        continue;
+                    }
+                    const float theta = geometry.theta;
 
                     int tri_info_idx = (type_i * atom_type_numbers + type_j) *
                                            atom_type_numbers +
@@ -121,7 +137,10 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                     {
                         const REAXFF_THBP_Entry* param =
                             &thbp_entries[info.start_idx + e];
-                        if (fabsf(param->p_val1) < 0.0001f) continue;
+                        // Exactly zero is the force-field sentinel for an
+                        // inactive three-body entry.  A small nonzero
+                        // coefficient remains a real interaction.
+                        if (param->p_val1 == 0.0f) continue;
 
                         SADfloat<3> s_bo_ij(bo_ij_val, 0);
                         SADfloat<3> s_bo_jk(bo_jk_val, 1);
@@ -151,9 +170,6 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                              param->theta_00 *
                                  (1.0f - expf(-p.p_val10 * (2.0f - SBO2)))) *
                             (CONSTANT_Pi / 180.0f);
-                        float sin_theta = sinf(theta);
-                        if (sin_theta < 1e-5f) sin_theta = 1e-5f;
-
                         float expval2theta =
                             expf(-param->p_val2 * (theta_0 - theta) *
                                  (theta_0 - theta));
@@ -209,6 +225,17 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                         float dE_dtheta = -f7_ij.val * f7_jk.val * f8_Dj.val *
                                           param->p_val1 * expval2theta * 2.0f *
                                           param->p_val2 * (theta_0 - theta);
+                        if (!ReaxFF_Float_Is_Finite(dE_dtheta) ||
+                            !ReaxFF_Float_Is_Finite(s_en_total.val) ||
+                            !ReaxFF_Float_Is_Finite(s_en_ang.val) ||
+                            !ReaxFF_Float_Is_Finite(s_en_pen.val) ||
+                            !ReaxFF_Float_Is_Finite(s_en_coa.val))
+                        {
+                            Record_ReaxFF_Geometry_Error(
+                                geometry_error, REAXFF_ANGLE_NONFINITE, i, j,
+                                k);
+                            continue;
+                        }
                         float Ctheta_0 = p.p_val10 * (CONSTANT_Pi / 180.0f) *
                                          param->theta_00 *
                                          expf(-p.p_val10 * (2.0f - SBO2));
@@ -235,36 +262,69 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                                       dE_dbo_total + CEval5);
                         }
 
-                        float dcos_dtheta = -sin_theta;
-                        float dE_dcos = dE_dtheta / dcos_dtheta;
+                        VECTOR fi = {0.0f, 0.0f, 0.0f};
+                        VECTOR fk = {0.0f, 0.0f, 0.0f};
+                        if (geometry.is_collinear)
+                        {
+                            // At an exact endpoint the Cartesian angle
+                            // derivative is unique only when the angular
+                            // derivative itself is exactly zero.
+                            if (dE_dtheta != 0.0f)
+                            {
+                                Record_ReaxFF_Geometry_Error(
+                                    geometry_error, REAXFF_ANGLE_UNDEFINED, i,
+                                    j, k);
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            fi = {static_cast<float>(
+                                      static_cast<double>(dE_dtheta) *
+                                      geometry.dtheta_du[0]),
+                                  static_cast<float>(
+                                      static_cast<double>(dE_dtheta) *
+                                      geometry.dtheta_du[1]),
+                                  static_cast<float>(
+                                      static_cast<double>(dE_dtheta) *
+                                      geometry.dtheta_du[2])};
+                            fk = {static_cast<float>(
+                                      static_cast<double>(dE_dtheta) *
+                                      geometry.dtheta_dv[0]),
+                                  static_cast<float>(
+                                      static_cast<double>(dE_dtheta) *
+                                      geometry.dtheta_dv[1]),
+                                  static_cast<float>(
+                                      static_cast<double>(dE_dtheta) *
+                                      geometry.dtheta_dv[2])};
+                        }
+                        VECTOR fj = {-(fi.x + fk.x), -(fi.y + fk.y),
+                                     -(fi.z + fk.z)};
+                        if (!ReaxFF_Vector_Is_Finite(fi) ||
+                            !ReaxFF_Vector_Is_Finite(fj) ||
+                            !ReaxFF_Vector_Is_Finite(fk))
+                        {
+                            Record_ReaxFF_Geometry_Error(
+                                geometry_error, REAXFF_ANGLE_NONFINITE, i, j,
+                                k);
+                            continue;
+                        }
 
-                        float inv_rij = 1.0f / r_ij;
-                        float inv_rjk = 1.0f / r_jk;
-
-                        VECTOR fi, fk, fj;
-                        fi.x =
-                            dE_dcos * (djk.x * inv_rij * inv_rjk -
-                                       dji.x * cos_theta * inv_rij * inv_rij);
-                        fi.y =
-                            dE_dcos * (djk.y * inv_rij * inv_rjk -
-                                       dji.y * cos_theta * inv_rij * inv_rij);
-                        fi.z =
-                            dE_dcos * (djk.z * inv_rij * inv_rjk -
-                                       dji.z * cos_theta * inv_rij * inv_rij);
-
-                        fk.x =
-                            dE_dcos * (dji.x * inv_rij * inv_rjk -
-                                       djk.x * cos_theta * inv_rjk * inv_rjk);
-                        fk.y =
-                            dE_dcos * (dji.y * inv_rij * inv_rjk -
-                                       djk.y * cos_theta * inv_rjk * inv_rjk);
-                        fk.z =
-                            dE_dcos * (dji.z * inv_rij * inv_rjk -
-                                       djk.z * cos_theta * inv_rjk * inv_rjk);
-
-                        fj.x = -(fi.x + fk.x);
-                        fj.y = -(fi.y + fk.y);
-                        fj.z = -(fi.z + fk.z);
+                        LTMatrix3 interaction_virial = {0, 0, 0, 0, 0, 0};
+                        if (atom_virial)
+                        {
+                            interaction_virial =
+                                interaction_virial -
+                                Get_Virial_From_Force_Dis(fi, dji) -
+                                Get_Virial_From_Force_Dis(fk, djk);
+                            if (!ReaxFF_Matrix_Is_Finite(interaction_virial))
+                            {
+                                Record_ReaxFF_Geometry_Error(
+                                    geometry_error, REAXFF_ANGLE_NONFINITE, i,
+                                    j, k);
+                                continue;
+                            }
+                        }
 
                         atomicAdd(&frc[i].x, fi.x);
                         atomicAdd(&frc[i].y, fi.y);
@@ -277,10 +337,7 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                         atomicAdd(&frc[k].z, fk.z);
                         if (atom_virial)
                         {
-                            LTMatrix3 v = {0, 0, 0, 0, 0, 0};
-                            v = v - Get_Virial_From_Force_Dis(fi, dji) -
-                                Get_Virial_From_Force_Dis(fk, djk);
-                            atomicAdd(atom_virial + j, v);
+                            atomicAdd(atom_virial + j, interaction_virial);
                         }
 
                         if (atom_energy)
@@ -295,6 +352,11 @@ static __global__ void Calculate_Valence_Angle_Kernel(
                 }
             }
         }
+        else
+        {
+            Record_ReaxFF_Geometry_Error(
+                geometry_error, REAXFF_INVALID_ATOM_TYPE, j, -1, type_j);
+        }
     }
 }
 
@@ -302,14 +364,13 @@ void REAXFF_VALENCE_ANGLE::Initial(CONTROLLER* controller, int atom_numbers,
                                    const char* module_name)
 {
     if (module_name == NULL) module_name = "REAXFF";
-    this->atom_numbers = atom_numbers;
-
     if (!controller->Command_Exist(module_name, "in_file")) return;
 
     controller->printf("START INITIALIZING REAXFF VALENCE ANGLE\n");
-
-    const char* parameter_in_file = controller->Command(module_name, "in_file");
-    const char* type_in_file = controller->Command(module_name, "type_in_file");
+    const char* parameter_in_file =
+        controller->Original_Command(module_name, "in_file");
+    const char* type_in_file =
+        controller->Original_Command(module_name, "type_in_file");
     if (parameter_in_file == NULL || type_in_file == NULL)
     {
         controller->printf(
@@ -317,283 +378,198 @@ void REAXFF_VALENCE_ANGLE::Initial(CONTROLLER* controller, int atom_numbers,
             "files)\n\n");
         return;
     }
-    controller->Step_Print_Initial("REAXFF_ANG", "%14.7e");
-    controller->Step_Print_Initial("REAXFF_PEN", "%14.7e");
-    controller->Step_Print_Initial("REAXFF_COA", "%14.7e");
 
-    FILE* fp;
-    Open_File_Safely(&fp, parameter_in_file, "r");
-    char line[1024];
-    auto throw_bad_format = [&](const char* file_name, const char* reason)
+    REAXFF_INPUT_ERROR input_error;
+    REAXFF_FORCE_FIELD_IR force_field;
+    if (!ReaxFF_Parse_Force_Field_File(parameter_in_file, &force_field,
+                                       &input_error))
     {
-        char error_msg[1024];
-        sprintf(error_msg, "Reason:\n\t%s in file %s\n", reason, file_name);
-        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
-                                       "REAXFF_VALENCE_ANGLE::Initial",
-                                       error_msg);
-    };
-    auto read_line_or_throw =
-        [&](FILE* file, const char* file_name, const char* stage)
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_VALENCE_ANGLE::Initial", "Reason:\n\t%s",
+            reason.c_str());
+        return;
+    }
+    std::vector<int> atom_type;
+    if (!ReaxFF_Parse_Type_File_Path(type_in_file, atom_numbers, force_field,
+                                     &atom_type, NULL, &input_error))
     {
-        if (fgets(line, 1024, file) == NULL)
-        {
-            char reason[512];
-            sprintf(reason, "failed to read %s", stage);
-            throw_bad_format(file_name, reason);
-        }
-    };
+        const std::string reason = input_error.Describe();
+        controller->Throw_Formatted_SPONGE_Error(
+            input_error.kind == REAXFF_INPUT_OPEN_ERROR
+                ? spongeErrorOpenFileFailed
+                : spongeErrorBadFileFormat,
+            "REAXFF_VALENCE_ANGLE::Initial", "Reason:\n\t%s",
+            reason.c_str());
+        return;
+    }
+    if (force_field.general_parameters.size() <= 38)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_VALENCE_ANGLE::Initial",
+            "Reason:\n\tgeneral parameter count is too small for valence "
+            "angle in file %s",
+            parameter_in_file);
+        return;
+    }
 
-    read_line_or_throw(fp, parameter_in_file, "parameter header line 1");
-    read_line_or_throw(fp, parameter_in_file, "general parameter count line");
-    int n_gp = 0;
-    if (sscanf(line, "%d", &n_gp) != 1 || n_gp <= 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of general parameters");
-    }
-    if (n_gp <= 38)
-    {
-        throw_bad_format(
-            parameter_in_file,
-            "general parameter count is too small for valence angle");
-    }
-    std::vector<float> gp(n_gp);
-    for (int i = 0; i < n_gp; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file, "general parameter block");
-        if (sscanf(line, "%f", &gp[i]) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse general parameter at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-    }
-    params.p_coa2 = gp[2];
-    params.p_val6 = gp[14];
-    params.p_val9 = gp[16];
-    params.p_val10 = gp[17];
-    params.p_pen2 = gp[19];
-    params.p_pen3 = gp[20];
-    params.p_pen4 = gp[21];
-    params.p_coa4 = gp[30];
-    params.p_val8 = gp[33];
-    params.p_coa3 = gp[38];
-    // thb_cutoff means the three-body screening cutoff used by angle/torsion
-    // style terms. It is a control parameter, not the bond-order cutoff in
-    // the force-field file.
-    params.thb_cut = 0.001f;
+    REAXFF_VALENCE_ANGLE_PARAMS staged_params = {};
+    staged_params.p_coa2 = force_field.general_parameters[2];
+    staged_params.p_val6 = force_field.general_parameters[14];
+    staged_params.p_val9 = force_field.general_parameters[16];
+    staged_params.p_val10 = force_field.general_parameters[17];
+    staged_params.p_pen2 = force_field.general_parameters[19];
+    staged_params.p_pen3 = force_field.general_parameters[20];
+    staged_params.p_pen4 = force_field.general_parameters[21];
+    staged_params.p_coa4 = force_field.general_parameters[30];
+    staged_params.p_val8 = force_field.general_parameters[33];
+    staged_params.p_coa3 = force_field.general_parameters[38];
+    staged_params.thb_cut = 0.001f;
     if (controller->Command_Exist(module_name, "thb_cutoff"))
     {
-        params.thb_cut = atof(controller->Command(module_name, "thb_cutoff"));
+        controller->Check_Float(
+            module_name, "thb_cutoff", "REAXFF_VALENCE_ANGLE::Initial");
+        staged_params.thb_cut =
+            atof(controller->Command(module_name, "thb_cutoff"));
     }
-    params.thb_cutsq = params.thb_cut * params.thb_cut;
-
-    read_line_or_throw(fp, parameter_in_file, "atom type count line");
-    int n_atom_types = 0;
-    if (sscanf(line, "%d", &n_atom_types) != 1 || n_atom_types <= 0)
+    staged_params.thb_cutsq =
+        staged_params.thb_cut * staged_params.thb_cut;
+    if (!Float_Memory_Is_Finite(&staged_params.thb_cut) ||
+        !Float_Memory_Is_Finite(&staged_params.thb_cutsq) ||
+        staged_params.thb_cut < 0.0f)
     {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of atom types");
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "REAXFF_VALENCE_ANGLE::Initial",
+            "REAXFF.thb_cutoff must be finite and non-negative, but got %g.",
+            staged_params.thb_cut);
+        return;
     }
-    this->atom_type_numbers = n_atom_types;
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 1");
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 2");
-    read_line_or_throw(fp, parameter_in_file, "atom type header line 3");
 
-    Malloc_Safely((void**)&h_p_val3, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_p_val5, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_mass, sizeof(float) * n_atom_types);
-    Malloc_Safely((void**)&h_valency_boc, sizeof(float) * n_atom_types);
+    const int n_atom_types = static_cast<int>(force_field.atom_types.size());
+    int triplet_parameter_count = 0;
+    if (!ReaxFF_Checked_Dense_Table_Count(
+            n_atom_types, 3, 3 * sizeof(REAXFF_THBP_Info),
+            &triplet_parameter_count))
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, "REAXFF_VALENCE_ANGLE::Initial",
+            "Reason:\n\tatom type count %d exceeds the supported three-body "
+            "parameter table extent in file %s",
+            n_atom_types, parameter_in_file);
+        return;
+    }
 
-    std::map<std::string, int> type_map;
+    std::vector<float> p_val3_values(n_atom_types);
+    std::vector<float> p_val5_values(n_atom_types);
+    std::vector<float> mass_values(n_atom_types);
+    std::vector<float> valency_boc_values(n_atom_types);
     for (int i = 0; i < n_atom_types; i++)
     {
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 1");
-        char name[16];
-        float m;
-        if (sscanf(line, "%15s %*f %*f %f %*f %*f %*f %*f %*f", name, &m) != 2)
+        const REAXFF_ATOM_TYPE_IR& atom = force_field.atom_types[i];
+        mass_values[i] = atom.values[0][2];
+        valency_boc_values[i] = atom.values[1][2];
+        p_val3_values[i] = atom.values[3][1];
+        p_val5_values[i] = atom.values[3][4];
+    }
+
+    std::map<int, std::vector<REAXFF_THBP_Entry>> triplet_entries;
+    for (const REAXFF_ANGLE_IR& source : force_field.angles)
+    {
+        REAXFF_THBP_Entry entry;
+        entry.theta_00 = source.values[0];
+        entry.p_val1 = source.values[1];
+        entry.p_val2 = source.values[2];
+        entry.p_coa1 = source.values[3];
+        entry.p_val7 = source.values[4];
+        entry.p_pen1 = source.values[5];
+        entry.p_val4 = source.values[6];
+
+        const int idx1 = source.types[0] - 1;
+        const int idx2 = source.types[1] - 1;
+        const int idx3 = source.types[2] - 1;
+        const int forward =
+            (idx1 * n_atom_types + idx2) * n_atom_types + idx3;
+        triplet_entries[forward].push_back(entry);
+        if (idx1 != idx3)
         {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 1 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        h_mass[i] = m;
-        type_map[name] = i;
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 2");
-        if (sscanf(line, "%*f %*f %f", &h_valency_boc[i]) != 1)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 2 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 3");
-        read_line_or_throw(fp, parameter_in_file, "atom type block line 4");
-        if (sscanf(line, "%*f %f %*f %*f %f", &h_p_val3[i], &h_p_val5[i]) != 2)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse atom type block line 4 at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-    }
-
-    read_line_or_throw(fp, parameter_in_file, "bond parameter count line");
-    int n_bond_params = 0;
-    if (sscanf(line, "%d", &n_bond_params) != 1 || n_bond_params < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of bond parameters");
-    }
-    read_line_or_throw(fp, parameter_in_file, "bond parameter header line");
-    for (int i = 0; i < n_bond_params; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file,
-                           "bond parameter block line 1");
-        read_line_or_throw(fp, parameter_in_file,
-                           "bond parameter block line 2");
-    }
-
-    read_line_or_throw(fp, parameter_in_file, "off-diagonal count line");
-    int n_off = 0;
-    if (sscanf(line, "%d", &n_off) != 1 || n_off < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of off-diagonal parameters");
-    }
-    for (int i = 0; i < n_off; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file,
-                           "off-diagonal parameter entry");
-    }
-
-    read_line_or_throw(fp, parameter_in_file,
-                       "three-body parameter count line");
-    int n_thb = 0;
-    if (sscanf(line, "%d", &n_thb) != 1 || n_thb < 0)
-    {
-        throw_bad_format(parameter_in_file,
-                         "failed to parse number of three-body parameters");
-    }
-
-    std::vector<REAXFF_THBP_Entry> all_entries;
-    std::map<int, std::vector<int>> triplet_to_entries;
-
-    for (int i = 0; i < n_thb; i++)
-    {
-        read_line_or_throw(fp, parameter_in_file, "three-body parameter entry");
-        int t1, t2, t3;
-        float th0, pv1, pv2, pcoa1, pv7, ppen1, pv4;
-        if (sscanf(line, "%d %d %d %f %f %f %f %f %f %f", &t1, &t2, &t3, &th0,
-                   &pv1, &pv2, &pcoa1, &pv7, &ppen1, &pv4) != 10)
-        {
-            char reason[512];
-            sprintf(reason,
-                    "failed to parse three-body parameter entry at index %d",
-                    i + 1);
-            throw_bad_format(parameter_in_file, reason);
-        }
-        int idx1 = t1 - 1;
-        int idx2 = t2 - 1;
-        int idx3 = t3 - 1;
-        if (idx1 >= 0 && idx1 < n_atom_types && idx2 >= 0 &&
-            idx2 < n_atom_types && idx3 >= 0 && idx3 < n_atom_types)
-        {
-            REAXFF_THBP_Entry entry;
-            entry.theta_00 = th0;
-            entry.p_val1 = pv1;
-            entry.p_val2 = pv2;
-            entry.p_coa1 = pcoa1;
-            entry.p_val7 = pv7;
-            entry.p_pen1 = ppen1;
-            entry.p_val4 = pv4;
-
-            int entry_idx = all_entries.size();
-            all_entries.push_back(entry);
-
-            int tri_idx = (idx1 * n_atom_types + idx2) * n_atom_types + idx3;
-            triplet_to_entries[tri_idx].push_back(entry_idx);
-
-            if (idx1 != idx3)
-            {
-                int tri_idx_rev =
-                    (idx3 * n_atom_types + idx2) * n_atom_types + idx1;
-                triplet_to_entries[tri_idx_rev].push_back(entry_idx);
-            }
+            const int reverse =
+                (idx3 * n_atom_types + idx2) * n_atom_types + idx1;
+            triplet_entries[reverse].push_back(entry);
         }
     }
-    fclose(fp);
 
-    Malloc_Safely(
-        (void**)&h_thbp_info,
-        sizeof(REAXFF_THBP_Info) * n_atom_types * n_atom_types * n_atom_types);
-    memset(
-        h_thbp_info, 0,
-        sizeof(REAXFF_THBP_Info) * n_atom_types * n_atom_types * n_atom_types);
-
+    std::vector<REAXFF_THBP_Info> thbp_info(
+        triplet_parameter_count, REAXFF_THBP_Info{0, 0});
     std::vector<REAXFF_THBP_Entry> sorted_entries;
-    for (int i = 0; i < n_atom_types * n_atom_types * n_atom_types; i++)
+    for (const auto& indexed_entries : triplet_entries)
     {
-        if (triplet_to_entries.count(i))
+        if (indexed_entries.first < 0 ||
+            indexed_entries.first >= triplet_parameter_count ||
+            sorted_entries.size() >
+                static_cast<std::size_t>(INT_MAX) -
+                    indexed_entries.second.size())
         {
-            h_thbp_info[i].start_idx = sorted_entries.size();
-            h_thbp_info[i].entry_count = triplet_to_entries[i].size();
-            for (int entry_idx : triplet_to_entries[i])
-            {
-                sorted_entries.push_back(all_entries[entry_idx]);
-            }
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorBadFileFormat, "REAXFF_VALENCE_ANGLE::Initial",
+                "Reason:\n\tthree-body parameter index/count exceeds the "
+                "supported representation in file %s",
+                parameter_in_file);
+            return;
         }
+        REAXFF_THBP_Info& info = thbp_info[indexed_entries.first];
+        info.start_idx = static_cast<int>(sorted_entries.size());
+        info.entry_count =
+            static_cast<int>(indexed_entries.second.size());
+        sorted_entries.insert(sorted_entries.end(),
+                              indexed_entries.second.begin(),
+                              indexed_entries.second.end());
     }
 
-    Malloc_Safely((void**)&h_thbp_entries,
-                  sizeof(REAXFF_THBP_Entry) * sorted_entries.size());
-    for (size_t i = 0; i < sorted_entries.size(); i++)
-        h_thbp_entries[i] = sorted_entries[i];
+    auto allocate_float_copy = [](const std::vector<float>& values)
+    {
+        float* result = NULL;
+        Malloc_Safely((void**)&result, sizeof(float) * values.size());
+        memcpy(result, values.data(), sizeof(float) * values.size());
+        return result;
+    };
+    float* staged_p_val3 = allocate_float_copy(p_val3_values);
+    float* staged_p_val5 = allocate_float_copy(p_val5_values);
+    float* staged_mass = allocate_float_copy(mass_values);
+    float* staged_valency_boc = allocate_float_copy(valency_boc_values);
+    REAXFF_THBP_Info* staged_thbp_info = NULL;
+    REAXFF_THBP_Entry* staged_thbp_entries = NULL;
+    int* staged_atom_type = NULL;
+    Malloc_Safely((void**)&staged_thbp_info,
+                  sizeof(REAXFF_THBP_Info) * thbp_info.size());
+    if (!sorted_entries.empty())
+        Malloc_Safely((void**)&staged_thbp_entries,
+                      sizeof(REAXFF_THBP_Entry) * sorted_entries.size());
+    Malloc_Safely((void**)&staged_atom_type, sizeof(int) * atom_numbers);
+    memcpy(staged_thbp_info, thbp_info.data(),
+           sizeof(REAXFF_THBP_Info) * thbp_info.size());
+    if (!sorted_entries.empty())
+        memcpy(staged_thbp_entries, sorted_entries.data(),
+               sizeof(REAXFF_THBP_Entry) * sorted_entries.size());
+    memcpy(staged_atom_type, atom_type.data(), sizeof(int) * atom_numbers);
 
-    Open_File_Safely(&fp, type_in_file, "r");
-    int check_atom_numbers = 0;
-    read_line_or_throw(fp, type_in_file, "atom number line");
-    if (sscanf(line, "%d", &check_atom_numbers) != 1)
-    {
-        throw_bad_format(type_in_file, "failed to parse atom numbers");
-    }
-    if (check_atom_numbers != atom_numbers)
-    {
-        char reason[512];
-        sprintf(reason, "atom numbers (%d) does not match system (%d)",
-                check_atom_numbers, atom_numbers);
-        throw_bad_format(type_in_file, reason);
-    }
-    Malloc_Safely((void**)&h_atom_type, sizeof(int) * atom_numbers);
-    for (int i = 0; i < atom_numbers; i++)
-    {
-        read_line_or_throw(fp, type_in_file, "atom type entry line");
-        char name[16];
-        if (sscanf(line, "%15s", name) != 1)
-        {
-            char reason[512];
-            sprintf(reason, "failed to parse atom type at index %d", i + 1);
-            throw_bad_format(type_in_file, reason);
-        }
-        auto iter = type_map.find(std::string(name));
-        if (iter == type_map.end())
-        {
-            char reason[512];
-            sprintf(reason, "atom type %s not found in parameter file %s", name,
-                    parameter_in_file);
-            throw_bad_format(type_in_file, reason);
-        }
-        h_atom_type[i] = iter->second;
-    }
-    fclose(fp);
+    this->controller = controller;
+    this->atom_numbers = atom_numbers;
+    this->atom_type_numbers = n_atom_types;
+    params = staged_params;
+    h_p_val3 = staged_p_val3;
+    h_p_val5 = staged_p_val5;
+    h_mass = staged_mass;
+    h_valency_boc = staged_valency_boc;
+    h_thbp_info = staged_thbp_info;
+    h_thbp_entries = staged_thbp_entries;
+    h_atom_type = staged_atom_type;
 
-    Device_Malloc_And_Copy_Safely((void**)&d_atom_type, h_atom_type,
+    Device_Malloc_And_Copy_Safely((void**)&d_atom_type_global, h_atom_type,
                                   sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_atom_type, sizeof(int) * atom_numbers);
     Device_Malloc_And_Copy_Safely((void**)&d_p_val3, h_p_val3,
                                   sizeof(float) * n_atom_types);
     Device_Malloc_And_Copy_Safely((void**)&d_p_val5, h_p_val5,
@@ -604,19 +580,24 @@ void REAXFF_VALENCE_ANGLE::Initial(CONTROLLER* controller, int atom_numbers,
                                   sizeof(float) * n_atom_types);
     Device_Malloc_And_Copy_Safely(
         (void**)&d_thbp_info, h_thbp_info,
-        sizeof(REAXFF_THBP_Info) * n_atom_types * n_atom_types * n_atom_types);
-    Device_Malloc_And_Copy_Safely(
-        (void**)&d_thbp_entries, h_thbp_entries,
-        sizeof(REAXFF_THBP_Entry) * sorted_entries.size());
+        sizeof(REAXFF_THBP_Info) * triplet_parameter_count);
+    if (!sorted_entries.empty())
+        Device_Malloc_And_Copy_Safely(
+            (void**)&d_thbp_entries, h_thbp_entries,
+            sizeof(REAXFF_THBP_Entry) * sorted_entries.size());
 
     Device_Malloc_Safely((void**)&d_energy_ang_sum, sizeof(float));
     Device_Malloc_Safely((void**)&d_energy_pen_sum, sizeof(float));
     Device_Malloc_Safely((void**)&d_energy_coa_sum, sizeof(float));
+    Device_Malloc_Safely((void**)&d_geometry_error,
+                         sizeof(int) * REAXFF_GEOMETRY_ERROR_SIZE);
 
+    controller->Step_Print_Initial("REAXFF_ANG", "%14.7e");
+    controller->Step_Print_Initial("REAXFF_PEN", "%14.7e");
+    controller->Step_Print_Initial("REAXFF_COA", "%14.7e");
     is_initialized = 1;
     controller->printf("END INITIALIZING REAXFF VALENCE ANGLE\n\n");
 }
-
 void REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force(
     int atom_numbers, const VECTOR* crd, VECTOR* frc, const LTMatrix3 cell,
     const LTMatrix3 rcell, const ATOM_GROUP* nl, REAXFF_BOND_ORDER* bo_module,
@@ -633,6 +614,8 @@ void REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force(
     deviceMemset(d_energy_ang_sum, 0, sizeof(float));
     deviceMemset(d_energy_pen_sum, 0, sizeof(float));
     deviceMemset(d_energy_coa_sum, 0, sizeof(float));
+    deviceMemset(d_geometry_error, 0,
+                 sizeof(int) * REAXFF_GEOMETRY_ERROR_SIZE);
 
     Launch_Device_Kernel(
         Calculate_Valence_Angle_Kernel, gridSize, blockSize, 0, NULL,
@@ -644,16 +627,46 @@ void REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force(
         d_dE_dBO_pi2, CdDelta, need_atom_energy ? atom_energy : NULL, frc,
         need_virial ? atom_virial : NULL, d_energy_ang_sum, d_energy_pen_sum,
         d_energy_coa_sum, bo_module->d_bond_count, bo_module->d_bond_offset,
-        bo_module->d_bond_nbr, bo_module->d_bond_idx);
+        bo_module->d_bond_nbr, bo_module->d_bond_idx, d_geometry_error);
+
+    Check_Geometry_Error();
 
 #ifdef USE_GPU
     deviceError_t err = deviceGetLastError();
     if (err != 0)
     {
-        printf("Device Error in Calculate_Valence_Angle_Kernel: %s\n",
-               deviceGetErrorString(err));
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force",
+            "Device failure in ReaxFF valence-angle kernel: %s",
+            deviceGetErrorString(err));
     }
 #endif
+}
+
+void REAXFF_VALENCE_ANGLE::Check_Geometry_Error()
+{
+    int error[REAXFF_GEOMETRY_ERROR_SIZE] = {0, -1, -1, -1, -1};
+    deviceMemcpy(error, d_geometry_error, sizeof(error),
+                 deviceMemcpyDeviceToHost);
+    if (error[0] == REAXFF_GEOMETRY_OK) return;
+    if (error[0] == REAXFF_INVALID_ATOM_TYPE)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown,
+            "REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force",
+            "Invalid ReaxFF atom type in valence-angle evaluation record "
+            "[%d, %d, %d, %d] (valid range is [0, %d)).",
+            error[1], error[2], error[3], error[4], atom_type_numbers);
+        return;
+    }
+    controller->Throw_Formatted_SPONGE_Error(
+        spongeErrorSimulationBreakDown,
+        "REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force",
+        "Reason:\n\tlocal atoms %d %d %d have an undefined zero-arm/"
+        "collinear ReaxFF valence-angle geometry or produce a non-finite/"
+        "unrepresentable angle energy, derivative, force, or virial\n",
+        error[1], error[2], error[3]);
 }
 
 void REAXFF_VALENCE_ANGLE::Step_Print(CONTROLLER* controller)

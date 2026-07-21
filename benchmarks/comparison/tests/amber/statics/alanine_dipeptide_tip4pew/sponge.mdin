@@ -6,7 +6,6 @@ cutoff = 8.0
 solvent_LJ = 1
 amber_parm7 = system.parm7
 amber_rst7 = system.rst7
-virtual_atom_in_file = tip4p_virtual_atom.txt
 frc = frc.dat
 print_pressure = 1
 print_zeroth_frame = 1

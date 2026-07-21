@@ -15,26 +15,26 @@ struct VECTOR_LJ
     VECTOR crd;
     int LJ_type;
     float charge;
+    int global_atom;
     friend __host__ __device__ __forceinline__ int Get_LJ_Type(int a, int b)
     {
-        int y = (b - a);
-        int x = y >> 31;
-        y = (y ^ x) - x;
-        x = b + a;
-        int z = (x + y) >> 1;
-        x = (x - y) >> 1;
-        return (z * (z + 1) >> 1) + x;
+        if (a < 0 || b < 0) return -1;
+        return Get_LJ_Type(static_cast<unsigned int>(a),
+                           static_cast<unsigned int>(b));
     }
     friend __host__ __device__ __forceinline__ int Get_LJ_Type(unsigned int a,
                                                                unsigned int b)
     {
-        int y = (b - a);
-        int x = y >> 31;
-        y = (y ^ x) - x;
-        x = b + a;
-        int z = (x + y) >> 1;
-        x = (x - y) >> 1;
-        return (z * (z + 1) >> 1) + x;
+        // 65,535 types are the largest triangular table whose last index fits
+        // in a signed int.  Use a 64-bit product so every representable table
+        // is supported without signed-overflow UB in host or device code.
+        constexpr unsigned int max_type_index = 65534U;
+        if (a > max_type_index || b > max_type_index) return -1;
+        const unsigned int high = a > b ? a : b;
+        const unsigned int low = a > b ? b : a;
+        const unsigned long long pair =
+            static_cast<unsigned long long>(high) * (high + 1ULL) / 2ULL + low;
+        return static_cast<int>(pair);
     }
     friend __device__ __host__ __forceinline__ VECTOR Get_Periodic_Displacement(
         VECTOR_LJ uvec_a, VECTOR_LJ uvec_b, LTMatrix3 cell, LTMatrix3 rcell)
@@ -89,6 +89,7 @@ struct LENNARD_JONES_INFORMATION
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
+    CONTROLLER* controller = NULL;
 
     // a = LJ_A between atom[i] and atom[j]
     // b = LJ_B between atom[i] and atom[j]
@@ -131,8 +132,16 @@ struct LENNARD_JONES_INFORMATION
     int ghost_numbers = 0;
     VECTOR_LJ* crd_with_LJ_parameters_local =
         NULL;  // 局域原子的坐标，电荷LJ_type打包
+    int* d_pair_overlap_error = NULL;
+    int* d_local_metadata_error = NULL;
+    bool local_metadata_is_ready = false;
     void Get_Local(int* atom_local, int local_atom_numbers,
                    int ghost_numbers);  // 获取局域粒子信息
+    bool Validate_Local_State(const char* error_by, int global_atom_numbers,
+                              int local_atom_numbers, int ghost_numbers,
+                              int solvent_numbers);
+    void Reset_Pair_Overlap_Error();
+    bool Check_Pair_Overlap_Error(const char* error_by);
 
     // 可以根据外界传入的need_atom_energy和need_virial，选择性计算能量和维里。其中的维里对PME直接部分计算的原子能量，在和PME其他部分加和后即维里。
     void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(

@@ -24,7 +24,7 @@ struct MD_INFORMATION
     // sponge输入初始化
     void Initial(CONTROLLER* controller);
 
-    char md_name[CHAR_LENGTH_MAX];
+    std::string md_name;
     int mode = 0;  // md的模式(-2：NPT重跑，-1: 最小化, 0: NVE, 1: NVT, 2: NPT)
     enum MD_MODE
     {
@@ -94,7 +94,7 @@ struct MD_INFORMATION
     void Sum_Force_Pressure_And_Potential_If_Needed();
 
     // 计算总张力
-    void Get_pressure(CONTROLLER* controller, float dd_atom_numbers,
+    void Get_pressure(CONTROLLER* controller, int dd_atom_numbers,
                       VECTOR* dd_vel, float* dd_d_mass, LTMatrix3* dd_d_virial,
                       deviceStream_t stream);
     // 将坐标和速度放缩

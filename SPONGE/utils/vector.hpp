@@ -272,6 +272,17 @@ struct LTMatrix3
     {
     }
 
+    // A completely zero cell is the explicit direct-space boundary mode.
+    // Test it before forming fractional coordinates: a finite displacement
+    // times a finite reciprocal reference cell can overflow, and multiplying
+    // the resulting infinity by a zero cell would incorrectly turn an exact
+    // NOPBC displacement into NaN.
+    __host__ __device__ __forceinline__ bool Is_Direct_Boundary() const
+    {
+        return a11 == 0.0f && a21 == 0.0f && a22 == 0.0f && a31 == 0.0f &&
+               a32 == 0.0f && a33 == 0.0f;
+    }
+
     __host__ __device__ __forceinline__ LTMatrix3& operator=(float v)
     {
         a11 = a21 = a22 = a31 = a32 = a33 = v;
@@ -323,6 +334,7 @@ struct LTMatrix3
         VECTOR a, VECTOR b, LTMatrix3 cell, LTMatrix3 rcell)
     {
         VECTOR dr = a - b;
+        if (cell.Is_Direct_Boundary()) return dr;
         return dr - floorf(dr * rcell + 0.5f) * cell;
     }
 
@@ -330,6 +342,7 @@ struct LTMatrix3
     Get_Periodic_Coordinate(VECTOR a, LTMatrix3 cell, LTMatrix3 rcell)
     {
         VECTOR dr = a;
+        if (cell.Is_Direct_Boundary()) return dr;
         return dr - floorf(dr * rcell) * cell;
     }
 
@@ -369,13 +382,13 @@ struct LTMatrix3
     friend __device__ __host__ __forceinline__ LTMatrix3 inv(LTMatrix3 mat)
     {
         LTMatrix3 invmat;
-        invmat.a33 = 1.0f / mat.a33;
-        invmat.a32 = -mat.a32 * invmat.a33 / mat.a22;
-        invmat.a31 = (mat.a32 * mat.a21 * invmat.a33 - mat.a31 * mat.a22) /
-                     (mat.a11 * mat.a22 * mat.a33);
-        invmat.a22 = 1.0f / mat.a22;
-        invmat.a21 = -mat.a21 * invmat.a22 / mat.a11;
         invmat.a11 = 1.0f / mat.a11;
+        invmat.a22 = 1.0f / mat.a22;
+        invmat.a33 = 1.0f / mat.a33;
+        invmat.a21 = -mat.a21 * invmat.a11 * invmat.a22;
+        invmat.a32 = -mat.a32 * invmat.a22 * invmat.a33;
+        invmat.a31 =
+            -(mat.a31 * invmat.a11 + mat.a32 * invmat.a21) * invmat.a33;
         return invmat;
     }
 };

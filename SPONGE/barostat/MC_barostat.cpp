@@ -4,6 +4,29 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
 {
     if (CONTROLLER::MPI_rank == 0)
     {
+        if (!Float_Memory_Is_Finite(&dt) || !(dt > 0.0f))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorSimulationBreakDown,
+                "MC_BAROSTAT_INFORMATION::Volume_Change_Attempt",
+                "Reason:\n\tthe MC barostat timestep must be finite and "
+                "positive\n");
+        }
+        const float box_components[3] = {boxlength.x, boxlength.y, boxlength.z};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            if (!Float_Memory_Is_Finite(box_components + axis) ||
+                !(box_components[axis] > 0.0f) ||
+                !Float_Memory_Is_Finite(Delta_Box_Length_Max + axis) ||
+                Delta_Box_Length_Max[axis] < 0.0f)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorSimulationBreakDown,
+                    "MC_BAROSTAT_INFORMATION::Volume_Change_Attempt",
+                    "Reason:\n\tinvalid MC box/proposal extent on axis %d\n",
+                    axis);
+            }
+        }
         double nrand = ((double)2.0 * rand() / RAND_MAX - 1.0);
 
         Delta_Box_Length = {0.0f, 0.0f, 0.0f};
@@ -81,6 +104,21 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
         }
 
         New_Box_Length = boxlength + Delta_Box_Length;
+        const float new_box_components[3] = {New_Box_Length.x, New_Box_Length.y,
+                                             New_Box_Length.z};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            if (!Float_Memory_Is_Finite(new_box_components + axis) ||
+                !(new_box_components[axis] > 0.0f))
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorSimulationBreakDown,
+                    "MC_BAROSTAT_INFORMATION::Volume_Change_Attempt",
+                    "Reason:\n\tthe proposed MC box length on axis %d is "
+                    "non-finite or non-positive\n",
+                    axis);
+            }
+        }
         DeltaS = 0.0f;
         switch (couple_dimension)
         {
@@ -114,6 +152,16 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
         newV = New_Box_Length.x * New_Box_Length.y * New_Box_Length.z;
         DeltaV = newV - V;
         VDevided = newV / V;
+        if (!isfinite(V) || !(V > 0.0) || !Float_Memory_Is_Finite(&newV) ||
+            !(newV > 0.0f) || !isfinite(DeltaV) || !isfinite(VDevided) ||
+            !(VDevided > 0.0))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorSimulationBreakDown,
+                "MC_BAROSTAT_INFORMATION::Volume_Change_Attempt",
+                "Reason:\n\tthe proposed MC volume or volume ratio is "
+                "invalid\n");
+        }
         VECTOR crd_scale_factor = New_Box_Length / boxlength;
         g = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         g.a11 = (crd_scale_factor.x - 1.0f) / dt;
@@ -125,26 +173,53 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
 #endif
 }
 
+bool MC_BAROSTAT_INFORMATION::Will_Attempt(int steps) const
+{
+    return is_initialized && update_interval > 0 && steps >= 0 &&
+           steps % update_interval == 0;
+}
+
+LTMatrix3 MC_BAROSTAT_INFORMATION::Get_Exact_Reverse_G(float dt) const
+{
+    LTMatrix3 reverse = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    const float forward[3] = {g.a11, g.a22, g.a33};
+    float* reverse_data[3] = {&reverse.a11, &reverse.a22, &reverse.a33};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const double scale =
+            1.0 + static_cast<double>(dt) * static_cast<double>(forward[axis]);
+        const double value = -static_cast<double>(forward[axis]) / scale;
+        const float stored = static_cast<float>(value);
+        if (!isfinite(scale) || !(scale > 0.0) || !isfinite(value) ||
+            !Float_Memory_Is_Finite(&stored))
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorSimulationBreakDown,
+                "MC_BAROSTAT_INFORMATION::Get_Exact_Reverse_G",
+                "Reason:\n\tthe MC box scaling on axis %d has no finite "
+                "positive inverse\n",
+                axis);
+        }
+        *reverse_data[axis] = stored;
+    }
+    return reverse;
+}
+
 int MC_BAROSTAT_INFORMATION::Check_MC_Barostat_Accept()
 {
-    total_count[xyz] += 1;
-    float tmp_rand;
     if (CONTROLLER::MPI_rank == 0)
     {
-        tmp_rand = (float)rand() / RAND_MAX;
+        total_count[xyz] += 1;
+        const float tmp_rand = (float)rand() / RAND_MAX;
+        accept = tmp_rand < accept_possibility;
+        if (accept)
+        {
+            accep_count[xyz] += 1;
+        }
     }
 #ifdef USE_MPI
-    MPI_Bcast(&tmp_rand, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&accept, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
-    if (tmp_rand < accept_possibility)  // 接受
-    {
-        accept = 1;
-        accep_count[xyz] += 1;
-    }
-    else
-    {
-        accept = 0;
-    }
     return accept;
 }
 
@@ -152,6 +227,7 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                                       float target_pressure, VECTOR boxlength,
                                       LTMatrix3 cell, const char* module_name)
 {
+    this->controller = controller;
     controller->printf("START INITIALIZING MC BAROSTAT:\n");
     if (module_name == NULL)
     {
@@ -160,6 +236,26 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     else
     {
         strcpy(this->module_name, module_name);
+    }
+    if (!Float_Memory_Is_Finite(&target_pressure))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tthe MC barostat target pressure must be finite\n");
+    }
+    const float box_components[3] = {boxlength.x, boxlength.y, boxlength.z};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (!Float_Memory_Is_Finite(box_components + axis) ||
+            !(box_components[axis] > 0.0f))
+        {
+            controller->Throw_Formatted_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MC_BAROSTAT_INFORMATION::Initial",
+                "Reason:\n\tthe MC barostat box length on axis %d must be "
+                "finite and positive\n",
+                axis);
+        }
     }
     if (cell.a21 != 0.0f || cell.a31 != 0.0f || cell.a32 != 0.0f)
     {
@@ -176,6 +272,14 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                                 "MC_BAROSTAT_INFORMATION::Initial");
         mc_baro_initial_ratio =
             atof(controller[0].Command(this->module_name, "initial_ratio"));
+    }
+    if (!Float_Memory_Is_Finite(&mc_baro_initial_ratio) ||
+        mc_baro_initial_ratio < 0.0f || mc_baro_initial_ratio >= 1.0f)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tmonte_carlo_barostat_initial_ratio must be finite "
+            "and in [0, 1)\n");
     }
     Delta_Box_Length_Max[0] = mc_baro_initial_ratio * boxlength.x;
     Delta_Box_Length_Max[1] = mc_baro_initial_ratio * boxlength.y;
@@ -194,6 +298,13 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
         update_interval =
             atoi(controller[0].Command(this->module_name, "update_interval"));
     }
+    if (update_interval <= 0)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tmonte_carlo_barostat_update_interval must be "
+            "positive\n");
+    }
     controller->printf("    The update_interval is %d\n", update_interval);
 
     check_interval = 10;
@@ -203,6 +314,13 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                               "MC_BAROSTAT_INFORMATION::Initial");
         check_interval =
             atoi(controller[0].Command(this->module_name, "check_interval"));
+    }
+    if (check_interval <= 0)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tmonte_carlo_barostat_check_interval must be "
+            "positive\n");
     }
     controller->printf("    The check_interval is %d\n", check_interval);
 
@@ -214,6 +332,14 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
         accept_rate_low =
             atof(controller[0].Command(this->module_name, "accept_rate_low"));
     }
+    if (!Float_Memory_Is_Finite(&accept_rate_low) || accept_rate_low < 0.0f ||
+        accept_rate_low > 100.0f)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tmonte_carlo_barostat_accept_rate_low must be finite "
+            "and in [0, 100]\n");
+    }
     controller->printf("    The lowest accept rate is %.2f%%\n",
                        accept_rate_low);
 
@@ -224,6 +350,14 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                                 "MC_BAROSTAT_INFORMATION::Initial");
         accept_rate_high =
             atof(controller[0].Command(this->module_name, "accept_rate_high"));
+    }
+    if (!Float_Memory_Is_Finite(&accept_rate_high) ||
+        accept_rate_high < accept_rate_low || accept_rate_high > 100.0f)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tmonte_carlo_barostat_accept_rate_high must be finite, "
+            "at least accept_rate_low, and at most 100\n");
     }
     controller->printf("    The highest accept rate is %.2f%%\n",
                        accept_rate_high);
@@ -254,6 +388,13 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     {
         couple_dimension = YZ;
     }
+    else
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "MC_BAROSTAT_INFORMATION::Initial",
+            "Reason:\n\tmonte_carlo_barostat_couple_dimension must be one of "
+            "NO, XY, XZ, YZ, or XYZ\n");
+    }
     if (!controller->Command_Exist(this->module_name, "couple_dimension"))
         controller->printf("    The couple dimension is %s (index %d)\n", "XYZ",
                            couple_dimension);
@@ -264,22 +405,26 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
             couple_dimension);
     if (controller->Command_Exist(this->module_name, "only_direction"))
     {
+        bool direction_is_valid = false;
         if (couple_dimension == NO)
         {
             if (controller->Command_Choice(this->module_name, "only_direction",
                                            "x"))
             {
                 only_direction = 1;
+                direction_is_valid = true;
             }
             else if (controller->Command_Choice(this->module_name,
                                                 "only_direction", "y"))
             {
                 only_direction = 2;
+                direction_is_valid = true;
             }
             else if (controller->Command_Choice(this->module_name,
                                                 "only_direction", "z"))
             {
                 only_direction = 3;
+                direction_is_valid = true;
             }
         }
         else if (couple_dimension == XYZ)
@@ -287,7 +432,7 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
             controller->Throw_SPONGE_Error(
                 spongeErrorValueErrorCommand,
                 "MC_BAROSTAT_INFORMATION::Initial",
-                "Reason:\n\tonly_dimension is not valid for isotropic pressure "
+                "Reason:\n\tonly_direction is not valid for isotropic pressure "
                 "regulation\n");
         }
         else if (couple_dimension == XY)
@@ -296,11 +441,13 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                                            "z"))
             {
                 only_direction = 1;
+                direction_is_valid = true;
             }
             else if (controller->Command_Choice(this->module_name,
                                                 "only_direction", "xy"))
             {
                 only_direction = 2;
+                direction_is_valid = true;
             }
         }
         else if (couple_dimension == XZ)
@@ -309,11 +456,13 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                                            "y"))
             {
                 only_direction = 1;
+                direction_is_valid = true;
             }
             else if (controller->Command_Choice(this->module_name,
                                                 "only_direction", "xz"))
             {
                 only_direction = 2;
+                direction_is_valid = true;
             }
         }
         else if (couple_dimension == YZ)
@@ -322,12 +471,22 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                                            "x"))
             {
                 only_direction = 1;
+                direction_is_valid = true;
             }
             else if (controller->Command_Choice(this->module_name,
                                                 "only_direction", "yz"))
             {
                 only_direction = 2;
+                direction_is_valid = true;
             }
+        }
+        if (!direction_is_valid && couple_dimension != XYZ)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MC_BAROSTAT_INFORMATION::Initial",
+                "Reason:\n\tmonte_carlo_barostat_only_direction is invalid "
+                "for the selected coupling mode\n");
         }
     }
     if (couple_dimension != NO && couple_dimension != XYZ)
@@ -340,6 +499,14 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
             surface_number =
                 atoi(controller->Command(this->module_name, "surface_number"));
         }
+        if (surface_number < 0)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MC_BAROSTAT_INFORMATION::Initial",
+                "Reason:\n\tmonte_carlo_barostat_surface_number must be "
+                "non-negative\n");
+        }
         surface_tension = 0.0f;
         if (controller->Command_Exist(this->module_name, "surface_tension"))
         {
@@ -348,13 +515,20 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
             surface_tension =
                 atof(controller->Command(this->module_name, "surface_tension"));
         }
+        if (!Float_Memory_Is_Finite(&surface_tension))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MC_BAROSTAT_INFORMATION::Initial",
+                "Reason:\n\tmonte_carlo_barostat_surface_tension must be "
+                "finite\n");
+        }
         surface_tension *= TENSION_UNIT_FACTOR;
         controller->printf("        The surface number is %d\n",
                            surface_number);
         controller->printf("        The surface tension is %f\n",
                            surface_tension);
     }
-    Device_Malloc_Safely((void**)&frc_backup, sizeof(VECTOR) * atom_numbers);
     Device_Malloc_Safely((void**)&crd_backup, sizeof(VECTOR) * atom_numbers);
     is_initialized = 1;
     if (is_initialized && !is_controller_printf_initialized)
@@ -369,6 +543,7 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
 
 void MC_BAROSTAT_INFORMATION::Delta_Box_Length_Max_Update()
 {
+    if (CONTROLLER::MPI_rank != 0) return;
     if (total_count[xyz] % check_interval == 0)
     {
         accept_rate[xyz] = 100.0 * accep_count[xyz] / total_count[xyz];

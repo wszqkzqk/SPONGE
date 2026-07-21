@@ -151,31 +151,11 @@ __global__ void KERNEL_NAME(
                             const float T =
                                 alpha * (PQx * PQx + PQy * PQy + PQz * PQz);
 
-                            // Boys F0, F1
-                            float F0, m2a_F1;
-                            {
-                                const double td = (double)T;
-                                double F0_d, F1_d;
-                                if (td < 1e-7)
-                                {
-                                    F0_d = 1.0 -
-                                           td * (1.0 / 3.0 -
-                                                 td * (1.0 / 10.0 - td / 42.0));
-                                    F1_d = (1.0 / 3.0) -
-                                           td * (1.0 / 5.0 -
-                                                 td * (1.0 / 14.0 - td / 54.0));
-                                }
-                                else
-                                {
-                                    const double exp_t = exp(-td);
-                                    const double st = sqrt(td);
-                                    F0_d =
-                                        0.5 * 1.7724538509055159 * erf(st) / st;
-                                    F1_d = (F0_d - exp_t) / (2.0 * td);
-                                }
-                                F0 = (float)F0_d;
-                                m2a_F1 = (float)(-2.0 * (double)alpha * F1_d);
-                            }
+                            double boys[2];
+                            eri_boys(boys, T, 1);
+                            const float F0 = (float)boys[0];
+                            const float m2a_F1 =
+                                (float)(-2.0 * (double)alpha * boys[1]);
 
                             // Shift and rcoeff — P_POS is compile-time constant
 #if P_POS == 0

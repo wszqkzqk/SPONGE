@@ -6,8 +6,18 @@
 
 struct NEIGHBOR_LIST
 {
+    enum UPDATE_ERROR
+    {
+        UPDATE_OK = 0,
+        UPDATE_INVALID_GEOMETRY = 1
+    };
+
     bool is_initialized = 0;
     bool throw_error_when_overflow = 0;
+    int active_local_atom_numbers = 0;
+    int last_update_error = UPDATE_OK;
+    int last_error_atom = -1;
+    int* d_update_error = NULL;
 
     // 是否需要构建半近邻表（默认需要）
     bool is_needed_half = true;
@@ -16,17 +26,24 @@ struct NEIGHBOR_LIST
 
     void Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
                  float skin, LTMatrix3 cell, LTMatrix3 rcell);
-    void Update(int* atom_local, int local_atom_numbers, int ghost_numbers,
+    bool Update(int* atom_local, int local_atom_numbers, int ghost_numbers,
                 VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell, int step,
                 int update, int* excluded_list_start = NULL,
                 int* excluded_list = NULL,
                 int* excluded_numbers = NULL);  // 这里用NULL先不考虑排除表
-    void Check_Overflow(CONTROLLER* controller, int steps, const LTMatrix3 cell,
-                        const LTMatrix3 rcell, LTMatrix3* cell0);
+    // Build a complete list before returning.  If a grid, half-list, or
+    // full-list capacity is exceeded, grow the affected storage and retry the
+    // same state instead of allowing force kernels to consume a truncated
+    // list.  The return value reports whether any exported buffer was rebound.
+    bool Update_With_Overflow_Recovery(
+        CONTROLLER* controller, int* atom_local, int local_atom_numbers,
+        int ghost_numbers, VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell,
+        int step, int update, int* excluded_list_start = NULL,
+        int* excluded_list = NULL, int* excluded_numbers = NULL);
     void Clear();
 
-    float cutoff;
-    float skin;
+    float cutoff = 0.0f;
+    float skin = 0.0f;
 
     // local的粒子数目
     int atom_numbers = 0;
@@ -39,15 +56,15 @@ struct NEIGHBOR_LIST
     // 当前区域的box_length，dom_box_length=max_corner-min_corner
     VECTOR dom_box_length;
     // 近邻表
-    int* d_temp;
+    int* d_temp = NULL;
     ATOM_GROUP *h_nl = NULL, *d_nl = NULL;
     // 每个原子的最大近邻数
-    int max_neighbor_numbers;
-    // 检查溢出的间隔
-    int check_overflow_interval = 100;
+    int max_neighbor_numbers = 0;
     // 每个格子的最大原子数
     int max_atom_in_grid_numbers = 0;
     // 每个原子的近邻数溢出
+    // Zero means that the current build fit.  A positive value is the minimum
+    // capacity required by at least one row/grid in the rejected build.
     int h_neighbor_list_overflow = 0, *d_neighbor_list_overflow = NULL;
     // 每个格子的原子数溢出
     int h_neighbor_grid_overflow = 0, *d_neighbor_grid_overflow = NULL;
@@ -61,9 +78,9 @@ struct NEIGHBOR_LIST
     struct GRIDS
     {
         // 总的格点数
-        int grid_numbers;
+        int grid_numbers = 0;
         // 格点在三个方向的数量
-        int Nx, Ny, Nz;
+        int Nx = 0, Ny = 0, Nz = 0;
         // 每个格点的周围格点数目
         int *h_neighbor_grid_numbers = NULL, *d_neighbor_grid_numbers = NULL;
         // 每个格点的周围格点
@@ -81,7 +98,7 @@ struct NEIGHBOR_LIST
         // 每个格点内ghost的坐标
         VECTOR* d_grid_ghost_crd = NULL;
         // 初始化格点信息
-        void Initial(CONTROLLER* controller, int max_atom_in_grid_numbers,
+        bool Initial(CONTROLLER* controller, int max_atom_in_grid_numbers,
                      int max_ghost_in_grid_numbers, LTMatrix3 cell,
                      LTMatrix3 rcell, float grid_length);
         // 释放内存
@@ -90,16 +107,16 @@ struct NEIGHBOR_LIST
 
     struct UPDATOR
     {
-        TIME_RECORDER* time_recorder;
+        TIME_RECORDER* time_recorder = NULL;
         // 更新间隔
-        int refresh_interval;
+        int refresh_interval = 0;
         // 是否需要更新
         int h_need_update = 0, *d_need_update = NULL;
         // 当某原子移动若干距离以后更新
         float skin_permit = 0.5;
         // 上次更新的坐标，用于判断是否需要更新
         VECTOR* old_crd = NULL;
-        void Initial(CONTROLLER* controller, int atom_numbers);
+        bool Initial(CONTROLLER* controller, int atom_numbers);
         void Check(int atom_numbers, float skin, VECTOR* crd, LTMatrix3 cell,
                    LTMatrix3 rcell);
         void Update(int* atom_local, int local_atom_numbers, int ghost_numbers,
@@ -108,9 +125,9 @@ struct NEIGHBOR_LIST
                     int max_ghost_in_grid_numbers, int max_neighbor_numbers,
                     float grid_length, int* d_neighbor_grid_overflow,
                     int* d_neighbor_grid_ghost_overflow,
-                    int* d_neighbor_list_overflow, ATOM_GROUP* d_nl,
-                    int* excluded_list_start = NULL, int* excluded_list = NULL,
-                    int* excluded_numbers = NULL);
+                    int* d_neighbor_list_overflow, int* d_update_error,
+                    ATOM_GROUP* d_nl, int* excluded_list_start = NULL,
+                    int* excluded_list = NULL, int* excluded_numbers = NULL);
         void Clear();
     } updator;
 

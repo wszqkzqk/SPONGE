@@ -10,7 +10,8 @@ struct CV_POSITION : public COLLECTIVE_VARIABLE_PROTOTYPE
     void Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
                  const char* module_name);
     void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                 const LTMatrix3 rcell, int need, int step);
+                 const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                 int need, int step);
 };
 
 struct CV_BOX_LENGTH : public COLLECTIVE_VARIABLE_PROTOTYPE
@@ -18,7 +19,8 @@ struct CV_BOX_LENGTH : public COLLECTIVE_VARIABLE_PROTOTYPE
     void Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
                  const char* module_name);
     void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                 const LTMatrix3 rcell, int need, int step);
+                 const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                 int need, int step);
 };
 
 struct CV_DISTANCE : public COLLECTIVE_VARIABLE_PROTOTYPE
@@ -27,7 +29,8 @@ struct CV_DISTANCE : public COLLECTIVE_VARIABLE_PROTOTYPE
     void Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
                  const char* module_name);
     void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                 const LTMatrix3 rcell, int need, int step);
+                 const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                 int need, int step);
 };
 
 struct CV_ANGLE : public COLLECTIVE_VARIABLE_PROTOTYPE
@@ -36,7 +39,8 @@ struct CV_ANGLE : public COLLECTIVE_VARIABLE_PROTOTYPE
     void Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
                  const char* module_name);
     void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                 const LTMatrix3 rcell, int need, int step);
+                 const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                 int need, int step);
 };
 
 struct CV_DIHEDRAL : public COLLECTIVE_VARIABLE_PROTOTYPE
@@ -45,7 +49,8 @@ struct CV_DIHEDRAL : public COLLECTIVE_VARIABLE_PROTOTYPE
     void Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
                  const char* module_name);
     void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                 const LTMatrix3 rcell, int need, int step);
+                 const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                 int need, int step);
 };
 
 #endif  //

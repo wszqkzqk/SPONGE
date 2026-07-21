@@ -98,6 +98,8 @@ struct LJSoftCore
     std::vector<int> atom_LJ_type_A;
     std::vector<int> atom_LJ_type_B;
     std::vector<int> subsystem_division;
+    std::vector<float> charge_A;
+    std::vector<float> charge_B;
 };
 
 struct GeneralizedBorn

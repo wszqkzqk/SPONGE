@@ -195,6 +195,7 @@ std::string NodeValueToString(const DecodeNode& node,
 
 bool FlattenTable(const DecodeTable& table, const std::string& prefix,
                   std::map<std::string, std::string>* parsed_commands,
+                  std::set<std::string>* scalar_string_keys,
                   std::string* error_message)
 {
     for (const auto& [key, value] : table)
@@ -204,6 +205,7 @@ bool FlattenTable(const DecodeTable& table, const std::string& prefix,
             const std::string next_prefix =
                 prefix.empty() ? key : prefix + "_" + key;
             if (!FlattenTable(*nested, next_prefix, parsed_commands,
+                              scalar_string_keys,
                               error_message))
             {
                 return false;
@@ -219,6 +221,10 @@ bool FlattenTable(const DecodeTable& table, const std::string& prefix,
             return false;
         }
         (*parsed_commands)[full_key] = value_str;
+        if (value.as_string() != nullptr)
+        {
+            scalar_string_keys->insert(full_key);
+        }
     }
     return true;
 }
@@ -226,20 +232,24 @@ bool FlattenTable(const DecodeTable& table, const std::string& prefix,
 
 bool ParseAndFlatten(const std::string& content, const std::string& source_path,
                      std::map<std::string, std::string>* parsed_commands,
+                     std::set<std::string>* scalar_string_keys,
                      std::string* error_message)
 {
-    if (parsed_commands == nullptr || error_message == nullptr)
+    if (parsed_commands == nullptr || scalar_string_keys == nullptr ||
+        error_message == nullptr)
     {
         return false;
     }
     parsed_commands->clear();
+    scalar_string_keys->clear();
     error_message->clear();
 
     try
     {
         const auto config = sponge::toml_decode::detail::parse_toml_string(
             content, source_path);
-        return FlattenTable(config, "", parsed_commands, error_message);
+        return FlattenTable(config, "", parsed_commands, scalar_string_keys,
+                            error_message);
     }
     catch (const std::exception& err)
     {

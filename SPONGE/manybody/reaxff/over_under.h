@@ -50,6 +50,8 @@ struct REAXFF_OVER_UNDER
     float* d_De_s = NULL;
 
     int* h_atom_type = NULL;
+    // Immutable input-order table. d_atom_type is the current DD-local view.
+    int* d_atom_type_global = NULL;
     int* d_atom_type = NULL;
 
     // Intermediate variables (Device)

@@ -372,7 +372,8 @@ void CV_RMSD::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
 }
 
 void CV_RMSD::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
-                      const LTMatrix3 rcell, int need, int step)
+                      const LTMatrix3 rcell, const LTMatrix3 reference_cell,
+                      int need, int step)
 {
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need)

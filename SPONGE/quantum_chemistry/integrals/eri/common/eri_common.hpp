@@ -7,50 +7,18 @@
 // c ----
 static __device__ __forceinline__ int eri_get_l_axis(int l, int c, int axis)
 {
-    if (l == 0) return 0;
-    if (l == 1) return (c == axis) ? 1 : 0;
-    // l >= 2: use device constant lookup tables
-    const int offset = QC_Comp_Offset(l);
-    if (axis == 0) return QC_COMP_LX_DEVICE[offset + c];
-    if (axis == 1) return QC_COMP_LY_DEVICE[offset + c];
-    return QC_COMP_LZ_DEVICE[offset + c];
+    int lx, ly, lz;
+    QC_Get_Lxyz_Device(l, c, lx, ly, lz);
+    if (axis == 0) return lx;
+    if (axis == 1) return ly;
+    return lz;
 }
 
-// Boys function for max_m up to ~8
-// Uses upward recursion for max_m <= 4 (fast, register-only).
-// Uses downward recursion for max_m > 4 (stable, needs small work array).
+// ERI wrapper around the error-controlled Boys implementation shared by the
+// one-electron and RI integral paths.
 static __device__ __forceinline__ void eri_boys(double* F, float T, int max_m)
 {
-    const double td = (double)T;
-    if (td < 1e-15)
-    {
-        for (int m = 0; m <= max_m; m++) F[m] = 1.0 / (2.0 * m + 1.0);
-        return;
-    }
-    const double exp_t = exp(-td);
-    const double st = sqrt(td);
-    const double f0 = 0.5 * 1.7724538509055159 * erf(st) / st;
-
-    if (td > 30.0)
-    {
-        // Upward recursion — stable for large T (exp(-T) is tiny, no
-        // cancellation)
-        F[0] = f0;
-        for (int m = 0; m < max_m; m++)
-            F[m + 1] = ((2.0 * m + 1.0) * F[m] - exp_t) / (2.0 * td);
-        return;
-    }
-
-    // Downward recursion (Miller's algorithm) — stable for T <= 30
-    // For large T, exp(-T) underflows and work[] becomes all-zero → scale = inf
-    // → NaN.
-    const int m_top = max_m + 25;
-    double work[48];  // max_m <= 16 → m_top <= 41
-    work[m_top] = 0.0;
-    for (int m = m_top - 1; m >= 0; m--)
-        work[m] = (2.0 * td * work[m + 1] + exp_t) / (2.0 * m + 1.0);
-    const double scale = f0 / work[0];
-    for (int m = 0; m <= max_m; m++) F[m] = work[m] * scale;
+    QC_Compute_Boys_Double(F, T, max_m);
 }
 
 // Compact R^0 tensor index

@@ -6,6 +6,7 @@
 struct MC_BAROSTAT_INFORMATION
 {
     char module_name[CHAR_LENGTH_MAX];
+    CONTROLLER* controller = NULL;
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
@@ -17,7 +18,7 @@ struct MC_BAROSTAT_INFORMATION
         XZ = 2,
         YZ = 3,
         XYZ = 4
-    } couple_dimension;
+    } couple_dimension = XYZ;
     int only_direction = 0;
     int surface_number = 0;
     float surface_tension = 0.0f;
@@ -26,16 +27,15 @@ struct MC_BAROSTAT_INFORMATION
     int update_interval = 100;  // 每多少步进行一次MC尝试
     int check_interval =
         20;  // 每多少次MC尝试以后进行一次DeltaV_max取值的检查（使得MC接受概率在40%~50%
-    int accept = 0;      // 接受与否标志，1表示拒绝，0表示接受
-    VECTOR* frc_backup;  // 备份力，以便还原
+    int accept = 0;      // 接受与否标志，1表示接受，0表示拒绝
     VECTOR* crd_backup;  // 备份坐标，以便还原
     // 成功率记录相关
 
-    int total_count[3];      // 总共进行的MC尝试次数
-    int accep_count[3];      // 接受的MC尝试次数
-    float accept_rate[3];    // 接受率
-    float accept_rate_low;   // 接受率的低限
-    float accept_rate_high;  // 接受率的高限
+    int total_count[3] = {0, 0, 0};    // 总共进行的MC尝试次数
+    int accep_count[3] = {0, 0, 0};    // 接受的MC尝试次数
+    float accept_rate[3] = {0, 0, 0};  // 接受率
+    float accept_rate_low;             // 接受率的低限
+    float accept_rate_high;            // 接受率的高限
 
     // 每次允许变化最大的边长
     float Delta_Box_Length_Max[3];
@@ -60,8 +60,8 @@ struct MC_BAROSTAT_INFORMATION
     // 概率项
     float energy_old;
     float energy_new;
-    float extra_term;
-    float accept_possibility;
+    double extra_term;
+    double accept_possibility;
 
     // scale coordinate atomically
     void Scale_Coordinate_Atomically(int atom_numbers, VECTOR* crd);
@@ -80,6 +80,9 @@ struct MC_BAROSTAT_INFORMATION
 
     // 输入盒子信息，得到坐标变化因子
     void Volume_Change_Attempt(VECTOR boxlength, float dt);
+
+    bool Will_Attempt(int steps) const;
+    LTMatrix3 Get_Exact_Reverse_G(float dt) const;
 
     // 判断是否接受
     int Check_MC_Barostat_Accept();

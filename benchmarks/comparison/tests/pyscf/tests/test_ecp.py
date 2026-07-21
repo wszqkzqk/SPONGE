@@ -20,6 +20,8 @@ from benchmarks.comparison.tests.pyscf.tests.utils import (
     run_sponge_scf_energy_ha,
 )
 
+ECP_ENERGY_TOL_HA = 5.0e-4
+
 
 def _make_sponge_case(tmpdir, atoms, charge, multiplicity):
     """Create SPONGE input files for an ECP test case."""
@@ -82,16 +84,51 @@ ECP_CASES = [
     ECP_CASES,
     ids=[c[0] for c in ECP_CASES],
 )
-def test_ecp_energy(name, atoms, charge, mult, basis, method, pyscf_ref):
+@pytest.mark.parametrize(
+    "density_fitting_mode",
+    [None, "stored", "direct"],
+    ids=["eri", "ri", "ri-direct"],
+)
+@pytest.mark.parametrize("initial_guess", ["sap", "minao"])
+def test_ecp_energy(
+    name,
+    atoms,
+    charge,
+    mult,
+    basis,
+    method,
+    pyscf_ref,
+    density_fitting_mode,
+    initial_guess,
+):
     """Validate ECP energy: SPONGE vs PySCF reference."""
     tmpdir = tempfile.mkdtemp(prefix=f"ecp_test_{name}_")
     try:
         sponge_dir = _make_sponge_case(tmpdir, atoms, charge, mult)
+        extra_sponge_args = [
+            "-qc_ecp",
+            "def2-ecp",
+            "-qc_initial_guess",
+            initial_guess,
+            "-qc_need_gradient",
+            "0",
+        ]
+        if density_fitting_mode is not None:
+            extra_sponge_args.extend(
+                [
+                    "-qc_density_fit",
+                    "1",
+                    "-qc_density_fitting_mode",
+                    density_fitting_mode,
+                ]
+            )
         sponge_energy = run_sponge_scf_energy_ha(
             sponge_dir=sponge_dir,
             model_chemistry=f"{method}/{basis}",
             restricted=(mult == 1),
-            extra_sponge_args=["-qc_ecp", "auto"],
+            # K-Kr ECP10MDF is an explicitly selected optional potential;
+            # def2 auto mode correctly keeps these elements all-electron.
+            extra_sponge_args=extra_sponge_args,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -99,13 +136,17 @@ def test_ecp_energy(name, atoms, charge, mult, basis, method, pyscf_ref):
     diff_ha = abs(sponge_energy - pyscf_ref)
     diff_kcal = diff_ha * HARTREE_TO_KCAL_MOL
 
-    print(f"\n  {name} {method}/{basis} + ECP:")
+    print(
+        f"\n  {name} {method}/{basis} + ECP "
+        f"({density_fitting_mode or 'eri'}, {initial_guess}):"
+    )
     print(f"    PySCF:  {pyscf_ref:.8f} Ha")
     print(f"    SPONGE: {sponge_energy:.8f} Ha")
     print(f"    |diff|: {diff_ha:.6f} Ha = {diff_kcal:.3f} kcal/mol")
 
-    # Tolerance: ECP integrals in float32, expect ~0.01 Ha agreement
-    TOL_HA = 0.01
-    assert diff_ha < TOL_HA, (
-        f"{name}: |SPONGE - PySCF| = {diff_ha:.6f} Ha > {TOL_HA} Ha"
+    # The six ERI/RI × SAP/MINAO paths agree at 0.000234 Ha against the
+    # independent PySCF reference.  Keep a small cross-platform float32 margin
+    # without permitting the old multi-kcal/mol error budget.
+    assert diff_ha < ECP_ENERGY_TOL_HA, (
+        f"{name}: |SPONGE - PySCF| = {diff_ha:.6f} Ha > {ECP_ENERGY_TOL_HA} Ha"
     )

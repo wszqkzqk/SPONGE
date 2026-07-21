@@ -14,5 +14,6 @@ struct non_bond_information
     int* h_excluded_numbers;     // 记录每个原子需要剔除的原子个数
     void Initial(CONTROLLER* controller, MD_INFORMATION* md_info);
     void Excluded_List_Reform(
+        CONTROLLER* controller,
         int atom_numbers);  // 为了区域分解后近邻表计算正确性，补齐跨残基的近邻表
 };

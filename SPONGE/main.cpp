@@ -64,16 +64,67 @@ SPONGE_PLUGIN plugin;
 
 deviceStream_t main_stream;
 
+static std::uint64_t coordinate_generation_counter = 0;
+static std::uint64_t current_coordinate_generation = 0;
+
+static void Main_Advance_Coordinate_Generation(const char* reason)
+{
+    if (coordinate_generation_counter ==
+        std::numeric_limits<std::uint64_t>::max())
+    {
+        controller.Throw_Formatted_SPONGE_Error(
+            spongeErrorOverflow, "Main_Advance_Coordinate_Generation",
+            "Reason:\n    coordinate-state generation overflow while %s\n",
+            reason);
+        return;
+    }
+    current_coordinate_generation = ++coordinate_generation_counter;
+}
+
+static bool Main_Cell_Is_Exactly_Equal(const LTMatrix3& lhs,
+                                       const LTMatrix3& rhs)
+{
+    return lhs.a11 == rhs.a11 && lhs.a21 == rhs.a21 && lhs.a22 == rhs.a22 &&
+           lhs.a31 == rhs.a31 && lhs.a32 == rhs.a32 && lhs.a33 == rhs.a33;
+}
+
+static bool Main_Update_Neighbor_List(int update)
+{
+    // NOPBC nonbonded forces use their dedicated all-pairs kernels.  No
+    // neighbor list is constructed for that execution mode, so it must not be
+    // sent through the PBC neighbor-list lifecycle.  Keep the neighbor-list
+    // API strict: an actual call before initialization remains a hard error.
+    if (!md_info.pbc.pbc) return false;
+
+    return neighbor_list.Update_With_Overflow_Recovery(
+        &controller, dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
+        md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps, update,
+        md_info.nb.d_excluded_list_start, md_info.nb.d_excluded_list,
+        md_info.nb.d_excluded_numbers);
+}
+
 int main(int argc, char* argv[])
 {
     Main_Initial(argc, argv);
-    for (md_info.sys.steps = 0; md_info.sys.steps <= md_info.sys.step_limit;
-         md_info.sys.steps++)
+    for (md_info.sys.steps = 0;
+         md_info.sys.steps <= md_info.sys.step_limit;)
     {
         Main_Sync_Dynamic_Targets_To_Controllers();
-        Main_Calculate_Force();
+        const bool mc_attempt = mc_baro.Will_Attempt(md_info.sys.steps);
+        if (mc_attempt)
+        {
+            Main_MC_Barostat();
+        }
+        // MC old/trial evaluations never commit adaptive sampling history.
+        // The accepted state is the sole committed sample for this physical
+        // step and is evaluated exactly after any box transaction.
+        Main_Calculate_Force(FORCE_EVALUATION_CONTEXT(true, mc_attempt));
         Main_Iteration();
         Main_Print();
+        // Keep int-valued public/plugin step counters for compatibility, but
+        // do not overflow the loop increment at the supported upper bound.
+        if (md_info.sys.steps == std::numeric_limits<int>::max()) break;
+        md_info.sys.steps++;
     }
     Main_Clear();
     return 0;
@@ -86,9 +137,14 @@ void Main_Initial(int argc, char* argv[])
     cv_controller.Initial(&controller,
                           &md_info.no_direct_interaction_virtual_atom_numbers);
     md_info.Initial(&controller);
+    // A schedule point at step zero defines the initial thermodynamic state,
+    // including values consumed while temperature-dependent modules load
+    // persistent history.
+    md_info.sys.Update_Targets_By_Schedule(&controller, 0);
     controller.Step_Print_Initial("potential", "%.2f");
     controller.Step_Print_Initial("eff_pot", "%.7e");
-    qc.Initial(&controller, md_info.atom_numbers, md_info.crd);
+    qc.Initial(&controller, md_info.atom_numbers, md_info.crd,
+               md_info.sys.box_length, NULL, current_coordinate_generation);
     cv_controller.atom_numbers = md_info.atom_numbers;
     plugin.Initial(&md_info, &controller, &cv_controller, &neighbor_list);
 
@@ -153,14 +209,16 @@ void Main_Initial(int argc, char* argv[])
                    md_info.pbc.rcell, md_info.sys.box_length, md_info.nb.cutoff,
                    md_info.no_direct_interaction_virtual_atom_numbers);
         pairwise_force.Initial(&controller);
-        nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
+        nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type,
+                     md_info.atom_numbers, lj.atom_type_numbers);
 
         sits.Initial(&controller, md_info.atom_numbers);
         if (sits.is_initialized && sits.selectively_applied)
         {
             sits_dihedral.Initial(&controller, "sits_dihedral");
             sits_nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B,
-                              lj.h_atom_LJ_type, "sits_nb14");
+                              lj.h_atom_LJ_type, md_info.atom_numbers,
+                              lj.atom_type_numbers, "sits_nb14");
             sits_cmap.Initial(&controller, "sits_cmap");
         }
         sits.Check_Solvent(&controller, md_info.atom_numbers,
@@ -168,14 +226,15 @@ void Main_Initial(int argc, char* argv[])
     }
     else
     {
-        LJ_NOPBC.Initial(&controller, md_info.nb.cutoff);
-        CF_NOPBC.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff);
+        LJ_NOPBC.Initial(&controller);
+        CF_NOPBC.Initial(&controller, md_info.atom_numbers);
         if (controller.Command_Exist("gb", "in_file"))
         {
-            gb.Initial(&controller, md_info.nb.cutoff);
+            gb.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff);
         }
         nb14.Initial(&controller, LJ_NOPBC.h_LJ_A, LJ_NOPBC.h_LJ_B,
-                     LJ_NOPBC.h_atom_LJ_type);
+                     LJ_NOPBC.h_atom_LJ_type, md_info.atom_numbers,
+                     LJ_NOPBC.atom_type_numbers);
         sits.Initial(&controller, md_info.atom_numbers);
     }
 
@@ -239,7 +298,8 @@ void Main_Initial(int argc, char* argv[])
     }
     steer_cv.Initial(&controller, &cv_controller);
     restrain_cv.Initial(&controller, &cv_controller);
-    meta.Initial(&controller, &cv_controller);
+    meta.Initial(&controller, &cv_controller, NULL,
+                 md_info.sys.target_temperature);
 
     cv_controller.Print_Initial();
     plugin.After_Initial();
@@ -257,6 +317,7 @@ void Main_Initial(int argc, char* argv[])
                            md_info.mode >= md_info.NVT);
     }
     Main_Process_Management();
+    reaxff.Validate_Parallel_Layout(&controller);
 
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
@@ -270,14 +331,25 @@ void Main_Initial(int argc, char* argv[])
     controller.Print_First_Line_To_Mdout();
 }
 
-void Main_Calculate_Force()
+void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
 {
     bool use_reaxff_eeq = reaxff.eeq.is_initialized;
     const int cv_atom_numbers =
         md_info.atom_numbers +
         md_info.no_direct_interaction_virtual_atom_numbers;
+    cv_controller.Invalidate_Evaluation_Caches();
     md_info.MD_Reset_Atom_Energy_And_Virial_And_Force();
-    qc.Solve_SCF(dd.crd, md_info.sys.box_length, true, md_info.sys.steps);
+    if (qc.is_initialized && CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
+    {
+        // DD storage is local-order and can change after migration/remeshing.
+        // QC atom IDs are global, so every PP rank solves from the same
+        // explicitly gathered global-order coordinates.
+        md_info.Crd_Vel_dd_to_Device(dd.crd, dd.vel, dd.atom_local_label,
+                                     dd.atom_local_id, main_stream);
+        qc.Solve_SCF(md_info.crd, md_info.sys.box_length, true,
+                     md_info.sys.steps, evaluation.commit_sampling_state,
+                     current_coordinate_generation);
+    }
     if (md_info.mode == md_info.MINIMIZATION && md_info.min.dynamic_dt)
     {
         md_info.need_potential = 1;
@@ -305,16 +377,26 @@ void Main_Calculate_Force()
         dd.Reset_Force_and_Virial(&md_info);
         // QC 梯度必须在 dd.Reset_Force_and_Virial 之后调用
         if (qc.is_initialized && qc.need_gradient)
-            qc.Compute_Gradient(dd.frc, dd.crd, md_info.sys.box_length,
+            qc.Compute_Gradient(dd.frc, md_info.crd, dd.atom_local_id,
+                                dd.atom_numbers, md_info.sys.box_length,
                                 md_info.need_pressure, dd.d_virial);
+        if (qc.is_initialized && md_info.need_potential)
+            qc.Accumulate_Energy(dd.d_energy, dd.atom_local_id,
+                                 dd.atom_numbers);
         dd.Update_Ghost(&controller);
-        neighbor_list.Update(
-            dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-            md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
-            neighbor_list.CONDITIONAL_UPDATE, md_info.nb.d_excluded_list_start,
-            md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
+        const bool neighbor_storage_rebound = Main_Update_Neighbor_List(
+            evaluation.exact_state ? neighbor_list.FORCED_UPDATE
+                                   : neighbor_list.CONDITIONAL_UPDATE);
+        if (neighbor_storage_rebound)
+        {
+            // Plugins may expose zero-copy views of neighbor storage.  Any
+            // recovery reallocation therefore requires an explicit rebind
+            // before their force callback is allowed to run.
+            plugin.Set_Domain_Information(&dd);
+        }
 
-        reaxff.Calculate_Force(&dd, &md_info, &neighbor_list);
+        reaxff.Calculate_Force(&dd, &md_info, &neighbor_list,
+                               evaluation.commit_sampling_state);
 
         LJ_NOPBC.LJ_Force_With_Atom_Energy(
             dd.atom_numbers, dd.crd, dd.frc, md_info.need_potential,
@@ -324,18 +406,17 @@ void Main_Calculate_Force()
             dd.atom_numbers, dd.crd, dd.d_charge, dd.frc,
             md_info.need_potential, dd.d_energy, dd.d_excluded_list_start,
             dd.d_excluded_list, dd.d_excluded_numbers);
-        gb.Get_Effective_Born_Radius(dd.crd);
         gb.GB_Force_With_Atom_Energy(dd.atom_numbers, dd.crd, dd.d_charge,
                                      dd.frc, dd.d_energy);
 
         if (!use_reaxff_eeq)
         {
             pm.MPI_PME_Excluded_Force_With_Atom_Energy(
-                dd.atom_numbers, dd.atom_local, dd.atom_local_id, dd.crd,
-                md_info.pbc.cell, md_info.pbc.rcell, dd.d_charge,
-                dd.d_excluded_list_start, dd.d_excluded_list,
-                dd.d_excluded_numbers, dd.frc, md_info.need_potential,
-                dd.d_energy, md_info.need_pressure, dd.d_virial);
+                dd.atom_numbers, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                dd.d_charge, dd.d_excluded_list_start, dd.d_excluded_list,
+                dd.d_excluded_numbers, dd.d_exclusion_dependency_state, dd.frc,
+                md_info.need_potential, dd.d_energy, md_info.need_pressure,
+                dd.d_virial);
         }
 
         if (sits.is_initialized && sits.selectively_applied)
@@ -462,14 +543,20 @@ void Main_Calculate_Force()
             dd.d_virial);
         soft_walls.Compute_Force(dd.atom_numbers, dd.crd, dd.frc,
                                  md_info.need_potential, dd.d_energy);
-        plugin.Calculate_Force();
+        plugin.Calculate_Force(
+            evaluation.commit_sampling_state, evaluation.exact_state,
+            md_info.need_potential != 0, md_info.need_pressure != 0);
 
         restrain.Restraint(dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
                            md_info.need_potential, dd.d_energy,
                            md_info.need_pressure, dd.d_virial, dd.frc, &md_info,
                            &dd);
 
-        if (CONTROLLER::MPI_size == 1 && CONTROLLER::PM_MPI_size == 1)
+        // With one process the PP owner also evaluates CV work locally,
+        // whether PME is enabled (PM_MPI_size=1) or the NOPBC execution mode
+        // has no PM owner (PM_MPI_size=0).  PM ownership only selects a
+        // remote CV evaluator when the process topology is actually split.
+        if (CONTROLLER::MPI_size == 1)
         {
             vatom.Coordinate_Refresh_CV(dd.crd, md_info.pbc.cell,
                                         md_info.pbc.rcell);
@@ -478,27 +565,33 @@ void Main_Calculate_Force()
                 pm.PME_Reciprocal_Force_With_Energy_And_Virial(
                     dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.d_charge,
                     dd.frc, md_info.need_pressure, md_info.need_potential,
-                    dd.d_virial, dd.d_energy, md_info.sys.steps);
+                    dd.d_virial, dd.d_energy, md_info.sys.steps,
+                    evaluation.exact_state);
             }
 
-            cv_controller.Compute_CV_For_Print(
-                cv_atom_numbers, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                md_info.sys.steps, md_info.output.write_mdout_interval,
-                md_info.output.print_zeroth_frame);
+            if (md_info.output.Check_Mdout_Step())
+            {
+                cv_controller.Compute_CV_For_Print(
+                    cv_atom_numbers, dd.crd, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.pbc.reference_cell,
+                    md_info.sys.steps);
+            }
 
             steer_cv.Steer(cv_atom_numbers, dd.crd, md_info.pbc.cell,
-                           md_info.pbc.rcell, md_info.sys.steps, dd.d_energy,
-                           dd.d_virial, dd.frc, md_info.need_potential,
-                           md_info.need_pressure);
-            restrain_cv.Restraint(
-                cv_atom_numbers, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                md_info.sys.steps, dd.d_energy, dd.d_virial, dd.frc,
-                md_info.need_potential, md_info.need_pressure);
+                           md_info.pbc.rcell, md_info.pbc.reference_cell,
+                           md_info.sys.steps, dd.d_energy, dd.d_virial, dd.frc,
+                           md_info.need_potential, md_info.need_pressure);
+            restrain_cv.Restraint(cv_atom_numbers, dd.crd, md_info.pbc.cell,
+                                  md_info.pbc.rcell, md_info.pbc.reference_cell,
+                                  md_info.sys.steps, dd.d_energy, dd.d_virial,
+                                  dd.frc, md_info.need_potential,
+                                  md_info.need_pressure);
             meta.Do_Metadynamics(cv_atom_numbers, dd.crd, md_info.pbc.cell,
-                                 md_info.pbc.rcell, md_info.sys.steps,
-                                 md_info.need_potential, md_info.need_pressure,
-                                 dd.frc, dd.d_energy, dd.d_virial,
-                                 md_info.sys.h_temperature);
+                                 md_info.pbc.rcell, md_info.pbc.reference_cell,
+                                 md_info.sys.steps, md_info.need_potential,
+                                 md_info.need_pressure, dd.frc, dd.d_energy,
+                                 dd.d_virial, md_info.sys.target_temperature,
+                                 evaluation.commit_sampling_state);
             vatom.Force_Redistribute_CV(dd.crd, md_info.pbc.cell,
                                         md_info.pbc.rcell, dd.frc);
         }
@@ -510,12 +603,6 @@ void Main_Calculate_Force()
                                    dd.atom_numbers);
             }
         }
-        sits.Update_And_Enhance(
-            md_info.sys.steps, md_info.sys.d_potential, md_info.need_pressure,
-            dd.d_virial, dd.frc,
-            1.0f / (CONSTANT_kB * md_info.sys.target_temperature));
-        vatom.Force_Redistribute(dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                                 dd.frc);
     }
     else
     {
@@ -529,26 +616,33 @@ void Main_Calculate_Force()
                 md_info.crd, md_info.pbc.cell, md_info.pbc.rcell,
                 md_info.d_charge, md_info.frc, md_info.need_pressure,
                 md_info.need_potential, md_info.d_atom_virial_tensor,
-                md_info.d_atom_energy, md_info.sys.steps);
-            cv_controller.Compute_CV_For_Print(
-                cv_atom_numbers, pm.g_crd, md_info.pbc.cell, md_info.pbc.rcell,
-                md_info.sys.steps, md_info.output.write_mdout_interval,
-                md_info.output.print_zeroth_frame);
+                md_info.d_atom_energy, md_info.sys.steps,
+                evaluation.exact_state);
+            if (md_info.output.Check_Mdout_Step())
+            {
+                cv_controller.Compute_CV_For_Print(
+                    cv_atom_numbers, pm.g_crd, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.pbc.reference_cell,
+                    md_info.sys.steps);
+            }
             steer_cv.Steer(cv_atom_numbers, pm.g_crd, md_info.pbc.cell,
-                           md_info.pbc.rcell, md_info.sys.steps,
-                           md_info.d_atom_energy, md_info.d_atom_virial_tensor,
-                           pm.g_frc, md_info.need_potential,
-                           md_info.need_pressure);
+                           md_info.pbc.rcell, md_info.pbc.reference_cell,
+                           md_info.sys.steps, md_info.d_atom_energy,
+                           md_info.d_atom_virial_tensor, pm.g_frc,
+                           md_info.need_potential, md_info.need_pressure);
             restrain_cv.Restraint(
                 cv_atom_numbers, pm.g_crd, md_info.pbc.cell, md_info.pbc.rcell,
-                md_info.sys.steps, md_info.d_atom_energy,
-                md_info.d_atom_virial_tensor, pm.g_frc, md_info.need_potential,
-                md_info.need_pressure);
+                md_info.pbc.reference_cell, md_info.sys.steps,
+                md_info.d_atom_energy, md_info.d_atom_virial_tensor, pm.g_frc,
+                md_info.need_potential, md_info.need_pressure);
             meta.Do_Metadynamics(
                 cv_atom_numbers, pm.g_crd, md_info.pbc.cell, md_info.pbc.rcell,
-                md_info.sys.steps, md_info.need_potential,
-                md_info.need_pressure, pm.g_frc, md_info.d_atom_energy,
-                md_info.d_atom_virial_tensor, md_info.sys.h_temperature);
+                md_info.pbc.reference_cell, md_info.sys.steps,
+                md_info.need_potential, md_info.need_pressure, pm.g_frc,
+                md_info.d_atom_energy, md_info.d_atom_virial_tensor,
+                md_info.sys.target_temperature,
+                evaluation.commit_sampling_state);
+
             vatom.Force_Redistribute_CV(pm.g_crd, md_info.pbc.cell,
                                         md_info.pbc.rcell, pm.g_frc);
             pm.add_force_g_to_l(md_info.frc);
@@ -556,8 +650,40 @@ void Main_Calculate_Force()
                                dd.atom_numbers);
         }
     }
-    md_info.min.Scale_Force_For_Dynamic_Dt(dd.atom_numbers, dd.d_mass_inverse,
-                                           dd.frc, dd.vel, dd.acc);
+    // SITS in ALL/ITS mode enhances the complete Hamiltonian, so it must see
+    // the potential assembled for this force evaluation, including energy
+    // produced on dedicated PM ranks.  Reducing in Main_Iteration is too late:
+    // sys.d_potential was cleared at the beginning of this routine and the
+    // delayed reduction would also overwrite the bias added by SITS.
+    dd.Get_Potential(&controller, &md_info);
+    if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
+    {
+        sits.Update_And_Enhance(
+            md_info.sys.steps, md_info.sys.d_potential, md_info.need_pressure,
+            dd.d_virial, dd.frc,
+            1.0f / (CONSTANT_kB * md_info.sys.target_temperature),
+            evaluation.commit_sampling_state);
+        vatom.Force_Redistribute(dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                                 dd.frc);
+    }
+    if (sits.is_initialized && md_info.need_potential)
+    {
+        float effective_potential = 0.0f;
+        if (CONTROLLER::MPI_rank == 0)
+        {
+            deviceMemcpy(&effective_potential, md_info.sys.d_potential,
+                         sizeof(float), deviceMemcpyDeviceToHost);
+        }
+#ifdef USE_MPI
+        MPI_Bcast(&effective_potential, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+#endif
+        md_info.sys.h_potential = effective_potential;
+        deviceMemcpy(md_info.sys.d_potential, &effective_potential,
+                     sizeof(float), deviceMemcpyHostToDevice);
+    }
+    md_info.min.Scale_Force_For_Dynamic_Dt(
+        dd.atom_numbers, dd.atom_local, dd.d_mass_inverse, dd.frc,
+        dd.min_first_moment, dd.min_root_second_moment, dd.min_move);
     controller.Get_Time_Recorder("Calculate_Force")->Stop();
 }
 
@@ -572,11 +698,10 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     dd.Get_Ghost(&controller, &md_info);
     dd.Get_Excluded(&controller, &md_info);
 
-    neighbor_list.Update(
-        dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-        md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
-        neighbor_list.FORCED_UPDATE, md_info.nb.d_excluded_list_start,
-        md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
+    if (Main_Update_Neighbor_List(neighbor_list.FORCED_UPDATE))
+    {
+        plugin.Set_Domain_Information(&dd);
+    }
 
     middle_langevin.Get_Local(dd.atom_local, dd.atom_numbers);
     ad_thermo.Get_Local(dd.atom_local, dd.atom_numbers);
@@ -621,19 +746,19 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         sits_cmap.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                             dd.atom_local_label, dd.atom_local_id);
     }
+    reaxff.Get_Local(&controller, dd.atom_local, dd.atom_numbers,
+                     dd.ghost_numbers);
 }
 
 void Main_Iteration()
 {
     controller.Get_Time_Recorder("Iteration")->Start();
-    if (md_info.need_potential || md_info.need_pressure || md_info.need_kinetic)
+    if (md_info.need_pressure || md_info.need_kinetic)
     {
         dd.Get_Ek_and_Temperature(&controller, &md_info);
     }
-    dd.Get_Potential(&controller, &md_info);
     if (md_info.mode != md_info.RERUN)
     {
-        Main_MC_Barostat();
         if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
         {
             settle.Remember_Last_Coordinates(dd.crd, md_info.pbc.cell,
@@ -648,8 +773,9 @@ void Main_Iteration()
             }
             else if (md_info.mode == md_info.MINIMIZATION)
             {
-                md_info.min.Gradient_Descent(dd.atom_numbers, dd.crd, dd.frc,
-                                             dd.vel, dd.d_mass_inverse);
+                md_info.min.Gradient_Descent(dd.atom_numbers, dd.atom_local,
+                                             dd.crd, dd.frc, dd.vel,
+                                             dd.d_mass_inverse, dd.min_move);
                 constrain.v_factor = fmaxf(FLT_MIN, md_info.min.momentum_keep);
             }
             else if (middle_langevin.is_initialized)
@@ -727,10 +853,12 @@ void Main_Iteration()
     }
     else
     {
-        md_info.rerun.Iteration();
-        if (md_info.rerun.need_box_update)
+        const bool rerun_box_changed = md_info.rerun.Iteration();
+        if (md_info.rerun.need_box_update && rerun_box_changed)
         {
-            Main_Box_Change(md_info.rerun.g, 1, 0, 0);
+            Main_Rerun_Box_Change(md_info.rerun.g,
+                                  md_info.rerun.frame_box_length,
+                                  md_info.rerun.frame_box_angle);
         }
         md_info.Crd_Vel_Device_to_dd(dd.crd, dd.vel, dd.atom_local_label,
                                      dd.atom_local_id, main_stream);
@@ -739,7 +867,8 @@ void Main_Iteration()
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
         vatom.Coordinate_Refresh(dd.crd, md_info.pbc.cell, md_info.pbc.rcell);
-        if ((md_info.sys.steps + 1) % dd.update_interval == 0 ||
+        if (Next_Step_Is_Interval_Boundary(md_info.sys.steps,
+                                           dd.update_interval) ||
             md_info.mode == md_info.RERUN)
         {
             if (CONTROLLER::PP_MPI_size != 1)
@@ -751,16 +880,15 @@ void Main_Iteration()
             }
             else
             {
-                neighbor_list.Update(
-                    dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-                    md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
-                    neighbor_list.FORCED_UPDATE,
-                    md_info.nb.d_excluded_list_start,
-                    md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
+                if (Main_Update_Neighbor_List(neighbor_list.FORCED_UPDATE))
+                {
+                    plugin.Set_Domain_Information(&dd);
+                }
             }
         }
     }
-    if ((md_info.sys.steps + 1) % dd.update_interval == 0 ||
+    if (Next_Step_Is_Interval_Boundary(md_info.sys.steps,
+                                       dd.update_interval) ||
         md_info.mode == md_info.RERUN)
     {
         controller.Get_Time_Recorder("Communication")->Start();
@@ -769,6 +897,14 @@ void Main_Iteration()
                      true, true, true);
         controller.Get_Time_Recorder("Communication")->Stop();
     }
+    const bool coordinate_state_may_have_changed =
+        md_info.mode == md_info.RERUN || md_info.mode == md_info.MINIMIZATION ||
+        md_info.dt != 0.0f || constrain.is_initialized ||
+        settle.is_initialized || shake.is_initialized ||
+        hard_wall.is_initialized || vatom.is_initialized ||
+        press_baro.is_initialized;
+    if (coordinate_state_may_have_changed)
+        Main_Advance_Coordinate_Generation("advancing an MD coordinate state");
     controller.Get_Time_Recorder("Iteration")->Stop();
 }
 
@@ -858,6 +994,12 @@ void Main_Print()
 
 void Main_Clear()
 {
+    md_info.rerun.Clear();
+    md_info.min.Clear();
+    lj_soft.Clear();
+    LJ_NOPBC.Clear();
+    CF_NOPBC.Clear();
+    gb.Clear();
     controller.Final_Time_Summary(
         md_info.sys.steps, md_info.sys.speed_time_factor,
         md_info.sys.speed_unit_name.c_str(), md_info.mode);
@@ -867,9 +1009,33 @@ void Main_Clear()
 
 float Main_Box_Change(LTMatrix3 g, int scale_box, int scale_crd, int scale_vel)
 {
+    return Main_Box_Change_Transactional(g, scale_box, scale_crd, scale_vel,
+                                         true);
+}
+
+float Main_Box_Change_Transactional(LTMatrix3 g, int scale_box, int scale_crd,
+                                    int scale_vel, bool commit_box_state,
+                                    const VECTOR* authoritative_box_length,
+                                    const VECTOR* authoritative_box_angle)
+{
+    if ((authoritative_box_length == NULL) != (authoritative_box_angle == NULL))
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "Main_Box_Change_Transactional",
+            "Reason:\n\tauthoritative box length and angle must be supplied "
+            "together\n");
+    }
     if (scale_box)
     {
-        md_info.pbc.Update_Box(g);
+        if (authoritative_box_length != NULL)
+        {
+            md_info.pbc.Update_Box_From_Input(*authoritative_box_length,
+                                              *authoritative_box_angle);
+        }
+        else
+        {
+            md_info.pbc.Update_Box(g);
+        }
     }
     // 放缩坐标与速度
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
@@ -877,13 +1043,16 @@ float Main_Box_Change(LTMatrix3 g, int scale_box, int scale_crd, int scale_vel)
         md_info.Scale_Positions_And_Velocities(
             g, scale_crd, scale_vel, dd.crd,
             dd.vel);  // rescale dd进程原子坐标与速度
-        restrain.Update_Refcoord_Scaling(&md_info, g, md_info.dt, dd.atom_local,
-                                         dd.atom_numbers, dd.atom_local_label,
-                                         dd.atom_local_id);
+        if (commit_box_state)
+        {
+            restrain.Update_Refcoord_Scaling(
+                &md_info, g, md_info.dt, dd.atom_local, dd.atom_numbers,
+                dd.atom_local_label, dd.atom_local_id);
+        }
     }
 
     // 大幅度放缩盒子时，重新初始化相关模块
-    if (scale_box && md_info.pbc.Check_Change_Large())
+    if (scale_box && commit_box_state && md_info.pbc.Check_Change_Large())
     {
         Main_Box_Change_Largely();
     }
@@ -900,6 +1069,12 @@ float Main_Box_Change(LTMatrix3 g, int scale_box, int scale_crd, int scale_vel)
         }
     }
     return md_info.sys.Get_Volume();
+}
+
+float Main_Rerun_Box_Change(LTMatrix3 g, VECTOR box_length, VECTOR box_angle)
+{
+    return Main_Box_Change_Transactional(g, 1, 0, 0, true, &box_length,
+                                         &box_angle);
 }
 
 void Main_Box_Change_Largely()
@@ -1042,7 +1217,7 @@ void Main_Process_Management()
 
     if (CONTROLLER::PP_MPI_size > 1)
     {
-        md_info.nb.Excluded_List_Reform(md_info.atom_numbers);
+        md_info.nb.Excluded_List_Reform(&controller, md_info.atom_numbers);
     }
     pm.exclude_factor = CONTROLLER::PP_MPI_size == 1 ? 1.0f : 0.5f;
 
@@ -1059,68 +1234,151 @@ void Main_Process_Management()
 
 void Main_MC_Barostat()
 {
-    if (mc_baro.is_initialized &&
-        md_info.sys.steps % mc_baro.update_interval == 0)
+    if (mc_baro.Will_Attempt(md_info.sys.steps))
     {
-        mc_baro.energy_old = dd.h_sum_ene_total;
+        const FORCE_EVALUATION_CONTEXT transactional_evaluation(false, true);
+
+        // Establish the old Hamiltonian from the current coordinates and the
+        // already-committed adaptive history.  MC runs before this step's sole
+        // committed force evaluation, so old and trial necessarily see the
+        // same SITS statistics and metadynamics hills.
+        Main_Calculate_Force(transactional_evaluation);
+
+        SITS_STATE_SNAPSHOT sits_state_old;
+        mc_baro.energy_old = md_info.sys.h_potential;
+        const LTMatrix3 accepted_cell = md_info.pbc.cell;
+        const LTMatrix3 accepted_rcell = md_info.pbc.rcell;
+        const LTMatrix3 accepted_reference_cell = md_info.pbc.reference_cell;
+        const LTMatrix3 accepted_cell0 = md_info.pbc.cell0;
+        const VECTOR accepted_box_length = md_info.sys.box_length;
+        const VECTOR accepted_box_angle = md_info.sys.box_angle;
+        const std::uint64_t accepted_coordinate_generation =
+            current_coordinate_generation;
         if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
         {
-            deviceMemcpy(mc_baro.frc_backup, dd.frc,
-                         sizeof(VECTOR) * dd.atom_numbers,
-                         deviceMemcpyDeviceToDevice);
-            deviceMemcpy(mc_baro.crd_backup, dd.crd,
-                         sizeof(VECTOR) * dd.atom_numbers,
+            sits.Save_State(&sits_state_old, md_info.sys.d_potential);
+            restrain.Save_Refcoord_Transaction_State();
+            // The backup is in global atom order.  A local-layout backup is
+            // invalid if an accepted large box change later remeshes DD.
+            md_info.Crd_Vel_dd_to_Device(dd.crd, dd.vel, dd.atom_local_label,
+                                         dd.atom_local_id, main_stream);
+            deviceMemcpy(mc_baro.crd_backup, md_info.crd,
+                         sizeof(VECTOR) * md_info.atom_numbers,
                          deviceMemcpyDeviceToDevice);
         }
         mc_baro.Volume_Change_Attempt(md_info.sys.box_length, md_info.dt);
-        Main_Box_Change(mc_baro.g, 1, 0, 0);
+        // Suppress the ordinary one-way box side effects here.  The trial's
+        // reference state and full remesh are applied explicitly below under
+        // transaction control.
+        Main_Box_Change_Transactional(mc_baro.g, 1, 0, 0, false);
         if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
         {
             dd.Res_Crd_Map(mc_baro.g, md_info.dt);
+            // Reference scaling is part of the trial Hamiltonian.  Its global
+            // state was snapshotted above, so rejection restores it exactly.
+            restrain.Update_Refcoord_Scaling(
+                &md_info, mc_baro.g, md_info.dt, dd.atom_local, dd.atom_numbers,
+                dd.atom_local_label, dd.atom_local_id);
         }
 
-        Main_Calculate_Force();
-        dd.Get_Potential(&controller, &md_info);
-        mc_baro.energy_new = dd.h_sum_ene_total;
-        mc_baro.extra_term = md_info.sys.target_pressure * mc_baro.DeltaV -
-                             md_info.ug.ug_numbers * CONSTANT_kB *
-                                 md_info.sys.target_temperature *
-                                 logf(mc_baro.VDevided);
-        if (mc_baro.couple_dimension != mc_baro.NO &&
-            mc_baro.couple_dimension != mc_baro.XYZ)
-        {
-            mc_baro.extra_term -= mc_baro.surface_number *
-                                  mc_baro.surface_tension * mc_baro.DeltaS;
-        }
-        mc_baro.accept_possibility =
-            mc_baro.energy_new - mc_baro.energy_old + mc_baro.extra_term;
-        mc_baro.accept_possibility =
-            expf(-mc_baro.accept_possibility /
-                 (CONSTANT_kB * md_info.sys.target_temperature));
+        // A trial must use the same DD halo membership and PME discretization
+        // that it would have after acceptance.  Rebuild transactionally now;
+        // the global-order coordinate backup makes rejection safe even if the
+        // local layout changes completely.
+        Main_Box_Change_Largely();
+        md_info.pbc.cell0 = md_info.pbc.cell;
 
-        if (!mc_baro.Check_MC_Barostat_Accept())  // 如果不接受
+        if (!Main_Cell_Is_Exactly_Equal(md_info.pbc.cell, accepted_cell))
+            Main_Advance_Coordinate_Generation(
+                "constructing an MC barostat trial state");
+
+        Main_Calculate_Force(transactional_evaluation);
+        mc_baro.energy_new = md_info.sys.h_potential;
+        if (CONTROLLER::MPI_rank == 0)
         {
-            mc_baro.g = {-mc_baro.g.a11, 0, -mc_baro.g.a22, 0, 0,
-                         -mc_baro.g.a33};
+            mc_baro.extra_term =
+                static_cast<double>(md_info.sys.target_pressure) *
+                    mc_baro.DeltaV -
+                static_cast<double>(md_info.ug.ug_numbers) * CONSTANT_kB *
+                    md_info.sys.target_temperature * log(mc_baro.VDevided);
+            if (mc_baro.couple_dimension != mc_baro.NO &&
+                mc_baro.couple_dimension != mc_baro.XYZ)
+            {
+                mc_baro.extra_term -=
+                    static_cast<double>(mc_baro.surface_number) *
+                    mc_baro.surface_tension * mc_baro.DeltaS;
+            }
+            const double acceptance_delta =
+                static_cast<double>(mc_baro.energy_new) -
+                static_cast<double>(mc_baro.energy_old) + mc_baro.extra_term;
+            const double thermal_energy = static_cast<double>(CONSTANT_kB) *
+                                          md_info.sys.target_temperature;
+            if (!isfinite(mc_baro.energy_old) ||
+                !isfinite(mc_baro.energy_new) ||
+                !isfinite(mc_baro.extra_term) || !isfinite(acceptance_delta) ||
+                !isfinite(thermal_energy) || !(thermal_energy > 0.0))
+            {
+                controller.Throw_SPONGE_Error(
+                    spongeErrorSimulationBreakDown, "Main_MC_Barostat",
+                    "Reason:\n\tthe MC acceptance Hamiltonian is non-finite "
+                    "or has a non-positive thermal energy\n");
+            }
+            mc_baro.accept_possibility =
+                acceptance_delta <= 0.0
+                    ? 1.0
+                    : exp(-acceptance_delta / thermal_energy);
+            if (!isfinite(mc_baro.accept_possibility) ||
+                mc_baro.accept_possibility < 0.0 ||
+                mc_baro.accept_possibility > 1.0)
+            {
+                controller.Throw_SPONGE_Error(
+                    spongeErrorSimulationBreakDown, "Main_MC_Barostat",
+                    "Reason:\n\tthe MC acceptance probability is invalid\n");
+            }
+        }
+
+        const bool mc_accepted = mc_baro.Check_MC_Barostat_Accept() != 0;
+        if (!mc_accepted)  // 如果不接受
+        {
+            const LTMatrix3 reverse_g = mc_baro.Get_Exact_Reverse_G(md_info.dt);
             if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
             {
-                deviceMemcpy(dd.frc, mc_baro.frc_backup,
-                             sizeof(VECTOR) * dd.atom_numbers,
+                restrain.Restore_Refcoord_Transaction_State(
+                    dd.atom_local, dd.atom_numbers, dd.atom_local_label,
+                    dd.atom_local_id);
+                // Restore accepted coordinates into the current (possibly
+                // remeshed) trial layout before rebuilding the old box.
+                deviceMemcpy(md_info.crd, mc_baro.crd_backup,
+                             sizeof(VECTOR) * md_info.atom_numbers,
                              deviceMemcpyDeviceToDevice);
-                deviceMemcpy(dd.crd, mc_baro.crd_backup,
-                             sizeof(VECTOR) * dd.atom_numbers,
-                             deviceMemcpyDeviceToDevice);
+                md_info.Crd_Vel_Device_to_dd(dd.crd, dd.vel,
+                                             dd.atom_local_label,
+                                             dd.atom_local_id, main_stream);
             }
-            Main_Box_Change(mc_baro.g, 1, 0, 0);
+            Main_Box_Change_Transactional(reverse_g, 1, 0, 0, false);
+
+            // Remove round-trip floating-point drift from the authoritative
+            // box, then rebuild every local/mesh representation from it.
+            md_info.pbc.cell = accepted_cell;
+            md_info.pbc.rcell = accepted_rcell;
+            md_info.pbc.reference_cell = accepted_reference_cell;
+            md_info.pbc.cell0 = accepted_cell0;
+            md_info.sys.box_length = accepted_box_length;
+            md_info.sys.box_angle = accepted_box_angle;
+            current_coordinate_generation = accepted_coordinate_generation;
+            Main_Box_Change_Largely();
+            if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
+            {
+                sits.Restore_State(sits_state_old, md_info.sys.d_potential);
+            }
         }
         mc_baro.Delta_Box_Length_Max_Update();
-        dd.h_sum_ene_total = mc_baro.energy_old;  // 恢复能量值
     }
 }
 
 void Main_Sync_Dynamic_Targets_To_Controllers()
 {
-    md_info.sys.Update_Targets_By_Schedule(md_info.sys.steps);
+    md_info.sys.Update_Targets_By_Schedule(&controller, md_info.sys.steps);
     const float target_temperature = md_info.sys.target_temperature;
     bd_thermo.Set_Target_Temperature(target_temperature);
     bussi_thermo.Set_Target_Temperature(target_temperature);

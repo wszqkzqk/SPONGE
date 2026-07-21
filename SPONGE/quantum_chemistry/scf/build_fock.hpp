@@ -4,24 +4,42 @@
 #include "../integrals/eri/cpu/task_filter.hpp"
 #include "../integrals/eri/eri_backend.hpp"
 
-void QUANTUM_CHEMISTRY::Build_Fock(int iter)
+void QUANTUM_CHEMISTRY::Build_Fock(int iter, bool force_full_rebuild)
 {
+    const int total = mol.nao2;
+    const bool unrestricted = scf_ws.runtime.unrestricted;
+    auto finalize_fock_channel = [&](QC_SCF_Spin_Channel& channel)
+    {
+        if (channel.d_F_double == NULL) return;
+        // AO integral and grid tasks accumulate the two triangles
+        // independently.  Publish one symmetric Fock representation so
+        // energy, DIIS, commutators, and every eigensolver consume the same
+        // Hermitian operator.
+        QC_Symmetrize_Double_Matrix(mol.nao, channel.d_F_double);
+        QC_Double_To_Float(total, channel.d_F_double, channel.d_F);
+    };
+
     if (scf_ws.ri.enabled)
     {
+        scf_ws.runtime.fock_build_mode = QC_SCF_FOCK_BUILD_RI;
         Build_Fock_RI();
+        finalize_fock_channel(scf_ws.alpha);
+        if (unrestricted) finalize_fock_channel(scf_ws.beta);
         return;
     }
 
     const int threads = 256;
-    const int total = mol.nao2;
-    const bool unrestricted = scf_ws.runtime.unrestricted;
 
     if (dft.enable_dft) Build_DFT_VXC();
 
-    // Incremental Fock decision
-    // iter < 2: full P (SAP→SCF transition has huge ΔP, poor screening)
-    // iter >= 2: ΔP = P - P_prev for better screening
-    const bool use_incremental = (iter >= 2);
+    // Keep the rebuild decision separate from iter: physical confirmation
+    // needs a fresh F[P], but still needs the strict late-iteration screening
+    // tolerances selected from the real iteration number below.
+    const bool use_incremental =
+        QC_SCF_Should_Use_Incremental_Fock(iter, force_full_rebuild);
+    scf_ws.runtime.fock_build_mode =
+        use_incremental ? QC_SCF_FOCK_BUILD_INCREMENTAL
+                        : QC_SCF_FOCK_BUILD_FULL;
 
     if (use_incremental)
     {
@@ -234,4 +252,7 @@ void QUANTUM_CHEMISTRY::Build_Fock(int iter)
         deviceMemcpy(scf_ws.direct.d_P_exx_b_prev, scf_ws.beta.d_P,
                      sizeof(float) * total, deviceMemcpyDeviceToDevice);
     }
+
+    finalize_fock_channel(scf_ws.alpha);
+    if (unrestricted) finalize_fock_channel(scf_ws.beta);
 }

@@ -1,552 +1,1118 @@
-﻿#pragma once
-
-// XC 泛函解析导数
-// 替代有限差分，提供精确的 v_ρ 和 v_σ
-// 所有函数签名: (输入) → (exc, vrho, vsigma)
-// ε_xc 是 energy per volume (不是 per electron)
-// v_ρ = ∂ε_xc/∂ρ, v_σ = ∂ε_xc/∂σ
+#pragma once
 
 #include <cmath>
 
-// Slater Exchange
-// ε_x = -C_x · ρ^{4/3},  v_ρ = -(4/3)·C_x·ρ^{1/3}
-static inline __host__ __device__ void QC_VXC_Slater(double rho, double& exc,
-                                                     double& vrho)
+// First-order forward automatic differentiation.  This is analytic chain
+// differentiation, not numerical finite differencing.  Keeping the value and
+// derivative paths together is especially useful for the five independent UKS
+// variables and makes endpoint identities auditable.
+template <int N>
+struct QC_XC_Dual
 {
-    exc = vrho = 0.0;
-    if (rho <= 1e-18) return;
-    const double Cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
-    const double rho13 = cbrt(rho);
-    exc = -Cx * rho * rho13;
-    vrho = -(4.0 / 3.0) * Cx * rho13;
-}
+    double value;
+    double deriv[N];
 
-// VWN5 Correlation
-// ε_c(rs) via Padé form; v_ρ = ε_c - (rs/3)·dε_c/drs
-static inline __host__ __device__ double QC_VWN5_Eps_And_Deps(double rs,
-                                                              double& deps_drs)
-{
-    if (rs <= 0.0)
+    static inline __host__ __device__ QC_XC_Dual Constant(double v)
     {
-        deps_drs = 0.0;
-        return 0.0;
+        QC_XC_Dual result;
+        result.value = v;
+        for (int i = 0; i < N; ++i) result.deriv[i] = 0.0;
+        return result;
     }
-    const double s = sqrt(rs);
-    const double x0 = -0.10498;
-    const double A = 0.0621814 / 2.0;  // A = p1/2
-    const double b = 3.72744;
-    const double c = 12.9352;
 
-    const double X = rs + b * s + c;
-    const double X0 = x0 * x0 + b * x0 + c;
-    const double Q = sqrt(4.0 * c - b * b);
+    static inline __host__ __device__ QC_XC_Dual Variable(double v,
+                                                           int component)
+    {
+        QC_XC_Dual result = Constant(v);
+        result.deriv[component] = 1.0;
+        return result;
+    }
+};
 
-    const double eps =
-        A *
-        (log(rs / X) + 2.0 * b / Q * atan(Q / (2.0 * s + b)) -
-         (b * x0 / X0) * (log((s - x0) * (s - x0) / X) +
-                          2.0 * (b + 2.0 * x0) / Q * atan(Q / (2.0 * s + b))));
-
-    // dε/ds where s = sqrt(rs)
-    const double dX_ds = 2.0 * s + b;
-    const double t1 = 2.0 / s;     // d(ln rs)/ds = 2/s
-    const double t2 = -dX_ds / X;  // d(ln X)/ds
-    const double t3 = -2.0 * Q / (Q * Q + (2.0 * s + b) * (2.0 * s + b)) * 2.0;
-    // d(atan(Q/(2s+b)))/ds = -2Q/((2s+b)^2+Q^2)
-
-    const double t_log_y = 2.0 / (s - x0);  // d(ln(s-x0)^2)/ds
-    const double t_log_X = dX_ds / X;
-
-    const double deps_ds =
-        A *
-        (t1 + t2 + 2.0 * b / Q * t3 -
-         (b * x0 / X0) * (t_log_y - t_log_X + 2.0 * (b + 2.0 * x0) / Q * t3));
-
-    // dε/drs = dε/ds · ds/drs = dε/ds · 1/(2·sqrt(rs))
-    deps_drs = deps_ds / (2.0 * s);
-    return eps;
+static inline __host__ __device__ double QC_XC_Product(double a, double b)
+{
+    // Tail algebra can contain a representational zero multiplied by an
+    // unbounded chain factor.  Its representable contribution is zero; doing
+    // the hardware 0*Inf operation would instead poison every derivative with
+    // NaN under fast-math.
+    return (a == 0.0 || b == 0.0) ? 0.0 : a * b;
 }
 
-static inline __host__ __device__ void QC_VXC_VWN5(double rho, double& exc,
-                                                   double& vrho)
+static inline __host__ __device__ double QC_XC_Coefficient_Times_Power(
+    double coefficient, double base, double power)
 {
-    exc = vrho = 0.0;
-    if (rho <= 1e-18) return;
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    double deps_drs;
-    const double eps = QC_VWN5_Eps_And_Deps(rs, deps_drs);
-    exc = rho * eps;
-    // v_ρ = ∂(ρ·ε)/∂ρ = ε + ρ·dε/dρ = ε + ρ·(dε/drs)·(drs/dρ)
-    // drs/dρ = -(1/3)·rs/ρ
-    vrho = eps - (rs / 3.0) * deps_drs;
+    if (coefficient == 0.0) return 0.0;
+    const double magnitude =
+        exp(log(fabs(coefficient)) + power * log(base));
+    return coefficient < 0.0 ? -magnitude : magnitude;
 }
 
-// PBE Exchange
-// ε_x = -C_x · ρ^{4/3} · F_x(s),  s = |∇ρ|/(2·k_F·ρ)
-// F_x = 1 + κ - κ/(1 + μ·s²/κ)
-static inline __host__ __device__ void QC_VXC_PBE_X(double rho, double sigma,
-                                                    double& exc, double& vrho,
-                                                    double& vsigma)
+static inline __host__ __device__ double QC_XC_Exp_Difference(
+    double log_positive, double log_negative)
 {
-    exc = vrho = vsigma = 0.0;
-    if (rho <= 1e-18) return;
+    if (log_positive == log_negative) return 0.0;
+    if (log_positive > log_negative)
+    {
+        const double log_magnitude =
+            log_positive + log(-expm1(log_negative - log_positive));
+        return exp(log_magnitude);
+    }
+    const double log_magnitude =
+        log_negative + log(-expm1(log_positive - log_negative));
+    return -exp(log_magnitude);
+}
 
-    const double Cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator+(
+    const QC_XC_Dual<N>& a, const QC_XC_Dual<N>& b)
+{
+    QC_XC_Dual<N> result;
+    result.value = a.value + b.value;
+    for (int i = 0; i < N; ++i) result.deriv[i] = a.deriv[i] + b.deriv[i];
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator-(
+    const QC_XC_Dual<N>& a, const QC_XC_Dual<N>& b)
+{
+    QC_XC_Dual<N> result;
+    result.value = a.value - b.value;
+    for (int i = 0; i < N; ++i) result.deriv[i] = a.deriv[i] - b.deriv[i];
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator-(
+    const QC_XC_Dual<N>& a)
+{
+    QC_XC_Dual<N> result;
+    result.value = -a.value;
+    for (int i = 0; i < N; ++i) result.deriv[i] = -a.deriv[i];
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator*(
+    const QC_XC_Dual<N>& a, const QC_XC_Dual<N>& b)
+{
+    QC_XC_Dual<N> result;
+    result.value = a.value * b.value;
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = QC_XC_Product(a.deriv[i], b.value) +
+                          QC_XC_Product(a.value, b.deriv[i]);
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator/(
+    const QC_XC_Dual<N>& a, const QC_XC_Dual<N>& b)
+{
+    QC_XC_Dual<N> result;
+    result.value = a.value / b.value;
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] =
+            (a.deriv[i] - QC_XC_Product(result.value, b.deriv[i])) /
+            b.value;
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator+(
+    const QC_XC_Dual<N>& a, double b)
+{
+    QC_XC_Dual<N> result = a;
+    result.value += b;
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator+(double a,
+                                                           const QC_XC_Dual<N>& b)
+{
+    return b + a;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator-(
+    const QC_XC_Dual<N>& a, double b)
+{
+    QC_XC_Dual<N> result = a;
+    result.value -= b;
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator-(double a,
+                                                           const QC_XC_Dual<N>& b)
+{
+    return QC_XC_Dual<N>::Constant(a) - b;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator*(
+    const QC_XC_Dual<N>& a, double b)
+{
+    QC_XC_Dual<N> result;
+    result.value = a.value * b;
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = QC_XC_Product(a.deriv[i], b);
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator*(double a,
+                                                           const QC_XC_Dual<N>& b)
+{
+    return b * a;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator/(
+    const QC_XC_Dual<N>& a, double b)
+{
+    return a * (1.0 / b);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> operator/(double a,
+                                                           const QC_XC_Dual<N>& b)
+{
+    return QC_XC_Dual<N>::Constant(a) / b;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Log(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = log(x.value);
+    for (int i = 0; i < N; ++i) result.deriv[i] = x.deriv[i] / x.value;
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Log1p(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = log1p(x.value);
+    const double scale = 1.0 / (1.0 + x.value);
+    for (int i = 0; i < N; ++i) result.deriv[i] = x.deriv[i] * scale;
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Exp(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = exp(x.value);
+    // Once exp underflows exactly, every representable first derivative is
+    // also zero.  Avoid the indeterminate floating operation 0 * infinity.
+    if (result.value == 0.0)
+    {
+        for (int i = 0; i < N; ++i) result.deriv[i] = 0.0;
+    }
+    else
+    {
+        for (int i = 0; i < N; ++i)
+            result.deriv[i] = QC_XC_Product(result.value, x.deriv[i]);
+    }
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Expm1(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = expm1(x.value);
+    const double scale = exp(x.value);
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = QC_XC_Product(scale, x.deriv[i]);
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Sqrt(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = sqrt(x.value);
+    const double scale = 0.5 / result.value;
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = QC_XC_Product(scale, x.deriv[i]);
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Cbrt(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = cbrt(x.value);
+    const double scale = 1.0 / (3.0 * result.value * result.value);
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = QC_XC_Product(scale, x.deriv[i]);
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Atan(
+    const QC_XC_Dual<N>& x)
+{
+    QC_XC_Dual<N> result;
+    result.value = atan(x.value);
+    const double scale = 1.0 / (1.0 + x.value * x.value);
+    for (int i = 0; i < N; ++i) result.deriv[i] = scale * x.deriv[i];
+    return result;
+}
+
+// x^(4/3) is continuously differentiable at x=0 even though a naive cbrt
+// chain is not.  This endpoint definition is used by spin interpolation.
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PowFourThirds(
+    const QC_XC_Dual<N>& x)
+{
+    if (x.value == 0.0) return QC_XC_Dual<N>::Constant(0.0);
+    const QC_XC_Dual<N> root = QC_XC_Cbrt(x);
+    return x * root;
+}
+
+// Used only to evaluate phi at a fully polarized endpoint.  Its missing-spin
+// derivative is overwritten with the exact +infinity below; setting the local
+// derivative of x^(2/3) to zero here lets all other finite partials be obtained
+// without producing an intermediate NaN.
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N>
+QC_XC_PowTwoThirds_EndpointAware(const QC_XC_Dual<N>& x)
+{
+    if (x.value == 0.0) return QC_XC_Dual<N>::Constant(0.0);
+    const QC_XC_Dual<N> root = QC_XC_Cbrt(x);
+    return root * root;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_LogisticMinus(
+    const QC_XC_Dual<N>& log_ratio)
+{
+    QC_XC_Dual<N> result;
+    if (log_ratio.value >= 0.0)
+    {
+        const double t = exp(-log_ratio.value);
+        result.value = t / (1.0 + t);
+    }
+    else
+    {
+        const double t = exp(log_ratio.value);
+        result.value = 1.0 / (1.0 + t);
+    }
+    const double factor = -result.value * (1.0 - result.value);
+    if (factor == 0.0)
+    {
+        for (int i = 0; i < N; ++i) result.deriv[i] = 0.0;
+    }
+    else
+    {
+        for (int i = 0; i < N; ++i)
+            result.deriv[i] = factor * log_ratio.deriv[i];
+    }
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_LogAddExp(
+    const QC_XC_Dual<N>& a, const QC_XC_Dual<N>& b)
+{
+    if (a.value >= b.value) return a + QC_XC_Log1p(QC_XC_Exp(b - a));
+    return b + QC_XC_Log1p(QC_XC_Exp(a - b));
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Pow43_Density(
+    const QC_XC_Dual<N>& rho)
+{
+    return rho * QC_XC_Cbrt(rho);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Slater_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
+    return -cx * QC_XC_Pow43_Density(rho);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PW92_Impl(
+    const QC_XC_Dual<N>& rho, const double parameter[6])
+{
+    const double rs_factor = cbrt(3.0 / (4.0 * CONSTANT_Pi));
+    const QC_XC_Dual<N> x = QC_XC_Cbrt(rho);
+    const QC_XC_Dual<N> inverse_sqrt_rs = QC_XC_Sqrt(x / rs_factor);
+    if (inverse_sqrt_rs.value <= 1.0)
+    {
+        // Exact low-density rearrangement.  Forming rs first makes drs/drho
+        // overflow around rho=1e-235 although epsilon and its final density
+        // derivative remain representable.  In y=1/sqrt(rs), Q is a regular
+        // polynomial and the large (1+p1*rs) factor is combined with log1p.
+        const QC_XC_Dual<N> y = inverse_sqrt_rs;
+        const QC_XC_Dual<N> y2 = y * y;
+        const QC_XC_Dual<N> y3 = y2 * y;
+        const QC_XC_Dual<N> y4 = y2 * y2;
+        const QC_XC_Dual<N> denominator =
+            parameter[5] + parameter[4] * y + parameter[3] * y2 +
+            parameter[2] * y3;
+        const QC_XC_Dual<N> u =
+            0.5 * y4 / (parameter[0] * denominator);
+        const QC_XC_Dual<N> logarithm = QC_XC_Log1p(u);
+        return -2.0 * parameter[0] *
+               (logarithm + parameter[1] * logarithm / y2);
+    }
+
+    const QC_XC_Dual<N> sqrt_rs = 1.0 / inverse_sqrt_rs;
+    const QC_XC_Dual<N> rs = sqrt_rs * sqrt_rs;
+    const QC_XC_Dual<N> polynomial =
+        sqrt_rs *
+        (parameter[2] +
+         sqrt_rs *
+             (parameter[3] +
+              sqrt_rs * (parameter[4] + parameter[5] * sqrt_rs)));
+    const QC_XC_Dual<N> logarithm =
+        QC_XC_Log1p(0.5 / (parameter[0] * polynomial));
+    return -2.0 * parameter[0] * (1.0 + parameter[1] * rs) * logarithm;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PW92_Unpolarized_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double p[6] = {0.03109070, 0.21370, 7.59570,
+                         3.5876,     1.63820, 0.49294};
+    return QC_XC_PW92_Impl(rho, p);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PW92_Polarized_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double p[6] = {0.01554535, 0.20548, 14.11890,
+                         6.1977,     3.36620, 0.62517};
+    return QC_XC_PW92_Impl(rho, p);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PW92_Alpha_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double p[6] = {0.01688690, 0.11125, 10.35700,
+                         3.6231,     0.88026, 0.49671};
+    return QC_XC_PW92_Impl(rho, p);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PW92_Spin_Impl(
+    const QC_XC_Dual<N>& rho, const QC_XC_Dual<N>& zeta)
+{
+    const QC_XC_Dual<N> plus = 1.0 + zeta;
+    const QC_XC_Dual<N> minus = 1.0 - zeta;
+    const double denominator = cbrt(2.0) * 2.0 - 2.0;
+    const QC_XC_Dual<N> fz =
+        (QC_XC_PowFourThirds(plus) + QC_XC_PowFourThirds(minus) - 2.0) /
+        denominator;
+    const QC_XC_Dual<N> z2 = zeta * zeta;
+    const QC_XC_Dual<N> z4 = z2 * z2;
+    const QC_XC_Dual<N> ec0 = QC_XC_PW92_Unpolarized_Impl(rho);
+    const QC_XC_Dual<N> ec1 = QC_XC_PW92_Polarized_Impl(rho);
+    const QC_XC_Dual<N> ec2 =
+        QC_XC_PW92_Alpha_Impl(rho) / 1.70992093416136561756;
+    return ec0 + fz * (z4 * (ec1 - ec0) - (1.0 - z4) * ec2);
+}
+
+// Canonical VWN form.  In the density tail its three O(1/sqrt(rs))
+// contributions cancel analytically, leaving O(1/rs).  Evaluating those terms
+// separately eventually loses every significant bit even if each logarithm
+// uses log1p.  For y=1/sqrt(rs) <= 1/64 we therefore use the Taylor series of
+// the *combined* canonical expression.  Sixteen terms put the first omitted
+// contribution below double roundoff at the switch (the closest logarithmic
+// singularity is more than sixteen times farther away); this is a numerical
+// representation branch, never a density cutoff.
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_VWN5_Canonical_Impl(
+    const QC_XC_Dual<N>& rho, double amplitude, double x0, double b, double c,
+    const double tail_coefficient[15])
+{
+    const double rs_factor = cbrt(3.0 / (4.0 * CONSTANT_Pi));
+    const QC_XC_Dual<N> density_root = QC_XC_Cbrt(rho);
+    // Form y directly.  At rho~1e-300, drs/drho is larger than DBL_MAX even
+    // though dy/drho and the final VWN potential are representable.
+    const QC_XC_Dual<N> y = QC_XC_Sqrt(density_root / rs_factor);
+    if (y.value <= 1.0 / 64.0)
+    {
+        QC_XC_Dual<N> polynomial =
+            QC_XC_Dual<N>::Constant(tail_coefficient[14]);
+        for (int degree = 15; degree >= 2; --degree)
+            polynomial = tail_coefficient[degree - 2] + y * polynomial;
+        return y * y * polynomial;
+    }
+
+    const QC_XC_Dual<N> s = 1.0 / y;
+    const QC_XC_Dual<N> rs = s * s;
+    const double x0_polynomial = x0 * x0 + b * x0 + c;
+    const double q = sqrt(4.0 * c - b * b);
+    const QC_XC_Dual<N> denominator = rs + b * s + c;
+    const QC_XC_Dual<N> log_rs_ratio =
+        -QC_XC_Log1p((b * s + c) / rs);
+    const QC_XC_Dual<N> difference =
+        -(2.0 * x0 + b) * s + x0 * x0 - c;
+    const QC_XC_Dual<N> log_shifted_ratio =
+        QC_XC_Log1p(difference / denominator);
+    const QC_XC_Dual<N> angle = QC_XC_Atan(q / (2.0 * s + b));
+    return amplitude *
+           (log_rs_ratio + 2.0 * b * angle / q -
+            (b * x0 / x0_polynomial) *
+                (log_shifted_ratio + 2.0 * (b + 2.0 * x0) * angle / q));
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_VWN5_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double tail[15] = {
+        -4.14330420340463840e-1,  1.03044597895496882e+0,
+        -2.01037782769109637e-1, -7.39792424753635025e+0,
+        2.47130744235946514e+1,  -1.06044091189988243e+1,
+        -2.05165033831426540e+2, 7.86457099943648298e+2,
+        -5.15243890859578198e+2, -6.57740109338758327e+3,
+        2.80277812514475752e+4,  -2.44448069630531737e+4,
+        -2.26144593290141294e+5, 1.06078304738386467e+6,
+        -1.14730748927092429e+6};
+    return QC_XC_VWN5_Canonical_Impl(rho, 0.0310907, -0.10498, 3.72744,
+                                     12.9352, tail);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_VWN5_Polarized_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double tail[15] = {
+        -3.16385748745275000e-1, 1.49693954639905259e+0,
+        -5.07203501815328620e+0, 1.24301868281404169e+1,
+        -1.20755530929833771e+1, -8.72511457763403641e+1,
+        7.02569449302436744e+2,  -3.18383743569203545e+3,
+        1.00818196747590545e+4,  -1.76709923510527734e+4,
+        -3.73453272718465206e+4, 5.13398157643526203e+5,
+        -2.78785661805350475e+6, 1.03364802974056079e+7,
+        -2.43689113747697158e+7};
+    return QC_XC_VWN5_Canonical_Impl(rho, 0.01554535, -0.32500, 7.06042,
+                                     18.0578, tail);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_VWN5_Alpha_Impl(
+    const QC_XC_Dual<N>& rho)
+{
+    const double tail[15] = {
+        -1.31817657838303637e+0, 9.93968384905211222e-1,
+        7.72792778478138764e+0,  -1.47482989405025382e+1,
+        -5.30974258492646314e+1, 1.88473242941541827e+2,
+        3.31349728810417901e+2,  -2.23947110188419538e+3,
+        -1.16753131736472255e+3, 2.50285830883085764e+4,
+        -1.32973553369941383e+4, -2.61526416929140774e+5,
+        4.22897599064846116e+5,  2.50111258221168583e+6,
+        -7.46425041899847891e+6};
+    const double inverse_pi2 = 1.0 / (CONSTANT_Pi * CONSTANT_Pi);
+    return QC_XC_VWN5_Canonical_Impl(rho, inverse_pi2, -0.0047584, 1.13107,
+                                     13.0045, tail);
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_VWN5_Spin_Impl(
+    const QC_XC_Dual<N>& rho_a, const QC_XC_Dual<N>& rho_b)
+{
+    const QC_XC_Dual<N> rho = rho_a + rho_b;
+    const QC_XC_Dual<N> zeta = (rho_a - rho_b) / rho;
+    const QC_XC_Dual<N> plus = 1.0 + zeta;
+    const QC_XC_Dual<N> minus = 1.0 - zeta;
+    const QC_XC_Dual<N> z2 = zeta * zeta;
+    const QC_XC_Dual<N> z4 = z2 * z2;
+    const QC_XC_Dual<N> fz_numerator =
+        QC_XC_PowFourThirds(plus) + QC_XC_PowFourThirds(minus) - 2.0;
+    const QC_XC_Dual<N> eps0 = QC_XC_VWN5_Impl(rho);
+    const QC_XC_Dual<N> eps1 = QC_XC_VWN5_Polarized_Impl(rho);
+    const QC_XC_Dual<N> eps_alpha = QC_XC_VWN5_Alpha_Impl(rho);
+    const double cbrt2 = cbrt(2.0);
+    const QC_XC_Dual<N> eps =
+        eps0 - eps_alpha * fz_numerator * (1.0 - z4) * (3.0 / 16.0) +
+        (eps1 - eps0) * fz_numerator * z4 / (2.0 * (cbrt2 - 1.0));
+    return rho * eps;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PBE_X_Impl(
+    const QC_XC_Dual<N>& rho, const QC_XC_Dual<N>& sigma)
+{
+    const double cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
     const double kappa = 0.804;
     const double mu = 0.2195149727645171;
+    const double kf_factor = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi);
+    const double reduced_factor = mu / (4.0 * kappa * kf_factor * kf_factor);
+    const double rho13 = cbrt(rho.value);
+    const double rho43 = rho.value * rho13;
 
-    const double rho13 = cbrt(rho);
-    const double rho43 = rho * rho13;
-    const double kf = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi * rho);
-    const double denom = 2.0 * kf * rho;
-    const double s2 = sigma / fmax(1e-30, denom * denom);
+    double inverse_enhancement = 1.0;
+    if (sigma.value > 0.0)
+    {
+        const double log_ratio =
+            log(reduced_factor) + log(sigma.value) -
+            (8.0 / 3.0) * log(rho.value);
+        if (log_ratio >= 0.0)
+        {
+            const double inverse_ratio = exp(-log_ratio);
+            inverse_enhancement = inverse_ratio / (1.0 + inverse_ratio);
+        }
+        else
+        {
+            const double ratio = exp(log_ratio);
+            inverse_enhancement = 1.0 / (1.0 + ratio);
+        }
+    }
 
-    const double p = mu * s2 / kappa;
-    const double fx = 1.0 + kappa - kappa / (1.0 + p);
-    const double dfx_dp = kappa / ((1.0 + p) * (1.0 + p));
-    const double dfx_ds2 = dfx_dp * mu / kappa;
+    const double enhancement =
+        1.0 + kappa - kappa * inverse_enhancement;
+    const double vrho =
+        -cx * rho13 *
+        ((4.0 / 3.0) * enhancement -
+         (8.0 / 3.0) * kappa * inverse_enhancement *
+             (1.0 - inverse_enhancement));
+    double vsigma = 0.0;
+    if (inverse_enhancement != 0.0)
+    {
+        const double log_magnitude =
+            log(cx * kappa * reduced_factor) -
+            (4.0 / 3.0) * log(rho.value) +
+            2.0 * log(inverse_enhancement);
+        vsigma = -exp(log_magnitude);
+    }
 
-    exc = -Cx * rho43 * fx;
-
-    // v_ρ = ∂ε_xc/∂ρ
-    // ε_xc = -Cx·ρ^{4/3}·Fx(s²)
-    // s² = σ / (2kf·ρ)²,  kf = (3π²ρ)^{1/3}
-    // ds²/dρ = -s² · (8/3)/ρ  (since denom² = 4kf²ρ² ∝ ρ^{8/3})
-    const double ds2_drho = -s2 * (8.0 / 3.0) / rho;
-    vrho = -Cx * (4.0 / 3.0) * rho13 * fx + (-Cx * rho43) * dfx_ds2 * ds2_drho;
-
-    // v_σ = ∂ε_xc/∂σ = -Cx·ρ^{4/3}·(∂Fx/∂s²)·(∂s²/∂σ)
-    // ds²/dσ = 1/denom²
-    vsigma = -Cx * rho43 * dfx_ds2 / fmax(1e-30, denom * denom);
+    QC_XC_Dual<N> result = QC_XC_Dual<N>::Constant(-cx * rho43 * enhancement);
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = QC_XC_Product(vrho, rho.deriv[i]) +
+                          QC_XC_Product(vsigma, sigma.deriv[i]);
+    return result;
 }
 
-// PW92 Correlation (unpolarized)
-static inline __host__ __device__ double QC_PW92_Eopt_And_Deriv(
-    double sqrt_rs, const double t[6], double& deps_drs)
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_AsinhExp(
+    const QC_XC_Dual<N>& log_value)
 {
-    const double rs = sqrt_rs * sqrt_rs;
-    const double s = sqrt_rs;
-    const double poly = s * (t[2] + s * (t[3] + s * (t[4] + t[5] * s)));
-    const double log_arg = 1.0 + 0.5 / (t[0] * poly);
-    const double pref = -2.0 * t[0] * (1.0 + t[1] * rs);
-    const double eps = pref * log(log_arg);
-
-    // Derivative: dε/drs
-    const double dpoly_ds =
-        t[2] + s * (2.0 * t[3] + s * (3.0 * t[4] + 4.0 * t[5] * s));
-    const double dlog_arg_ds = -0.5 * dpoly_ds / (t[0] * poly * poly);
-    const double dpref_drs = -2.0 * t[0] * t[1];
-    const double ds_drs = 0.5 / s;
-
-    deps_drs =
-        dpref_drs * log(log_arg) + pref * (dlog_arg_ds * ds_drs) / log_arg;
-    return eps;
+    QC_XC_Dual<N> result;
+    double scale;
+    if (log_value.value >= 0.0)
+    {
+        const double inverse_square = exp(-2.0 * log_value.value);
+        result.value =
+            log_value.value + log1p(sqrt(1.0 + inverse_square));
+        scale = 1.0 / sqrt(1.0 + inverse_square);
+    }
+    else
+    {
+        const double value = exp(log_value.value);
+        result.value = asinh(value);
+        scale = value / sqrt(1.0 + value * value);
+    }
+    for (int i = 0; i < N; ++i)
+        result.deriv[i] = scale * log_value.deriv[i];
+    return result;
 }
 
-static inline __host__ __device__ void QC_VXC_PW92_Unpol(double rho,
-                                                         double& exc,
-                                                         double& vrho)
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_B88_Impl(
+    const QC_XC_Dual<N>& rho, const QC_XC_Dual<N>& sigma)
 {
-    exc = vrho = 0.0;
-    if (rho <= 1e-18) return;
-    static const double p[6] = {0.03109070, 0.21370, 7.59570,
-                                3.5876,     1.63820, 0.49294};
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    double deps_drs;
-    const double eps = QC_PW92_Eopt_And_Deriv(sqrt(rs), p, deps_drs);
-    exc = rho * eps;
-    vrho = eps - (rs / 3.0) * deps_drs;
+    const double beta = 0.0042;
+    const double cbrt2 = cbrt(2.0);
+    const double cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
+    const QC_XC_Dual<N> rho43 = QC_XC_Pow43_Density(rho);
+    QC_XC_Dual<N> result = -cx * rho43;
+    if (sigma.value == 0.0)
+    {
+        const double slope =
+            -exp(log(beta * cbrt2) - (4.0 / 3.0) * log(rho.value));
+        for (int i = 0; i < N; ++i)
+            result.deriv[i] += slope * sigma.deriv[i];
+        return result;
+    }
+
+    const QC_XC_Dual<N> log_q =
+        log(cbrt2) + 0.5 * QC_XC_Log(sigma) -
+        (4.0 / 3.0) * QC_XC_Log(rho);
+    const QC_XC_Dual<N> asinh_q = QC_XC_AsinhExp(log_q);
+    const QC_XC_Dual<N> log_denominator =
+        QC_XC_LogAddExp(-log_q, log(6.0 * beta) + QC_XC_Log(asinh_q));
+    const QC_XC_Dual<N> log_correction =
+        log(beta) + 0.5 * QC_XC_Log(sigma) - log_denominator;
+    return result - QC_XC_Exp(log_correction);
 }
 
-// PBE Correlation
-static inline __host__ __device__ void QC_VXC_PBE_C(double rho, double sigma,
-                                                    double& exc, double& vrho,
-                                                    double& vsigma)
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PBE_C_Impl(
+    const QC_XC_Dual<N>& rho, const QC_XC_Dual<N>& sigma)
 {
-    exc = vrho = vsigma = 0.0;
-    if (rho <= 1e-18) return;
-
     const double gamma = (1.0 - log(2.0)) / (CONSTANT_Pi * CONSTANT_Pi);
     const double beta = 0.06672455060314922;
-    const double bg = beta / gamma;
+    const double beta_gamma = beta / gamma;
+    const double d2 =
+        (1.0 / 144.0) * pow(3.0, 5.0 / 3.0) *
+        pow(CONSTANT_Pi, 1.0 / 3.0);
+    const QC_XC_Dual<N> eps = QC_XC_PW92_Unpolarized_Impl(rho);
 
-    // PW92 base
-    static const double p[6] = {0.03109070, 0.21370, 7.59570,
-                                3.5876,     1.63820, 0.49294};
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    double deps_pw_drs;
-    const double eps_pw = QC_PW92_Eopt_And_Deriv(sqrt(rs), p, deps_pw_drs);
+    QC_XC_Dual<N> y;
+    if (sigma.value == 0.0)
+    {
+        QC_XC_Dual<N> result = rho * eps;
+        const double vsigma =
+            exp(log(beta * d2) - (4.0 / 3.0) * log(rho.value));
+        for (int i = 0; i < N; ++i)
+            result.deriv[i] += QC_XC_Product(vsigma, sigma.deriv[i]);
+        return result;
+    }
+    else
+    {
+        // y = numerator/(tail_metric+numerator), evaluated as a logistic so
+        // two positive, representable inputs cannot both disappear through
+        // intermediate product underflow.
+        const QC_XC_Dual<N> log_tail_to_numerator =
+            QC_XC_Log(QC_XC_Expm1(-eps / gamma)) +
+            (7.0 / 3.0) * QC_XC_Log(rho) -
+            log(beta_gamma * d2) - QC_XC_Log(sigma);
+        y = QC_XC_LogisticMinus(log_tail_to_numerator);
+    }
+    const QC_XC_Dual<N> r = y / (1.0 - y + y * y);
+    const QC_XC_Dual<N> eps_plus_h =
+        gamma * QC_XC_Log1p((1.0 - r) * QC_XC_Expm1(eps / gamma));
+    QC_XC_Dual<N> result = rho * eps_plus_h;
 
-    const double A_denom = expm1(-eps_pw / gamma);
-    const double A = bg / A_denom;
-
-    // t² from density gradient
-    const double d2c = pow(
-        (1.0 / 12.0) * pow(3.0, 5.0 / 6.0) * pow(CONSTANT_Pi, 1.0 / 6.0), 2.0);
-    const double rho73 = pow(rho, 7.0 / 3.0);
-    const double t2 = d2c * fmax(0.0, sigma) / rho73;
-
-    const double At2 = A * t2;
-    const double num = 1.0 + At2;
-    const double den = 1.0 + At2 + At2 * At2;
-    const double H = gamma * log(1.0 + bg * t2 * num / den);
-
-    exc = rho * (eps_pw + H);
-
-    // ∂H/∂t² (holding A constant)
-    const double g = bg * t2 * num / den;
-    const double dnum_dt2 = A;
-    const double dden_dt2 = A + 2.0 * A * At2;
-    const double dg_dt2 =
-        bg * (num / den + t2 * (dnum_dt2 * den - num * dden_dt2) / (den * den));
-    const double dH_dt2 = gamma * dg_dt2 / (1.0 + g);
-
-    // ∂t²/∂σ = d2c / ρ^{7/3}
-    vsigma = rho * dH_dt2 * d2c / rho73;
-
-    // ∂(ρ·(eps_pw + H))/∂ρ
-    // = eps_pw + H + ρ·∂eps_pw/∂ρ + ρ·∂H/∂ρ
-    // ∂H/∂ρ has contributions from: ∂t²/∂ρ and ∂A/∂ρ (through eps_pw)
-    const double dt2_drho = -(7.0 / 3.0) * t2 / rho;
-    const double dH_from_t2 = dH_dt2 * dt2_drho;
-
-    // ∂A/∂ρ = ∂A/∂eps_pw · ∂eps_pw/∂ρ
-    const double dA_deps =
-        bg * exp(-eps_pw / gamma) / (gamma * A_denom * A_denom);
-    const double deps_pw_drho = deps_pw_drs * (-(rs / (3.0 * rho)));
-
-    // ∂H/∂A
-    const double dnum_dA = t2;
-    const double dden_dA = t2 + 2.0 * t2 * At2;
-    const double dg_dA =
-        bg * t2 * (dnum_dA * den - num * dden_dA) / (den * den);
-    const double dH_dA = gamma * dg_dA / (1.0 + g);
-    const double dH_from_A = dH_dA * dA_deps * deps_pw_drho;
-
-    vrho = eps_pw + H + rho * (deps_pw_drho + dH_from_t2 + dH_from_A);
+    // Recover dE/dsigma directly.  In the small-gradient limit y may round to
+    // zero although y/sigma remains finite and physically important.
+    const double y_value = y.value;
+    const double denominator = 1.0 - y_value + y_value * y_value;
+    double dy_dsigma;
+    if (y_value == 0.0)
+    {
+        const double log_tail =
+            log(expm1(-eps.value / gamma)) +
+            (7.0 / 3.0) * log(rho.value);
+        dy_dsigma = exp(log(beta_gamma * d2) - log_tail);
+    }
+    else if (y_value == 1.0)
+    {
+        dy_dsigma = 0.0;
+    }
+    else
+    {
+        dy_dsigma =
+            exp(log(y_value) + log1p(-y_value) - log(sigma.value));
+    }
+    const double dr_dy =
+        (1.0 - y_value * y_value) / (denominator * denominator);
+    const double m = expm1(eps.value / gamma);
+    const double vsigma =
+        rho.value * gamma * m / (1.0 + (1.0 - r.value) * m) *
+        (-dr_dy * dy_dsigma);
+    for (int i = 0; i < N; ++i)
+        if (sigma.deriv[i] != 0.0 && rho.deriv[i] == 0.0)
+            result.deriv[i] = QC_XC_Product(vsigma, sigma.deriv[i]);
+    return result;
 }
 
-// RKS Dispatch
-static inline __host__ __device__ void QC_VXC_Analytical_RKS(
-    QC_METHOD method, double rho, double sigma, double& exc, double& vrho,
-    double& vsigma)
+// LYP in a tail-stable algebra.  x=cbrt(rho) is used to combine every
+// exp(-c/x)*rho^(-n/3) product before evaluation, so no infinity-times-zero
+// intermediate is created at positive low density.
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_LYP_Impl(
+    const QC_XC_Dual<N>& rho, const QC_XC_Dual<N>& sigma)
 {
-    exc = vrho = vsigma = 0.0;
-    if (rho <= 1e-18) return;
+    const double a = 0.04918;
+    const double b = 0.132;
+    const double c = 0.2533;
+    const double d = 0.349;
+    const double constant_term =
+        0.3 * pow(3.0, 2.0 / 3.0) * pow(CONSTANT_Pi, 4.0 / 3.0);
+    const QC_XC_Dual<N> x = QC_XC_Cbrt(rho);
+    const QC_XC_Dual<N> denominator = x + d;
+    const QC_XC_Dual<N> x2 = x * x;
+    const QC_XC_Dual<N> x4 = x2 * x2;
+    const QC_XC_Dual<N> exponential = QC_XC_Exp(-c / x);
+    const QC_XC_Dual<N> local = -a * x4 / denominator;
+    const QC_XC_Dual<N> constant =
+        -a * b * constant_term * exponential * x4 / denominator;
 
-    double e1, v1, e2, v2, vs1 = 0, vs2 = 0;
+    const QC_XC_Dual<N> numerator =
+        3.0 * x * denominator + 7.0 * d * x + 7.0 * c * denominator;
+    const QC_XC_Dual<N> scaled_exponential =
+        QC_XC_Exp(-c / x - 5.0 * QC_XC_Log(x));
+    const QC_XC_Dual<N> denominator_squared = denominator * denominator;
+    const QC_XC_Dual<N> gradient =
+        (a * b / 72.0) * sigma * scaled_exponential * numerator /
+        denominator_squared;
+    return local + constant + gradient;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_PBE_C_Spin_Impl(
+    const QC_XC_Dual<N>& rho_a, const QC_XC_Dual<N>& rho_b,
+    const QC_XC_Dual<N>& sigma_total)
+{
+    const double gamma = (1.0 - log(2.0)) / (CONSTANT_Pi * CONSTANT_Pi);
+    const double beta = 0.06672455060314922;
+    const double beta_gamma = beta / gamma;
+    const QC_XC_Dual<N> rho = rho_a + rho_b;
+    const QC_XC_Dual<N> zeta = (rho_a - rho_b) / rho;
+    const QC_XC_Dual<N> eps = QC_XC_PW92_Spin_Impl(rho, zeta);
+
+    const QC_XC_Dual<N> phi =
+        0.5 * (QC_XC_PowTwoThirds_EndpointAware(1.0 + zeta) +
+               QC_XC_PowTwoThirds_EndpointAware(1.0 - zeta));
+    const QC_XC_Dual<N> phi2 = phi * phi;
+    const QC_XC_Dual<N> phi3 = phi2 * phi;
+    const QC_XC_Dual<N> kf =
+        cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi) * QC_XC_Cbrt(rho);
+    const QC_XC_Dual<N> ks2 = (4.0 / CONSTANT_Pi) * kf;
+    if (sigma_total.value == 0.0)
+    {
+        QC_XC_Dual<N> result = rho * eps;
+        const double vsigma =
+            beta * CONSTANT_Pi * phi.value /
+            (16.0 * kf.value * rho.value);
+        for (int i = 0; i < N; ++i)
+            result.deriv[i] += QC_XC_Product(vsigma, sigma_total.deriv[i]);
+        return result;
+    }
+    const QC_XC_Dual<N> em1 = QC_XC_Expm1(-eps / (gamma * phi3));
+    const QC_XC_Dual<N> log_tail_to_numerator =
+        QC_XC_Log(em1) + log(4.0) + 2.0 * QC_XC_Log(phi) +
+        QC_XC_Log(ks2) + 2.0 * QC_XC_Log(rho) - log(beta_gamma) -
+        QC_XC_Log(sigma_total);
+    const QC_XC_Dual<N> y =
+        QC_XC_LogisticMinus(log_tail_to_numerator);
+    const QC_XC_Dual<N> r = y / (1.0 - y + y * y);
+    const QC_XC_Dual<N> eps_plus_h =
+        gamma * phi3 *
+        QC_XC_Log1p((1.0 - r) *
+                    QC_XC_Expm1(eps / (gamma * phi3)));
+    QC_XC_Dual<N> result = rho * eps_plus_h;
+
+    const double y_value = y.value;
+    const double denominator = 1.0 - y_value + y_value * y_value;
+    double dy_dsigma;
+    if (y_value == 0.0)
+    {
+        const double log_tail = log(em1.value) + log(4.0) +
+                                2.0 * log(phi.value) + log(ks2.value) +
+                                2.0 * log(rho.value);
+        dy_dsigma = exp(log(beta_gamma) - log_tail);
+    }
+    else if (y_value == 1.0)
+    {
+        dy_dsigma = 0.0;
+    }
+    else
+    {
+        dy_dsigma = exp(log(y_value) + log1p(-y_value) -
+                        log(sigma_total.value));
+    }
+    const double dr_dy =
+        (1.0 - y_value * y_value) / (denominator * denominator);
+    const double m = expm1(eps.value / (gamma * phi3.value));
+    const double vsigma =
+        rho.value * gamma * phi3.value * m /
+        (1.0 + (1.0 - r.value) * m) * (-dr_dy * dy_dsigma);
+    for (int i = 0; i < N; ++i)
+        if (sigma_total.deriv[i] != 0.0 && rho.deriv[i] == 0.0)
+            result.deriv[i] =
+                QC_XC_Product(vsigma, sigma_total.deriv[i]);
+    return result;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_LYP_Spin_Impl(
+    const QC_XC_Dual<N>& rho_a, const QC_XC_Dual<N>& rho_b,
+    const QC_XC_Dual<N>& sigma_aa, const QC_XC_Dual<N>& sigma_ab,
+    const QC_XC_Dual<N>& sigma_bb)
+{
+    const double a_lyp = 0.04918;
+    const double b_lyp = 0.132;
+    const double c = 0.2533;
+    const double d = 0.349;
+    const double cbrt2 = cbrt(2.0);
+    const double scale83 = 4.0 * cbrt2 * cbrt2;
+    const double gfac = pow(3.0 * CONSTANT_Pi * CONSTANT_Pi, 2.0 / 3.0);
+
+    const QC_XC_Dual<N> rho = rho_a + rho_b;
+    const QC_XC_Dual<N> plus = 2.0 * rho_a / rho;
+    const QC_XC_Dual<N> minus = 2.0 * rho_b / rho;
+    const QC_XC_Dual<N> one_minus_z2 = 4.0 * rho_a * rho_b / (rho * rho);
+    const QC_XC_Dual<N> plus2 = plus * plus;
+    const QC_XC_Dual<N> minus2 = minus * minus;
+    const QC_XC_Dual<N> spin_power_sum =
+        QC_XC_PowFourThirds(plus * plus) +
+        QC_XC_PowFourThirds(minus * minus);
+    const QC_XC_Dual<N> sigma_total =
+        sigma_aa + 2.0 * sigma_ab + sigma_bb;
+    const QC_XC_Dual<N> sigma_sum = sigma_aa + sigma_bb;
+    const QC_XC_Dual<N> sigma_weighted =
+        sigma_aa * plus + sigma_bb * minus;
+
+    const QC_XC_Dual<N> t92_constant =
+        -(3.0 / 20.0) * gfac * one_minus_z2 * spin_power_sum;
+
+    QC_XC_Dual<N> gradient0 =
+        -sigma_total * (47.0 * one_minus_z2 / 72.0 - 2.0 / 3.0);
+    QC_XC_Dual<N> gradient1 =
+        sigma_total * one_minus_z2 * (7.0 / 216.0);
+
+    gradient0 =
+        gradient0 + cbrt2 * one_minus_z2 * scale83 * 2.5 * sigma_sum / 32.0;
+    gradient1 =
+        gradient1 - cbrt2 * one_minus_z2 * scale83 * sigma_sum /
+                        (32.0 * 54.0);
+    gradient0 =
+        gradient0 - cbrt2 * one_minus_z2 * scale83 * 11.0 *
+                        sigma_weighted / 576.0;
+    gradient1 =
+        gradient1 + cbrt2 * one_minus_z2 * scale83 * sigma_weighted /
+                        (576.0 * 3.0);
+    gradient0 =
+        gradient0 -
+        (cbrt2 * scale83 / 8.0) *
+            ((2.0 / 3.0) * sigma_sum - 0.25 * plus2 * sigma_bb -
+             0.25 * minus2 * sigma_aa);
+
+    const QC_XC_Dual<N> x = QC_XC_Cbrt(rho);
+    const QC_XC_Dual<N> denominator = x + d;
+    const QC_XC_Dual<N> x2 = x * x;
+    const QC_XC_Dual<N> x4 = x2 * x2;
+    const QC_XC_Dual<N> exponential = QC_XC_Exp(-c / x);
+    const QC_XC_Dual<N> exp_x4 =
+        QC_XC_Exp(-c / x - 4.0 * QC_XC_Log(x));
+    const QC_XC_Dual<N> exp_x5 =
+        QC_XC_Exp(-c / x - 5.0 * QC_XC_Log(x));
+
+    const QC_XC_Dual<N> local =
+        -a_lyp * one_minus_z2 * x4 / denominator;
+    const QC_XC_Dual<N> constant =
+        a_lyp * b_lyp * exponential * x4 * t92_constant / denominator;
+    const QC_XC_Dual<N> gradient =
+        a_lyp * b_lyp *
+        (exp_x4 * (gradient0 + 3.0 * d * gradient1 / denominator) /
+             denominator +
+         exp_x5 * (3.0 * c * gradient1) / denominator);
+    return local + constant + gradient;
+}
+
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_RKS_Energy_Impl(
+    QC_METHOD method, const QC_XC_Dual<N>& rho, const QC_XC_Dual<N>& sigma)
+{
     switch (method)
     {
         case QC_METHOD::LDA:
-            QC_VXC_Slater(rho, e1, v1);
-            QC_VXC_VWN5(rho, e2, v2);
-            exc = e1 + e2;
-            vrho = v1 + v2;
-            vsigma = 0.0;
-            break;
+            return QC_XC_Slater_Impl(rho) + rho * QC_XC_VWN5_Impl(rho);
         case QC_METHOD::PBE:
-            QC_VXC_PBE_X(rho, sigma, e1, v1, vs1);
-            QC_VXC_PBE_C(rho, sigma, e2, v2, vs2);
-            exc = e1 + e2;
-            vrho = v1 + v2;
-            vsigma = vs1 + vs2;
-            break;
+            return QC_XC_PBE_X_Impl(rho, sigma) + QC_XC_PBE_C_Impl(rho, sigma);
+        case QC_METHOD::BLYP:
+            return QC_XC_B88_Impl(rho, sigma) + QC_XC_LYP_Impl(rho, sigma);
+        case QC_METHOD::PBE0:
+            return 0.75 * QC_XC_PBE_X_Impl(rho, sigma) +
+                   QC_XC_PBE_C_Impl(rho, sigma);
+        case QC_METHOD::B3LYP:
+            return 0.08 * QC_XC_Slater_Impl(rho) +
+                   0.72 * QC_XC_B88_Impl(rho, sigma) +
+                   0.81 * QC_XC_LYP_Impl(rho, sigma) +
+                   0.19 * rho * QC_XC_VWN5_Impl(rho);
         default:
-        {
-            // Fallback to FD for unsupported functionals
-            rho = fmax(rho, 1e-14);
-            sigma = fmax(sigma, 0.0);
-            exc = QC_Local_Exc_Density(method, rho, sigma);
-            const double dr = fmax(1e-12, 1e-4 * rho);
-            const double ds = fmax(1e-14, 1e-4 * (sigma + 1e-12));
-            vrho =
-                (QC_Local_Exc_Density(method, rho + dr, sigma) -
-                 QC_Local_Exc_Density(method, fmax(1e-14, rho - dr), sigma)) /
-                (rho + dr - fmax(1e-14, rho - dr));
-            vsigma =
-                (QC_Local_Exc_Density(method, rho, sigma + ds) -
-                 QC_Local_Exc_Density(method, rho, fmax(0.0, sigma - ds))) /
-                (sigma + ds - fmax(0.0, sigma - ds));
-            break;
-        }
+            return QC_XC_Dual<N>::Constant(QC_XC_Quiet_NaN());
     }
 }
 
-// PBE Correlation (spin-resolved)
-// F = ρ·(ε_lsda(ρ,ζ) + H(ρ,ζ,σ))
-static inline __host__ __device__ void QC_VXC_PBE_C_Spin(
-    double rho_a, double rho_b, double sigma_aa, double sigma_ab,
-    double sigma_bb, double& energy, double& vrho_a, double& vrho_b,
-    double& vsigma_aa, double& vsigma_ab, double& vsigma_bb)
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_GGA_X_Spin_Channel(
+    QC_METHOD method, const QC_XC_Dual<N>& rho_spin,
+    const QC_XC_Dual<N>& sigma_spin)
 {
-    const double rho = rho_a + rho_b;
-    energy = vrho_a = vrho_b = vsigma_aa = vsigma_ab = vsigma_bb = 0.0;
-    if (rho <= 1e-18) return;
-    const double zeta = (rho_a - rho_b) / rho;
-    const double z = fmax(-1.0 + 1e-12, fmin(1.0 - 1e-12, zeta));
-    const double sigma = fmax(0.0, sigma_aa + 2.0 * sigma_ab + sigma_bb);
-
-    // PW92 spin interpolation: eps_lsda and derivatives
-    const double rs = cbrt(3.0 / (4.0 * CONSTANT_Pi * rho));
-    const double sqrs = sqrt(rs);
-
-    static const double p0[6] = {0.03109070, 0.21370, 7.59570,
-                                 3.5876,     1.63820, 0.49294};
-    static const double p1[6] = {0.01554535, 0.20548, 14.11890,
-                                 6.1977,     3.36620, 0.62517};
-    static const double pa[6] = {0.01688690, 0.11125, 10.35700,
-                                 3.6231,     0.88026, 0.49671};
-
-    auto pw92_gd = [&](const double t[6], double& val, double& dval_drho)
-    {
-        const double s = sqrs;
-        const double poly = s * (t[2] + s * (t[3] + s * (t[4] + t[5] * s)));
-        const double Q = t[0] * poly;
-        const double la = 1.0 + 0.5 / Q;
-        const double pf = -2.0 * t[0] * (1.0 + t[1] * rs);
-        val = pf * log(la);
-        const double dp_ds =
-            t[2] + s * (2.0 * t[3] + s * (3.0 * t[4] + 4.0 * t[5] * s));
-        const double dQ_ds = t[0] * dp_ds;
-        const double dpf_ds = -4.0 * t[0] * t[1] * s;
-        const double dG_ds =
-            dpf_ds * log(la) + pf * (-dQ_ds / (2.0 * Q * Q)) / la;
-        dval_drho = dG_ds * (-s / (6.0 * rho));
-    };
-
-    double ec0, dec0;
-    pw92_gd(p0, ec0, dec0);
-    double ec1, dec1;
-    pw92_gd(p1, ec1, dec1);
-    double eca, deca;
-    pw92_gd(pa, eca, deca);
-    static constexpr double fz20 = 1.70992093416136561756;
-    const double ec2 = eca / fz20, dec2 = deca / fz20;
-
-    const double opz = 1.0 + z, omz = 1.0 - z;
-    const double opz13 = cbrt(opz), omz13 = cbrt(omz);
-    const double opz43 = opz * opz13, omz43 = omz * omz13;
-    const double fzd = pow(2.0, 4.0 / 3.0) - 2.0;
-    const double fz = (opz43 + omz43 - 2.0) / fzd;
-    const double fzp = (4.0 / 3.0) * (opz13 - omz13) / fzd;
-    const double z2 = z * z, z3 = z2 * z, z4 = z2 * z2;
-
-    const double eps_lsda = ec0 + fz * (z4 * (ec1 - ec0) - (1.0 - z4) * ec2);
-    const double deps_drho =
-        dec0 + fz * (z4 * (dec1 - dec0) - (1.0 - z4) * dec2);
-    const double deps_dz = fzp * (z4 * (ec1 - ec0) - (1.0 - z4) * ec2) +
-                           fz * 4.0 * z3 * (ec1 - ec0 + ec2);
-
-    // phi
-    const double opz23 = opz13 * opz13, omz23 = omz13 * omz13;
-    const double phi = 0.5 * (opz23 + omz23);
-    const double dphi_dz =
-        (1.0 / 3.0) * (1.0 / fmax(1e-20, opz13) - 1.0 / fmax(1e-20, omz13));
-
-    // PBE H
-    const double gamma = (1.0 - log(2.0)) / (CONSTANT_Pi * CONSTANT_Pi);
-    const double beta = 0.06672455060314922;
-    const double bg = beta / gamma;
-    const double ph3 = phi * phi * phi;
-    const double w = -eps_lsda / fmax(1e-16, gamma * ph3);
-    const double ew = exp(w);
-    const double em1 = expm1(w);
-    const double A = bg / fmax(1e-30, em1);
-
-    const double kf = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi * rho);
-    const double ks = sqrt(fmax(1e-20, 4.0 * kf / CONSTANT_Pi));
-    const double dt = 2.0 * phi * ks * rho;
-    const double dt2v = fmax(1e-40, dt * dt);
-    const double t2 = sigma / dt2v;
-    const double At2 = A * t2;
-    const double Di = 1.0 + At2 + At2 * At2;
-    const double fr = bg * t2 * (1.0 + At2) / Di;
-    const double H = gamma * ph3 * log(1.0 + fr);
-    energy = rho * (eps_lsda + H);
-
-    // A derivatives
-    const double Af = A + A * A / bg;
-    const double dA_deps = Af / (gamma * ph3);
-    const double dA_dphi =
-        -3.0 * eps_lsda * Af / (gamma * phi * phi * phi * phi);
-
-    // H derivatives
-    const double i1f = 1.0 / (1.0 + fr);
-    const double Di2 = Di * Di;
-    const double dH_dt2 = gamma * ph3 * bg * (1.0 + 2.0 * A * t2) / Di2 * i1f;
-    const double t4 = t2 * t2;
-    const double dfr_dA = -bg * A * t4 * (2.0 * t2 + A * t4) / Di2;
-    const double dH_dA = gamma * ph3 * dfr_dA * i1f;
-    const double dH_dp_dir = (phi > 1e-20) ? 3.0 * H / phi : 0.0;
-
-    // Assemble dH/drho, dH/dz
-    const double dt2_drho = -7.0 * t2 / (3.0 * rho);
-    const double dH_drho = dH_dt2 * dt2_drho + dH_dA * dA_deps * deps_drho;
-    const double dH_dz =
-        dphi_dz * (dH_dp_dir - 2.0 * t2 * dH_dt2 / fmax(1e-20, phi) +
-                   dH_dA * dA_dphi) +
-        dH_dA * dA_deps * deps_dz;
-
-    const double dz_dra = 2.0 * rho_b / (rho * rho);
-    const double dz_drb = -2.0 * rho_a / (rho * rho);
-
-    vrho_a = (eps_lsda + H) + rho * (deps_drho + dH_drho) +
-             rho * (deps_dz + dH_dz) * dz_dra;
-    vrho_b = (eps_lsda + H) + rho * (deps_drho + dH_drho) +
-             rho * (deps_dz + dH_dz) * dz_drb;
-
-    const double vs_common = rho * dH_dt2 / dt2v;
-    vsigma_aa = vs_common;
-    vsigma_ab = 2.0 * vs_common;
-    vsigma_bb = vs_common;
+    if (rho_spin.value == 0.0) return QC_XC_Dual<N>::Constant(0.0);
+    const QC_XC_Dual<N> doubled_rho = 2.0 * rho_spin;
+    const QC_XC_Dual<N> quadrupled_sigma = 4.0 * sigma_spin;
+    if (method == QC_METHOD::PBE || method == QC_METHOD::PBE0)
+        return 0.5 * QC_XC_PBE_X_Impl(doubled_rho, quadrupled_sigma);
+    return 0.5 * QC_XC_B88_Impl(doubled_rho, quadrupled_sigma);
 }
 
-// UKS 解析导数
-// Exchange: spin-separable, ε_x = ½ε_x(2ρα) + ½ε_x(2ρβ)
-//   v_ρα = dε_x(2ρα)/d(2ρα) · 2 · ½ = dε_x(2ρα)/d(2ρα)
-//   v_σαα = dε_x(2ρα)/d(4σαα) · 4 · ½ = 2·dε_x(2ρα)/d(4σαα)
-
-// UKS Slater exchange
-static inline __host__ __device__ void QC_VXC_Slater_Spin(double ra, double rb,
-                                                          double& exc,
-                                                          double& vra,
-                                                          double& vrb)
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_Slater_Spin_Impl(
+    const QC_XC_Dual<N>& rho_a, const QC_XC_Dual<N>& rho_b)
 {
-    double ea, va, eb, vb;
-    QC_VXC_Slater(2.0 * ra, ea, va);
-    QC_VXC_Slater(2.0 * rb, eb, vb);
-    exc = 0.5 * ea + 0.5 * eb;
-    vra = va;  // dε(2ρα)/d(ρα) = dε(2ρα)/d(2ρα) · 2 · (1/2 from half) = va
-    vrb = vb;
+    QC_XC_Dual<N> result = QC_XC_Dual<N>::Constant(0.0);
+    if (rho_a.value != 0.0) result = result + 0.5 * QC_XC_Slater_Impl(2.0 * rho_a);
+    if (rho_b.value != 0.0) result = result + 0.5 * QC_XC_Slater_Impl(2.0 * rho_b);
+    return result;
 }
 
-// UKS PBE exchange (spin-separable)
-static inline __host__ __device__ void QC_VXC_PBE_X_Spin(
-    double ra, double rb, double saa, double sbb, double& exc, double& vra,
-    double& vrb, double& vsaa, double& vsbb)
+template <int N>
+static inline __host__ __device__ QC_XC_Dual<N> QC_XC_UKS_Energy_Impl(
+    QC_METHOD method, const QC_XC_Dual<N>& rho_a,
+    const QC_XC_Dual<N>& rho_b, const QC_XC_Dual<N>& sigma_aa,
+    const QC_XC_Dual<N>& sigma_ab, const QC_XC_Dual<N>& sigma_bb)
 {
-    double ea, va, vsa, eb, vb, vsb;
-    QC_VXC_PBE_X(2.0 * ra, 4.0 * fmax(0.0, saa), ea, va, vsa);
-    QC_VXC_PBE_X(2.0 * rb, 4.0 * fmax(0.0, sbb), eb, vb, vsb);
-    exc = 0.5 * ea + 0.5 * eb;
-    vra = va;
-    vrb = vb;
-    vsaa = 2.0 * vsa;  // chain rule: d(½ε(2ρ,4σ))/dσ = ½·dε/d(4σ)·4 = 2·vsa
-    vsbb = 2.0 * vsb;
-}
-
-// UKS PBE correlation (使用 spin-resolved PW92 + PBE H)
-// 这是最复杂的部分。暂时对 PBE correlation 用 FD
-// (exchange 用解析导数已经解决了大部分精度问题)
-
-// UKS dispatch
-static inline __host__ __device__ void QC_VXC_Analytical_UKS(
-    QC_METHOD method, double ra, double rb, double saa, double sab, double sbb,
-    double& exc, double& vra, double& vrb, double& vsaa, double& vsab,
-    double& vsbb)
-{
-    exc = vra = vrb = vsaa = vsab = vsbb = 0.0;
-    const double rho = ra + rb;
-    if (rho <= 1e-18) return;
-
+    const QC_XC_Dual<N> rho = rho_a + rho_b;
+    const QC_XC_Dual<N> sigma_total =
+        sigma_aa + 2.0 * sigma_ab + sigma_bb;
+    const QC_XC_Dual<N> slater = QC_XC_Slater_Spin_Impl(rho_a, rho_b);
     switch (method)
     {
         case QC_METHOD::LDA:
-        {
-            // Exchange: Slater spin-scaled
-            double ex, vxa, vxb;
-            QC_VXC_Slater_Spin(ra, rb, ex, vxa, vxb);
-            // Correlation: VWN5 spin — 用 FD（解析版太复杂）
-            double ec, vca, vcb;
-            ra = fmax(ra, 1e-14);
-            rb = fmax(rb, 1e-14);
-            ec = QC_Ec_VWN5_Spin(ra, rb);
-            const double dra = fmax(1e-12, 1e-6 * ra);
-            const double drb = fmax(1e-12, 1e-6 * rb);
-            vca = (QC_Ec_VWN5_Spin(ra + dra, rb) -
-                   QC_Ec_VWN5_Spin(fmax(1e-14, ra - dra), rb)) /
-                  (ra + dra - fmax(1e-14, ra - dra));
-            vcb = (QC_Ec_VWN5_Spin(ra, rb + drb) -
-                   QC_Ec_VWN5_Spin(ra, fmax(1e-14, rb - drb))) /
-                  (rb + drb - fmax(1e-14, rb - drb));
-            exc = ex + ec;
-            vra = vxa + vca;
-            vrb = vxb + vcb;
-            vsaa = vsab = vsbb = 0.0;
-            break;
-        }
+            return slater + QC_XC_VWN5_Spin_Impl(rho_a, rho_b);
         case QC_METHOD::PBE:
-        {
-            // Exchange: PBE spin-scaled (解析)
-            double ex, vxa, vxb, vxsaa, vxsbb;
-            QC_VXC_PBE_X_Spin(ra, rb, saa, sbb, ex, vxa, vxb, vxsaa, vxsbb);
-            // Correlation: PBE spin (解析)
-            double ec, vca, vcb, vcsaa, vcsab, vcsbb;
-            QC_VXC_PBE_C_Spin(ra, rb, saa, sab, sbb, ec, vca, vcb, vcsaa, vcsab,
-                              vcsbb);
-            exc = ex + ec;
-            vra = vxa + vca;
-            vrb = vxb + vcb;
-            vsaa = vxsaa + vcsaa;
-            vsab = vcsab;
-            vsbb = vxsbb + vcsbb;
-            break;
-        }
+            return QC_XC_GGA_X_Spin_Channel(method, rho_a, sigma_aa) +
+                   QC_XC_GGA_X_Spin_Channel(method, rho_b, sigma_bb) +
+                   QC_XC_PBE_C_Spin_Impl(rho_a, rho_b, sigma_total);
+        case QC_METHOD::BLYP:
+            return QC_XC_GGA_X_Spin_Channel(method, rho_a, sigma_aa) +
+                   QC_XC_GGA_X_Spin_Channel(method, rho_b, sigma_bb) +
+                   QC_XC_LYP_Spin_Impl(rho_a, rho_b, sigma_aa, sigma_ab,
+                                       sigma_bb);
         case QC_METHOD::PBE0:
-        {
-            double ex, vxa, vxb, vxsaa, vxsbb;
-            QC_VXC_PBE_X_Spin(ra, rb, saa, sbb, ex, vxa, vxb, vxsaa, vxsbb);
-            double ec, vca, vcb, vcsaa, vcsab, vcsbb;
-            QC_VXC_PBE_C_Spin(ra, rb, saa, sab, sbb, ec, vca, vcb, vcsaa, vcsab,
-                              vcsbb);
-            exc = 0.75 * ex + ec;
-            vra = 0.75 * vxa + vca;
-            vrb = 0.75 * vxb + vcb;
-            vsaa = 0.75 * vxsaa + vcsaa;
-            vsab = vcsab;
-            vsbb = 0.75 * vxsbb + vcsbb;
-            break;
-        }
+            return 0.75 *
+                       (QC_XC_GGA_X_Spin_Channel(method, rho_a, sigma_aa) +
+                        QC_XC_GGA_X_Spin_Channel(method, rho_b, sigma_bb)) +
+                   QC_XC_PBE_C_Spin_Impl(rho_a, rho_b, sigma_total);
+        case QC_METHOD::B3LYP:
+            return 0.08 * slater +
+                   0.72 *
+                       (QC_XC_GGA_X_Spin_Channel(method, rho_a, sigma_aa) +
+                        QC_XC_GGA_X_Spin_Channel(method, rho_b, sigma_bb)) +
+                   0.81 * QC_XC_LYP_Spin_Impl(rho_a, rho_b, sigma_aa,
+                                               sigma_ab, sigma_bb) +
+                   0.19 * QC_XC_VWN5_Spin_Impl(rho_a, rho_b);
         default:
-        {
-            // Full FD fallback (B3LYP, BLYP etc.)
-            // 使用更小的步长
-            ra = fmax(ra, 1e-14);
-            rb = fmax(rb, 1e-14);
-            saa = fmax(saa, 0.0);
-            sbb = fmax(sbb, 0.0);
-            exc = QC_Local_Exc_Density_UKS(method, ra, rb, saa, sab, sbb);
-            const double h = 1e-7;
-            const double dra = h * fmax(1., ra), drb = h * fmax(1., rb);
-            const double dsaa = h * fmax(1., saa),
-                         dsab = h * fmax(1., fabs(sab) + 1e-10),
-                         dsbb = h * fmax(1., sbb);
-            vra =
-                (QC_Local_Exc_Density_UKS(method, ra + dra, rb, saa, sab, sbb) -
-                 QC_Local_Exc_Density_UKS(method, fmax(1e-14, ra - dra), rb,
-                                          saa, sab, sbb)) /
-                (ra + dra - fmax(1e-14, ra - dra));
-            vrb =
-                (QC_Local_Exc_Density_UKS(method, ra, rb + drb, saa, sab, sbb) -
-                 QC_Local_Exc_Density_UKS(method, ra, fmax(1e-14, rb - drb),
-                                          saa, sab, sbb)) /
-                (rb + drb - fmax(1e-14, rb - drb));
-            vsaa = (QC_Local_Exc_Density_UKS(method, ra, rb, saa + dsaa, sab,
-                                             sbb) -
-                    QC_Local_Exc_Density_UKS(method, ra, rb,
-                                             fmax(0., saa - dsaa), sab, sbb)) /
-                   (saa + dsaa - fmax(0., saa - dsaa));
-            vsab = (QC_Local_Exc_Density_UKS(method, ra, rb, saa, sab + dsab,
-                                             sbb) -
-                    QC_Local_Exc_Density_UKS(method, ra, rb, saa, sab - dsab,
-                                             sbb)) /
-                   (2. * dsab);
-            vsbb = (QC_Local_Exc_Density_UKS(method, ra, rb, saa, sab,
-                                             sbb + dsbb) -
-                    QC_Local_Exc_Density_UKS(method, ra, rb, saa, sab,
-                                             fmax(0., sbb - dsbb))) /
-                   (sbb + dsbb - fmax(0., sbb - dsbb));
-            break;
-        }
+            return QC_XC_Dual<N>::Constant(QC_XC_Quiet_NaN());
+    }
+}
+
+static inline __host__ __device__ void QC_VXC_Analytical_RKS(
+    QC_METHOD method, double rho, double sigma, double& energy, double& vrho,
+    double& vsigma)
+{
+    energy = vrho = vsigma = 0.0;
+    if (!QC_XC_Method_Is_Supported(method) ||
+        !QC_XC_Inputs_Valid_RKS(rho, sigma))
+    {
+        energy = vrho = vsigma = QC_XC_Quiet_NaN();
+        return;
+    }
+    if (rho == 0.0) return;
+
+    const QC_XC_Dual<2> rho_dual = QC_XC_Dual<2>::Variable(rho, 0);
+    const QC_XC_Dual<2> sigma_dual = QC_XC_Dual<2>::Variable(sigma, 1);
+    const QC_XC_Dual<2> result =
+        QC_XC_RKS_Energy_Impl(method, rho_dual, sigma_dual);
+    energy = result.value;
+    vrho = result.deriv[0];
+    vsigma = method == QC_METHOD::LDA ? 0.0 : result.deriv[1];
+
+    // At sigma=0 the PBE exchange and correlation slopes both scale as
+    // rho^(-4/3).  Each can overflow long before their analytically combined
+    // coefficient does (notably near rho~1e-235).  Combine constants first,
+    // then apply the density power once.
+    if (sigma == 0.0 && (method == QC_METHOD::PBE || method == QC_METHOD::PBE0))
+    {
+        const double cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
+        const double mu = 0.2195149727645171;
+        const double beta = 0.06672455060314922;
+        const double kf_factor = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi);
+        const double d2 =
+            (1.0 / 144.0) * pow(3.0, 5.0 / 3.0) *
+            pow(CONSTANT_Pi, 1.0 / 3.0);
+        const double exchange_weight = method == QC_METHOD::PBE ? 1.0 : 0.75;
+        const double combined =
+            beta * d2 - exchange_weight * cx * mu /
+                            (4.0 * kf_factor * kf_factor);
+        vsigma = QC_XC_Coefficient_Times_Power(combined, rho, -4.0 / 3.0);
+    }
+}
+
+static inline __host__ __device__ void QC_VXC_Analytical_UKS(
+    QC_METHOD method, double rho_a, double rho_b, double sigma_aa,
+    double sigma_ab, double sigma_bb, double& energy, double& vrho_a,
+    double& vrho_b, double& vsigma_aa, double& vsigma_ab, double& vsigma_bb)
+{
+    energy = vrho_a = vrho_b = vsigma_aa = vsigma_ab = vsigma_bb = 0.0;
+    if (!QC_XC_Method_Is_Supported(method) ||
+        !QC_XC_Inputs_Valid_UKS(rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb))
+    {
+        energy = vrho_a = vrho_b = vsigma_aa = vsigma_ab = vsigma_bb =
+            QC_XC_Quiet_NaN();
+        return;
+    }
+    if (rho_a + rho_b == 0.0) return;
+
+    const QC_XC_Dual<5> ra = QC_XC_Dual<5>::Variable(rho_a, 0);
+    const QC_XC_Dual<5> rb = QC_XC_Dual<5>::Variable(rho_b, 1);
+    const QC_XC_Dual<5> saa = QC_XC_Dual<5>::Variable(sigma_aa, 2);
+    const QC_XC_Dual<5> sab = QC_XC_Dual<5>::Variable(sigma_ab, 3);
+    const QC_XC_Dual<5> sbb = QC_XC_Dual<5>::Variable(sigma_bb, 4);
+    QC_XC_Dual<5> result = QC_XC_UKS_Energy_Impl(method, ra, rb, saa, sab, sbb);
+
+    energy = result.value;
+    vrho_a = result.deriv[0];
+    vrho_b = result.deriv[1];
+    vsigma_aa = method == QC_METHOD::LDA ? 0.0 : result.deriv[2];
+    vsigma_ab = method == QC_METHOD::LDA ? 0.0 : result.deriv[3];
+    vsigma_bb = method == QC_METHOD::LDA ? 0.0 : result.deriv[4];
+
+    const unsigned infinite_mask = QC_XC_UKS_Expected_Infinite_Output_Mask(
+        method, rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb);
+    if ((infinite_mask & QC_XC_UKS_VRHO_A_BIT) != 0u)
+        vrho_a = QC_XC_Positive_Infinity();
+    if ((infinite_mask & QC_XC_UKS_VRHO_B_BIT) != 0u)
+        vrho_b = QC_XC_Positive_Infinity();
+
+    // The same zero-gradient overflow cancellation must be done separately
+    // for each spin-scaled exchange channel in UKS.
+    if ((method == QC_METHOD::PBE || method == QC_METHOD::PBE0) &&
+        sigma_aa == 0.0 && sigma_ab == 0.0 && sigma_bb == 0.0)
+    {
+        const double rho = rho_a + rho_b;
+        const double plus = 2.0 * rho_a / rho;
+        const double minus = 2.0 * rho_b / rho;
+        const double phi =
+            0.5 * (pow(plus, 2.0 / 3.0) + pow(minus, 2.0 / 3.0));
+        const double cx = 0.75 * cbrt(3.0 / CONSTANT_Pi);
+        const double mu = 0.2195149727645171;
+        const double beta = 0.06672455060314922;
+        const double kf_factor = cbrt(3.0 * CONSTANT_Pi * CONSTANT_Pi);
+        const double correlation_constant =
+            beta * CONSTANT_Pi * phi / (16.0 * kf_factor);
+        const double exchange_constant =
+            (method == QC_METHOD::PBE ? 1.0 : 0.75) * cx * mu /
+            (4.0 * kf_factor * kf_factor * cbrt(2.0));
+        const double log_correlation =
+            log(correlation_constant) - (4.0 / 3.0) * log(rho);
+        const double correlation = exp(log_correlation);
+        vsigma_ab = 2.0 * correlation;
+        if (rho_a == 0.0)
+            vsigma_aa = correlation;
+        else
+            vsigma_aa = QC_XC_Exp_Difference(
+                log_correlation,
+                log(exchange_constant) - (4.0 / 3.0) * log(rho_a));
+        if (rho_b == 0.0)
+            vsigma_bb = correlation;
+        else
+            vsigma_bb = QC_XC_Exp_Difference(
+                log_correlation,
+                log(exchange_constant) - (4.0 / 3.0) * log(rho_b));
     }
 }

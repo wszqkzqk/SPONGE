@@ -7,13 +7,11 @@ from benchmarks.comparison.tests.amber.tests.utils import (
     extract_sponge_forces_frc_dat,
     extract_sponge_potential,
     force_stats,
-    force_stats_with_rigid_water_entities,
     load_amber_reference_energy,
     load_amber_reference_forces,
     perturb_rst7_inplace,
     perturb_rst7_with_rigid_water_inplace,
     write_gb_in_file_from_parm7,
-    write_tip4p_virtual_atom_from_parm7,
 )
 
 TIP4P_CASES = [
@@ -45,10 +43,6 @@ def test_amber_alanine_dipeptide_tip4pew_run0(
     )
 
     copy_amber_reference_system_files(statics_path, case_dir, case_name)
-    write_tip4p_virtual_atom_from_parm7(
-        case_dir / "system.parm7",
-        case_dir / "tip4p_virtual_atom.txt",
-    )
     (case_dir / "system.rst7").write_text(
         (case_dir / "system_minimized.rst7").read_text()
     )
@@ -70,11 +64,7 @@ def test_amber_alanine_dipeptide_tip4pew_run0(
     sponge_forces = extract_sponge_forces_frc_dat(
         case_dir / "frc.dat", natom=amber_forces.shape[0]
     )
-    stats = force_stats_with_rigid_water_entities(
-        case_dir / "system.parm7",
-        amber_forces,
-        sponge_forces,
-    )
+    stats = force_stats(amber_forces, sponge_forces)
 
     headers = [
         "Case",
@@ -87,9 +77,9 @@ def test_amber_alanine_dipeptide_tip4pew_run0(
         "Status",
     ]
     energy_tol = 0.50
-    force_max_tol = 0.10
-    force_rms_tol = 0.03
-    force_cos_tol = 0.999
+    force_max_tol = 0.075
+    force_rms_tol = 0.012
+    force_cos_tol = 0.99999
     passed = (
         energy_abs_diff <= energy_tol
         and stats["max_abs_diff"] <= force_max_tol
@@ -109,7 +99,7 @@ def test_amber_alanine_dipeptide_tip4pew_run0(
         ]
     ]
     Outputer.print_table(
-        headers, rows, title="AMBER TIP4P-Ew Perturbed Validation"
+        headers, rows, title="AMBER TIP4P-Ew Per-Atom Force Validation"
     )
 
     assert energy_abs_diff <= energy_tol

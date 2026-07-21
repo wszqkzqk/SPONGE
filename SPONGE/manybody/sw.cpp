@@ -19,8 +19,8 @@ void STILLINGER_WEBER_INFORMATION::Initial(CONTROLLER* controller,
     }
     controller->printf("START INITIALIZING STILLINGER WEBER FORCE\n");
     FILE* fp;
-    Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
-                     "r");
+    Open_File_Safely(
+        &fp, controller->Original_Command(this->module_name, "in_file"), "r");
     if (fscanf(fp, "%d %d\n", &atom_numbers, &atom_type_numbers) != 2)
     {
         controller->Throw_SPONGE_Error(

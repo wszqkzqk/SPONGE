@@ -5,6 +5,7 @@
 struct IMPROPER_DIHEDRAL
 {
     char module_name[CHAR_LENGTH_MAX];
+    CONTROLLER* controller = NULL;
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
@@ -31,6 +32,7 @@ struct IMPROPER_DIHEDRAL
     float* d_dihedral_ene = NULL;
     float* d_sigma_of_dihedral_ene = NULL;
     float* h_sigma_of_dihedral_ene = NULL;
+    int* d_invalid_geometry_term = NULL;
 
     // cuda计算分配相关参数
     int threads_per_block = 128;
@@ -58,11 +60,14 @@ struct IMPROPER_DIHEDRAL
     int* d_atom_d_local = NULL;
     float* d_pk_local = NULL;
     float* d_phi0_local = NULL;
+    int* d_global_index_local = NULL;
 
     // 局部信息
     int num_dihe_local = 0;  // 进程内dihedral数
     int local_atom_numbers = 0;
     int* d_num_dihe_local = NULL;
+    int* d_invalid_local_term = NULL;
+    int* d_invalid_local_atom = NULL;
     // 局部函数：allocated模块，查询当前进程domain内需要计算的dihedral序号
     void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
                    char* atom_local_label,

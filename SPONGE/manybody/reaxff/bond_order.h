@@ -3,6 +3,7 @@
 
 #include "../../common.h"
 #include "../../control.h"
+#include "reaxff_geometry.h"
 
 // Device helper for sparse bond index lookup via CSR structure.
 // Given an atom and its neighbor, returns the canonical bond index,
@@ -25,6 +26,7 @@ static __device__ __forceinline__ int find_bond_index(int atom, int neighbor,
 struct REAXFF_BOND_ORDER
 {
     int is_initialized = 0;
+    CONTROLLER* controller = NULL;
 
     int atom_numbers = 0;
     int atom_type_numbers = 0;
@@ -69,6 +71,8 @@ struct REAXFF_BOND_ORDER
     float* d_r_pp = NULL;
 
     int* h_atom_type = NULL;
+    // Immutable input-order table. d_atom_type is the current DD-local view.
+    int* d_atom_type_global = NULL;
     int* d_atom_type = NULL;
 
     // 键级修正参数
@@ -107,11 +111,11 @@ struct REAXFF_BOND_ORDER
     float* d_total_corrected_bond_order = NULL;  // [N]
 
     // Per-bond sparse arrays (indexed by bond/pair index)
-    int* d_pair_i = NULL;            // [max_bonds]
-    int* d_pair_j = NULL;            // [max_bonds]
-    float* d_pair_distances = NULL;  // [max_bonds]
-    int* d_num_pairs_ptr = NULL;     // device counter
-    int h_num_pairs = 0;             // host copy
+    int* d_pair_i = NULL;                        // [max_bonds]
+    int* d_pair_j = NULL;                        // [max_bonds]
+    float* d_pair_distances = NULL;              // [max_bonds]
+    unsigned long long* d_num_pairs_ptr = NULL;  // device counter
+    int h_num_pairs = 0;                         // validated host copy
 
     float* d_corrected_bo_s = NULL;    // [max_bonds] 修正后的sigma键级
     float* d_corrected_bo_pi = NULL;   // [max_bonds] 修正后的pi键级
@@ -135,6 +139,7 @@ struct REAXFF_BOND_ORDER
     float* d_dbo_pi2_dDelta_j = NULL;
     float* d_dbo_raw_total_dr = NULL;  // [max_bonds]
     float* d_CdDelta_prime = NULL;     // [N]
+    int* d_geometry_error = NULL;       // [code, atom i, atom j, -1, -1]
 
     void Initial(CONTROLLER* controller, int atom_numbers,
                  const char* parameter_in_file, const char* type_in_file,
@@ -157,12 +162,18 @@ struct REAXFF_BOND_ORDER
     void Calculate_Uncorrected_Bond_Orders_GPU(
         int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
         const LTMatrix3 rcell, float cutoff, const ATOM_GROUP* d_nl,
-        int* d_pair_i, int* d_pair_j, float* d_distances, int* d_num_pairs_ptr);
+        int* d_pair_i, int* d_pair_j, float* d_distances,
+        unsigned long long* d_num_pairs_ptr);
     void Calculate_Corrected_Bond_Orders_GPU(
         int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
         const LTMatrix3 rcell, float cutoff, int num_pairs, int* d_pair_i,
         int* d_pair_j, float* d_distances);
     void Build_Bond_CSR(int atom_numbers, int num_bonds);
+    void Allocate_Bond_Storage(int capacity);
+    void Release_Bond_Storage();
+    void Ensure_Bond_Capacity(unsigned long long required_capacity);
+    void Reset_Geometry_Error();
+    void Check_Geometry_Error(const char* error_by);
 };
 
 #endif

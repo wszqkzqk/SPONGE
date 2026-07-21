@@ -22,7 +22,8 @@ struct RESTRAIN_CV
     void Initial(CONTROLLER* controller,
                  COLLECTIVE_VARIABLE_CONTROLLER* manager);
     void Restraint(int atom_numbers, VECTOR* crd, LTMatrix3 cell,
-                   LTMatrix3 rcell, int step, float* d_ene, LTMatrix3* d_virial,
-                   VECTOR* frc, int need_potential, int need_pressure);
+                   LTMatrix3 rcell, LTMatrix3 reference_cell, int step,
+                   float* d_ene, LTMatrix3* d_virial, VECTOR* frc,
+                   int need_potential, int need_pressure);
     void Step_Print(CONTROLLER* controller);
 };

@@ -6,51 +6,95 @@
 
 #include "../../structure/matrix.h"
 
-// 构建 (P|Q)^{-1/2} via 特征分解
-// 输入: d_metric[naux × naux] (double, 对称)
-// 输出: d_inv_sqrt[naux × naux] (double)
-// 返回: naux_eff (去除线性依赖后的有效维度)
-static int QC_RI_Build_Metric_InvSqrt(SOLVER_HANDLE solver_handle,
-                                      BLAS_HANDLE blas_handle, int naux,
-                                      const double* d_metric,
-                                      double* d_inv_sqrt,
-                                      std::vector<double>* out_eigval = nullptr,
-                                      std::vector<double>* out_eigvec = nullptr,
-                                      double lindep_thresh = 1e-10)
+// Build both truncated metric inverses from one authoritative eigensystem.
+// The inverse is formed as inv_sqrt * inv_sqrt, so RI-J, RI-K, and the metric
+// response use exactly the same retained subspace.
+static bool QC_RI_Build_Metric_Inverses(
+    SOLVER_HANDLE solver_handle, BLAS_HANDLE blas_handle, int naux,
+    const double* d_metric, double* d_inv_sqrt, double* d_inv,
+    int* out_naux_eff, std::vector<double>* out_eigval,
+    std::vector<double>* out_eigvec, std::vector<double>* out_inv_sqrt,
+    std::vector<double>* out_inv, int* out_solver_api_status,
+    int* out_solver_info, double lindep_thresh = 1e-10)
 {
-    const int naux2 = naux * naux;
+    if (out_naux_eff) *out_naux_eff = 0;
+    if (out_solver_api_status) *out_solver_api_status = 0;
+    if (out_solver_info) *out_solver_info = 0;
+    if (naux <= 0 || naux > std::numeric_limits<int>::max() / naux ||
+        d_metric == nullptr || d_inv_sqrt == nullptr || d_inv == nullptr ||
+        out_naux_eff == nullptr || out_eigval == nullptr ||
+        out_eigvec == nullptr || out_inv_sqrt == nullptr ||
+        out_inv == nullptr || out_solver_api_status == nullptr ||
+        out_solver_info == nullptr ||
+        !Double_Memory_Is_Finite(&lindep_thresh) ||
+        !(lindep_thresh > 0.0))
+        return false;
+    const size_t naux2 = (size_t)naux * naux;
+    if (naux2 > std::numeric_limits<size_t>::max() / sizeof(double))
+        return false;
 
     deviceMemcpy(d_inv_sqrt, d_metric, sizeof(double) * naux2,
                  deviceMemcpyDeviceToDevice);
 
     double* d_eigval = NULL;
-    Device_Malloc_Safely((void**)&d_eigval, sizeof(double) * naux);
+    if (!Device_Malloc_Safely((void**)&d_eigval, sizeof(double) * naux) ||
+        d_eigval == nullptr)
+        return false;
 
     double* d_work = NULL;
     int lwork = 0;
-    int stat = QC_Diagonalize_Double_Workspace_Size(
+    const int workspace_status = QC_Diagonalize_Double_Workspace_Size(
         solver_handle, naux, d_inv_sqrt, d_eigval, &d_work, &lwork);
-    if (stat != 0)
+    if (workspace_status != 0 || lwork <= 0 || d_work == nullptr)
     {
+        *out_solver_api_status =
+            workspace_status != 0 ? workspace_status
+                                  : (lwork <= 0 ? -2 : -3);
+        if (d_work) deviceFree(d_work);
         if (d_eigval) deviceFree(d_eigval);
-        return 0;
+        return false;
     }
 
     int info = 0;
-    QC_Diagonalize_Double(solver_handle, naux, d_inv_sqrt, d_eigval, d_work,
-                          lwork, &info);
-    if (info != 0)
+    const int api_status = QC_Diagonalize_Double(
+        solver_handle, naux, d_inv_sqrt, d_eigval, d_work, lwork, &info);
+    *out_solver_api_status = api_status;
+    *out_solver_info = info;
+    if (api_status != 0 || info != 0)
     {
         if (d_work) deviceFree(d_work);
         if (d_eigval) deviceFree(d_eigval);
-        return 0;
+        return false;
     }
 
     std::vector<double> h_eigval(naux);
     deviceMemcpy(h_eigval.data(), d_eigval, sizeof(double) * naux,
                  deviceMemcpyDeviceToHost);
 
-    // 特征值升序排列，跳过低于阈值的（线性依赖）
+    std::vector<double> h_eigvec(naux2);
+    deviceMemcpy(h_eigvec.data(), d_inv_sqrt, sizeof(double) * naux2,
+                 deviceMemcpyDeviceToHost);
+    for (int i = 0; i < naux; ++i)
+    {
+        if (!Double_Memory_Is_Finite(&h_eigval[i]) ||
+            h_eigval[i] < -lindep_thresh ||
+            (i > 0 && h_eigval[i] < h_eigval[i - 1]))
+        {
+            deviceFree(d_work);
+            deviceFree(d_eigval);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < h_eigvec.size(); ++i)
+    {
+        if (!Double_Memory_Is_Finite(&h_eigvec[i]))
+        {
+            deviceFree(d_work);
+            deviceFree(d_eigval);
+            return false;
+        }
+    }
+
     int n_skip = 0;
     for (int i = 0; i < naux; i++)
     {
@@ -60,108 +104,105 @@ static int QC_RI_Build_Metric_InvSqrt(SOLVER_HANDLE solver_handle,
             break;
     }
     const int naux_eff = naux - n_skip;
+    if (naux_eff <= 0)
+    {
+        deviceFree(d_work);
+        deviceFree(d_eigval);
+        return false;
+    }
+    for (int i = n_skip; i < naux; ++i)
+    {
+        if (!(h_eigval[i] >= lindep_thresh) || !(h_eigval[i] > 0.0))
+        {
+            deviceFree(d_work);
+            deviceFree(d_eigval);
+            return false;
+        }
+    }
 
-    // 构建 (P|Q)^{-1/2} = V * V^T，其中 V[i,k] = U[i,k] * λ_k^{-1/4}
     double* d_V = NULL;
-    Device_Malloc_Safely((void**)&d_V, sizeof(double) * naux * naux_eff);
+    const size_t retained_size = (size_t)naux * naux_eff;
+    if (!Device_Malloc_Safely((void**)&d_V, sizeof(double) * retained_size) ||
+        d_V == nullptr)
+    {
+        deviceFree(d_work);
+        deviceFree(d_eigval);
+        return false;
+    }
 
-    std::vector<double> h_eigvec(naux * naux);
-    deviceMemcpy(h_eigvec.data(), d_inv_sqrt, sizeof(double) * naux2,
-                 deviceMemcpyDeviceToHost);
-
-    std::vector<double> h_V(naux * naux_eff);
+    std::vector<double> h_V(retained_size);
     for (int k = 0; k < naux_eff; k++)
     {
-        double scale = pow(h_eigval[k + n_skip], -0.25);
+        const double scale = pow(h_eigval[k + n_skip], -0.25);
+        if (!Double_Memory_Is_Finite(&scale) || !(scale > 0.0))
+        {
+            deviceFree(d_V);
+            deviceFree(d_work);
+            deviceFree(d_eigval);
+            return false;
+        }
         for (int i = 0; i < naux; i++)
+        {
             h_V[i + k * naux] = h_eigvec[i + (k + n_skip) * naux] * scale;
+            if (!Double_Memory_Is_Finite(&h_V[i + k * naux]))
+            {
+                deviceFree(d_V);
+                deviceFree(d_work);
+                deviceFree(d_eigval);
+                return false;
+            }
+        }
     }
-    deviceMemcpy(d_V, h_V.data(), sizeof(double) * naux * naux_eff,
+    deviceMemcpy(d_V, h_V.data(), sizeof(double) * retained_size,
                  deviceMemcpyHostToDevice);
 
-    // inv_sqrt = V * V^T
     const double one = 1.0, zero = 0.0;
     deviceBlasDgemm(blas_handle, DEVICE_BLAS_OP_N, DEVICE_BLAS_OP_T, naux, naux,
                     naux_eff, &one, d_V, naux, d_V, naux, &zero, d_inv_sqrt,
                     naux);
+    deviceBlasDgemm(blas_handle, DEVICE_BLAS_OP_N, DEVICE_BLAS_OP_N, naux, naux,
+                    naux, &one, d_inv_sqrt, naux, d_inv_sqrt, naux, &zero,
+                    d_inv, naux);
 
-    // 保存特征值/向量供梯度使用 (Daleckii-Kreĭn 公式)
-    if (out_eigval) *out_eigval = h_eigval;
-    if (out_eigvec) *out_eigvec = h_eigvec;
-
-    if (d_V) deviceFree(d_V);
-    if (d_work) deviceFree(d_work);
-    if (d_eigval) deviceFree(d_eigval);
-
-    return naux_eff;
-}
-
-// 构建 (P|Q)^{-1} via 特征分解
-// V[i,k] = U[i,k] / λ_k, inv = V * U^T
-static void QC_RI_Build_Metric_Inv(SOLVER_HANDLE solver_handle,
-                                   BLAS_HANDLE blas_handle, int naux,
-                                   const double* d_metric, double* d_inv,
-                                   int naux_eff, double lindep_thresh = 1e-10)
-{
-    const int naux2 = naux * naux;
-
-    double* d_eigvec = NULL;
-    Device_Malloc_Safely((void**)&d_eigvec, sizeof(double) * naux2);
-    deviceMemcpy(d_eigvec, d_metric, sizeof(double) * naux2,
-                 deviceMemcpyDeviceToDevice);
-
-    double* d_eigval = NULL;
-    Device_Malloc_Safely((void**)&d_eigval, sizeof(double) * naux);
-
-    double* d_work = NULL;
-    int lwork = 0;
-    QC_Diagonalize_Double_Workspace_Size(solver_handle, naux, d_eigvec,
-                                         d_eigval, &d_work, &lwork);
-    int info = 0;
-    QC_Diagonalize_Double(solver_handle, naux, d_eigvec, d_eigval, d_work,
-                          lwork, &info);
-
-    std::vector<double> h_eigval(naux);
-    deviceMemcpy(h_eigval.data(), d_eigval, sizeof(double) * naux,
+    std::vector<double> h_inv_sqrt(naux2);
+    std::vector<double> h_inv(naux2);
+    deviceMemcpy(h_inv_sqrt.data(), d_inv_sqrt, sizeof(double) * naux2,
                  deviceMemcpyDeviceToHost);
-
-    std::vector<double> h_eigvec(naux2);
-    deviceMemcpy(h_eigvec.data(), d_eigvec, sizeof(double) * naux2,
+    deviceMemcpy(h_inv.data(), d_inv, sizeof(double) * naux2,
                  deviceMemcpyDeviceToHost);
-
-    int n_skip = naux - naux_eff;
-
-    // V[i,k] = U[i,k] / λ_k
-    std::vector<double> h_V(naux * naux_eff);
-    for (int k = 0; k < naux_eff; k++)
+    for (size_t i = 0; i < naux2; ++i)
     {
-        double scale = 1.0 / h_eigval[k + n_skip];
-        for (int i = 0; i < naux; i++)
-            h_V[i + k * naux] = h_eigvec[i + (k + n_skip) * naux] * scale;
+        if (!Double_Memory_Is_Finite(&h_inv_sqrt[i]) ||
+            !Double_Memory_Is_Finite(&h_inv[i]))
+        {
+            deviceFree(d_V);
+            deviceFree(d_work);
+            deviceFree(d_eigval);
+            return false;
+        }
+    }
+    for (int i = 0; i < naux; ++i)
+    {
+        const double inv_sqrt_diagonal = h_inv_sqrt[(size_t)i * naux + i];
+        const double inv_diagonal = h_inv[(size_t)i * naux + i];
+        if (!(inv_sqrt_diagonal > 0.0) || !(inv_diagonal > 0.0))
+        {
+            deviceFree(d_V);
+            deviceFree(d_work);
+            deviceFree(d_eigval);
+            return false;
+        }
     }
 
-    double* d_V = NULL;
-    Device_Malloc_Safely((void**)&d_V, sizeof(double) * naux * naux_eff);
-    deviceMemcpy(d_V, h_V.data(), sizeof(double) * naux * naux_eff,
-                 deviceMemcpyHostToDevice);
-
-    double* d_U = NULL;
-    Device_Malloc_Safely((void**)&d_U, sizeof(double) * naux * naux_eff);
-    std::vector<double> h_U(naux * naux_eff);
-    for (int k = 0; k < naux_eff; k++)
-        for (int i = 0; i < naux; i++)
-            h_U[i + k * naux] = h_eigvec[i + (k + n_skip) * naux];
-    deviceMemcpy(d_U, h_U.data(), sizeof(double) * naux * naux_eff,
-                 deviceMemcpyHostToDevice);
-
-    // inv = V * U^T
-    const double one = 1.0, zero = 0.0;
-    deviceBlasDgemm(blas_handle, DEVICE_BLAS_OP_N, DEVICE_BLAS_OP_T, naux, naux,
-                    naux_eff, &one, d_V, naux, d_U, naux, &zero, d_inv, naux);
+    *out_naux_eff = naux_eff;
+    *out_eigval = std::move(h_eigval);
+    *out_eigvec = std::move(h_eigvec);
+    *out_inv_sqrt = std::move(h_inv_sqrt);
+    *out_inv = std::move(h_inv);
 
     if (d_V) deviceFree(d_V);
-    if (d_U) deviceFree(d_U);
-    if (d_eigvec) deviceFree(d_eigvec);
-    if (d_eigval) deviceFree(d_eigval);
     if (d_work) deviceFree(d_work);
+    if (d_eigval) deviceFree(d_eigval);
+
+    return true;
 }

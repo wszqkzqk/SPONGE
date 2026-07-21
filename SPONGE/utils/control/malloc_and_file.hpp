@@ -38,7 +38,16 @@ inline bool Device_Malloc_Safely(void** address, size_t size)
     }
 #else
     address[0] = malloc(size);
-    return true;
+    if (address[0] != NULL)
+    {
+        return true;
+    }
+#ifndef NO_GLOBAL_CONTROLLER
+    extern CONTROLLER controller;
+    controller.Throw_SPONGE_Error(spongeErrorMallocFailed,
+                                  "Device_Malloc_Safely");
+#endif
+    return false;
 #endif
 }
 
@@ -185,12 +194,12 @@ inline FILE* CONTROLLER::Get_Output_File(bool binary, const char* command,
     std::string filename;
     if (this->Command_Exist(command))
     {
-        filename = this->Command(command);
+        filename = this->Original_Command(command);
     }
     else if (default_suffix != NULL &&
              this->Command_Exist("default_out_file_prefix"))
     {
-        filename = this->Command("default_out_file_prefix");
+        filename = this->Original_Command("default_out_file_prefix");
         filename += default_suffix;
     }
     else if (default_filename != NULL)
@@ -223,13 +232,38 @@ inline FILE* CONTROLLER::Get_Output_File(bool binary, const char* prefix,
 
 inline void CONTROLLER::Set_File_Buffer(FILE* file, size_t one_frame_size)
 {
-    char* buffer;
-    Malloc_Safely((void**)&buffer, one_frame_size * buffer_frame);
-    if (setvbuf(file, buffer, _IOFBF, one_frame_size * buffer_frame) != 0)
+    if (file == NULL)
+    {
+        Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "CONTROLLER::Set_File_Buffer",
+            "Reason:\n\tcannot configure buffering for a null file\n");
+    }
+    if (buffer_frame <= 0)
+    {
+        Throw_Formatted_SPONGE_Error(
+            spongeErrorValueErrorCommand, "CONTROLLER::Set_File_Buffer",
+            "Reason:\n\tbuffer_frame must be positive; got %d\n",
+            buffer_frame);
+    }
+    if (one_frame_size == 0) return;
+    if (one_frame_size > std::numeric_limits<std::size_t>::max() /
+                             static_cast<std::size_t>(buffer_frame))
+    {
+        Throw_SPONGE_Error(
+            spongeErrorOverflow, "CONTROLLER::Set_File_Buffer",
+            "Reason:\n\tthe requested trajectory buffer size overflows "
+            "size_t\n");
+    }
+    const std::size_t buffer_size =
+        one_frame_size * static_cast<std::size_t>(buffer_frame);
+    // With a null backing pointer, libc owns the buffer for the lifetime of
+    // the FILE.  This avoids leaking a caller-allocated buffer and guarantees
+    // that it remains valid until fclose.
+    if (setvbuf(file, NULL, _IOFBF, buffer_size) != 0)
     {
         std::string error_reason = string_format(
-            "Reason:\n\tthe trajectory file will be written every %buffer_frame% and SPONGE failed to allocate a memory for this. \
-Please use the command 'buffer_frame = xxx' to decrease the buffer size",
+            "Reason:\n\tfailed to configure a %buffer_frame%-frame "
+            "trajectory output buffer",
             {{"buffer_frame", std::to_string(buffer_frame)}});
         Throw_SPONGE_Error(spongeErrorMallocFailed,
                            "CONTROLLER::Set_File_Buffer", error_reason.c_str());
@@ -265,6 +299,15 @@ std::string Read_File_To_String(const std::string& path, CONTROLLER* controller)
     }
     std::ostringstream buffer;
     buffer << stream.rdbuf();
+    if (stream.bad())
+    {
+        std::string error_reason = string_format(
+            "Reason:\n\tI/O error while reading mdin file '%PATH%'",
+            {{"PATH", path}});
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "CONTROLLER::Commands_From_In_File", error_reason.c_str());
+    }
     return buffer.str();
 }
 
@@ -274,9 +317,11 @@ void Load_Toml_Commands(const std::string& content,
                         ControllerType* controller, const char* error_by)
 {
     std::map<std::string, std::string> parsed_commands;
+    std::set<std::string> scalar_string_keys;
     std::string parse_error;
     if (!sponge::toml_wrap::ParseAndFlatten(content, source_path,
-                                            &parsed_commands, &parse_error))
+                                            &parsed_commands,
+                                            &scalar_string_keys, &parse_error))
     {
         std::string error_reason =
             string_format("Reason:\n\tTOML parse error in '%PATH%': %DESC%",
@@ -287,7 +332,8 @@ void Load_Toml_Commands(const std::string& content,
     }
     for (const auto& [full_key, value] : parsed_commands)
     {
-        controller->Set_Command(full_key.c_str(), value.c_str(), 1, NULL);
+        controller->Set_Command(full_key.c_str(), value.c_str(), 1, NULL,
+                                scalar_string_keys.count(full_key) != 0);
     }
 }
 }  // namespace

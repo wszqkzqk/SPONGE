@@ -29,7 +29,11 @@
 | `pbc` | bool | `true` | Enable periodic boundary conditions |
 
 If `pbc = false`, SPONGE switches to the no-PBC path. This cannot be used with
-`npt`, is not supported in multi-process mode, and expects a very large box.
+`npt` and is not supported in multi-process mode. The supplied finite cell is
+retained as reference metadata for scaled coordinates, density, and stress
+normalization; it does not wrap interaction displacements. NOPBC Lennard-Jones
+and Coulomb kernels evaluate every non-excluded pair directly, so the periodic
+neighbor-list `cutoff` does not truncate the isolated-system Hamiltonian.
 
 ## Time and Steps
 

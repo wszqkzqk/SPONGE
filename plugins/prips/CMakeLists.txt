@@ -27,6 +27,17 @@ target_include_directories(${PROJECT_NAME}
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(${PROJECT_NAME} PRIVATE Python3::Python)
 
+# Conda's upstream Clang driver uses a separately packaged ld64 on macOS. Unlike
+# AppleClang, that combination does not resolve all symbols supplied by the
+# loading process while creating a plugin dylib.  PRIPS is loaded into SPONGE
+# and embeds the selected Python library, so use the standard macOS
+# dynamic-plugin lookup mode for this toolchain only.  Keep AppleClang's normal
+# strict link and leave every non-Apple platform unchanged.
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  target_link_options(${PROJECT_NAME} PRIVATE
+                      "LINKER:-undefined,dynamic_lookup")
+endif()
+
 file(
   GENERATE
   OUTPUT ${CMAKE_BINARY_DIR}/pylib.txt

@@ -246,12 +246,16 @@ static void Amber_Load_Classical_Force_Field(System* system,
     std::vector<float> scnb_scale_factor;
     std::vector<float> raw_lj_pair_A;
     std::vector<float> raw_lj_pair_B;
+    std::vector<float> raw_lj14_pair_A;
+    std::vector<float> raw_lj14_pair_B;
     std::vector<float> hbond_pair_A;
     std::vector<float> hbond_pair_B;
     std::vector<int> nonbonded_parm_index;
 
     bool has_lj_pair_A = false;
     bool has_lj_pair_B = false;
+    bool has_lj14_pair_A = false;
+    bool has_lj14_pair_B = false;
     bool has_hbond_pair_A = false;
     bool has_hbond_pair_B = false;
     bool has_nonbonded_parm_index = false;
@@ -589,6 +593,36 @@ static void Amber_Load_Classical_Force_Field(System* system,
             }
             has_lj_pair_B = true;
         }
+        else if (current_flag == "LENNARD_JONES_14_ACOEF")
+        {
+            int pair_type_numbers =
+                atom_type_numbers * (atom_type_numbers + 1) / 2;
+            Amber_Require_Exact_Section_Size(
+                values, static_cast<std::size_t>(pair_type_numbers), controller,
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "LENNARD_JONES_14_ACOEF");
+            raw_lj14_pair_A.resize(pair_type_numbers);
+            for (int j = 0; j < pair_type_numbers; j++)
+            {
+                raw_lj14_pair_A[j] = 12.0f * Amber_Parse_Float(values[j]);
+            }
+            has_lj14_pair_A = true;
+        }
+        else if (current_flag == "LENNARD_JONES_14_BCOEF")
+        {
+            int pair_type_numbers =
+                atom_type_numbers * (atom_type_numbers + 1) / 2;
+            Amber_Require_Exact_Section_Size(
+                values, static_cast<std::size_t>(pair_type_numbers), controller,
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "LENNARD_JONES_14_BCOEF");
+            raw_lj14_pair_B.resize(pair_type_numbers);
+            for (int j = 0; j < pair_type_numbers; j++)
+            {
+                raw_lj14_pair_B[j] = 6.0f * Amber_Parse_Float(values[j]);
+            }
+            has_lj14_pair_B = true;
+        }
         i--;
     }
 
@@ -599,6 +633,15 @@ static void Amber_Load_Classical_Force_Field(System* system,
             "Xponge::Amber_Load_Classical_Force_Field",
             "Reason:\n\tLENNARD_JONES_ACOEF and LENNARD_JONES_BCOEF must "
             "either both be present or both be absent\n");
+    }
+    if (has_lj14_pair_A != has_lj14_pair_B)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "Reason:\n\tLENNARD_JONES_14_ACOEF and "
+            "LENNARD_JONES_14_BCOEF must either both be present or both be "
+            "absent\n");
     }
     if (has_hbond_pair_A != has_hbond_pair_B)
     {
@@ -631,7 +674,23 @@ static void Amber_Load_Classical_Force_Field(System* system,
             "LENNARD_JONES_BCOEF");
     }
 
+    std::vector<float> lj14_pair_A;
+    std::vector<float> lj14_pair_B;
+    if (has_lj14_pair_A)
+    {
+        Amber_Remap_LJ_Pair_Matrix(
+            raw_lj14_pair_A, raw_lj14_pair_B, canonical_nonbonded_map,
+            &lj14_pair_A, &lj14_pair_B, controller,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "LENNARD_JONES_14_ACOEF", "LENNARD_JONES_14_BCOEF");
+    }
+
     ff->lj.atom_type_numbers = atom_type_numbers;
+
+    const std::vector<float>& nb14_pair_A =
+        has_lj14_pair_A ? lj14_pair_A : ff->lj.pair_A;
+    const std::vector<float>& nb14_pair_B =
+        has_lj14_pair_B ? lj14_pair_B : ff->lj.pair_B;
 
     ff->dihedrals.atom_a.reserve(raw_dihedral_a.size());
     ff->dihedrals.atom_b.reserve(raw_dihedral_a.size());
@@ -685,7 +744,7 @@ static void Amber_Load_Classical_Force_Field(System* system,
         ff->dihedrals.gams.push_back(gams);
 
         if (raw_dihedral_c[i] > 0 && !ff->lj.atom_type.empty() &&
-            !ff->lj.pair_A.empty() && !ff->lj.pair_B.empty())
+            !nb14_pair_A.empty() && !nb14_pair_B.empty())
         {
             int type_a = ff->lj.atom_type[atom_a];
             int type_b = ff->lj.atom_type[atom_d];
@@ -710,8 +769,8 @@ static void Amber_Load_Classical_Force_Field(System* system,
             }
             ff->nb14.atom_a.push_back(atom_a);
             ff->nb14.atom_b.push_back(atom_d);
-            ff->nb14.A.push_back(lj_scale * ff->lj.pair_A[pair_type]);
-            ff->nb14.B.push_back(lj_scale * ff->lj.pair_B[pair_type]);
+            ff->nb14.A.push_back(lj_scale * nb14_pair_A[pair_type]);
+            ff->nb14.B.push_back(lj_scale * nb14_pair_B[pair_type]);
             ff->nb14.cf_scale_factor.push_back(cf_scale);
         }
     }

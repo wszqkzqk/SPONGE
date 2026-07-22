@@ -43,6 +43,7 @@ COLLECTIVE_VARIABLE_CONTROLLER cv_controller;
 STEER_CV steer_cv;
 RESTRAIN_CV restrain_cv;
 META meta;
+VORONOI_DETECTOR voronoi_detector;
 LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
 HARD_WALL hard_wall;
@@ -64,6 +65,45 @@ SPONGE_PLUGIN plugin;
 
 deviceStream_t main_stream;
 
+static void Main_Export_Voronoi_Hit()
+{
+    const std::string basename = voronoi_detector.Hit_Restart_Basename();
+    if (basename.empty())
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "Main_Export_Voronoi_Hit",
+            "Reason:\n\tthe terminal Voronoi hit has no destination "
+            "artifact name\n");
+    }
+
+    // A hit is observed on the committed x_n state, before Main_Iteration.
+    // Gather that exact local state and force a host refresh; ordinary output
+    // may already have synchronized another state under the same step label.
+    md_info.Crd_Vel_dd_to_Device(dd.crd, dd.vel, dd.atom_local_label,
+                                 dd.atom_local_id, main_stream);
+    deviceStreamSynchronize(main_stream);
+    md_info.Crd_Vel_Device_To_Host(true);
+
+    const int completed_steps =
+        voronoi_detector.hit_step - voronoi_detector.initial_step;
+    const VORONOI_INTERFACE_RECORD& source =
+        voronoi_detector.interfaces[voronoi_detector.source_interface];
+    const VORONOI_INTERFACE_RECORD& destination =
+        voronoi_detector.Hit_Interface();
+    controller.printf(
+        "VORONOI_HIT source=%s from=%d destination=%s to=%d "
+        "completed_steps=%d hit_time_ps=%.10g source_recrossings=%llu "
+        "artifact=%s\n",
+        source.name.c_str(), voronoi_detector.hit_from_milestone,
+        destination.name.c_str(), voronoi_detector.destination_milestone,
+        completed_steps,
+        static_cast<double>(completed_steps) * md_info.sys.dt_in_ps,
+        static_cast<unsigned long long>(
+            voronoi_detector.source_recrossing_count),
+        basename.c_str());
+    md_info.output.Export_Restart_File(basename.c_str(), false);
+}
+
 int main(int argc, char* argv[])
 {
     Main_Initial(argc, argv);
@@ -71,7 +111,12 @@ int main(int argc, char* argv[])
          md_info.sys.steps++)
     {
         Main_Sync_Dynamic_Targets_To_Controllers();
-        Main_Calculate_Force();
+        Main_Calculate_Force(true);
+        if (voronoi_detector.Has_Terminal_Hit())
+        {
+            Main_Export_Voronoi_Hit();
+            break;
+        }
         Main_Iteration();
         Main_Print();
     }
@@ -240,6 +285,7 @@ void Main_Initial(int argc, char* argv[])
     steer_cv.Initial(&controller, &cv_controller);
     restrain_cv.Initial(&controller, &cv_controller);
     meta.Initial(&controller, &cv_controller);
+    voronoi_detector.Initial(&controller, &cv_controller);
 
     cv_controller.Print_Initial();
     plugin.After_Initial();
@@ -270,7 +316,7 @@ void Main_Initial(int argc, char* argv[])
     controller.Print_First_Line_To_Mdout();
 }
 
-void Main_Calculate_Force()
+void Main_Calculate_Force(bool observe_voronoi_state)
 {
     bool use_reaxff_eeq = reaxff.eeq.is_initialized;
     const int cv_atom_numbers =
@@ -469,7 +515,7 @@ void Main_Calculate_Force()
                            md_info.need_pressure, dd.d_virial, dd.frc, &md_info,
                            &dd);
 
-        if (CONTROLLER::MPI_size == 1 && CONTROLLER::PM_MPI_size == 1)
+        if (CONTROLLER::MPI_size == 1)
         {
             vatom.Coordinate_Refresh_CV(dd.crd, md_info.pbc.cell,
                                         md_info.pbc.rcell);
@@ -499,6 +545,9 @@ void Main_Calculate_Force()
                                  md_info.need_potential, md_info.need_pressure,
                                  dd.frc, dd.d_energy, dd.d_virial,
                                  md_info.sys.h_temperature);
+            voronoi_detector.Observe(cv_atom_numbers, dd.crd, md_info.pbc.cell,
+                                     md_info.pbc.rcell, md_info.sys.steps,
+                                     observe_voronoi_state, &controller);
             vatom.Force_Redistribute_CV(dd.crd, md_info.pbc.cell,
                                         md_info.pbc.rcell, dd.frc);
         }
@@ -821,6 +870,7 @@ void Main_Print()
         steer_cv.Step_Print(&controller);
         restrain_cv.Step_Print(&controller);
         meta.Step_Print(&controller);
+        voronoi_detector.Step_Print(&controller);
         soft_walls.Step_Print(&controller);
         controller.Print_To_Screen_And_Mdout();
     }
@@ -1079,7 +1129,7 @@ void Main_MC_Barostat()
             dd.Res_Crd_Map(mc_baro.g, md_info.dt);
         }
 
-        Main_Calculate_Force();
+        Main_Calculate_Force(false);
         dd.Get_Potential(&controller, &md_info);
         mc_baro.energy_new = dd.h_sum_ene_total;
         mc_baro.extra_term = md_info.sys.target_pressure * mc_baro.DeltaV -

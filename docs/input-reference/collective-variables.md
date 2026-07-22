@@ -254,6 +254,55 @@ Parameters:
 |-----------|------|-------------|
 | `CV` | CV list | CVs to print |
 
+## Voronoi milestoning first-hit detector
+
+`voronoi_detector` stops a serial trajectory at the first sampled hit of a
+declared Voronoi interface other than its launch interface. Add the detector
+to the CV file and select the CVs in the same order used by the milestone
+manifest:
+
+```toml
+[distance]
+CV_type = "distance"
+atom = [0, 1]
+
+[voronoi_detector]
+CV = ["distance"]
+milestone_file = "milestones.txt"
+source_interface = "S_0_1"
+```
+
+The manifest starts with the anchor count and one record per anchor. Each
+record contains a label followed by one coordinate per selected CV. It then
+lists the declared undirected interfaces by endpoint index:
+
+```text
+3
+M_0 1.0
+M_1 2.0
+M_2 3.0
+2
+S_0_1 0 1
+S_1_2 1 2
+```
+
+The initial state must belong uniquely to either endpoint cell of
+`source_interface`. Crossing back and forth between those two cells is a
+source-interface recrossing: it does not terminate the trajectory, create a
+self-transition, or reset the first-passage clock. The first unique contact
+with any other declared adjacent interface is terminal. Ambiguous ties and
+nonadjacent cell jumps stop with an error instead of assigning an uncertain
+destination.
+
+On a terminal hit, SPONGE logs one `VORONOI_HIT` record and writes
+`voronoi_hit_<interface>_coordinate.txt` and
+`voronoi_hit_<interface>_velocity.txt`. Detection samples committed states at
+MD step boundaries; it does not interpolate a continuous-time crossing, so
+the reported hit has one-timestep resolution. The detector checks which source
+cell contains the initial state, but launch-interface proximity and the
+first-hitting-point distribution remain responsibilities of the sampling
+workflow. This detector currently requires exactly one MPI process.
+
 ## Restrain
 
 `restrain` applies a harmonic bias potential:

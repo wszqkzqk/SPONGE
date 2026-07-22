@@ -22,6 +22,23 @@
 |------|------|------|
 | `sink` | string | Sink metadynamics 模式 |
 
+## Voronoi milestoning 首达检测
+
+在 CV 文件中配置：
+
+```toml
+[voronoi_detector]
+CV = ["distance"]
+milestone_file = "milestones.txt"
+source_interface = "S_0_1"
+```
+
+`source_interface` 是无向发射界面。轨迹在它两侧 cell 之间的回穿只更新
+当前侧并计数，不终止，也不重置首次到达时间；首次命中其他已声明邻接界面
+才终止并导出 `voronoi_hit_<interface>` 坐标和速度。检测按 MD step 对已提交
+状态采样，不做连续时间插值；当前只支持单 MPI 进程。milestone manifest 的
+完整格式和初态要求见用户文档 `collective-variables.md`。
+
 ## SITS
 
 SITS（Self-guided Integrated Tempering Sampling）参数：

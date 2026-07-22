@@ -202,30 +202,30 @@ void MD_INFORMATION::trajectory_output::Append_Box_Traj_File(FILE* fp)
 }
 
 void MD_INFORMATION::trajectory_output::Export_Restart_File(
-    const char* rst7_name)
+    const char* rst7_name, bool state_is_post_iteration)
 {
     if (!md_info->is_initialized || CONTROLLER::MPI_rank) return;
 
-    char filename[CHAR_LENGTH_MAX];
-    if (rst7_name == NULL)
-        strcpy(filename, restart_name);
-    else
-        strcpy(filename, rst7_name);
+    const bool explicit_name = rst7_name != NULL;
+    const std::string filename = explicit_name ? rst7_name : restart_name;
     md_info->Crd_Vel_Device_To_Host();
-    int export_index = restart_export_count % max_restart_export_count;
-    restart_export_count = restart_export_count + 1;
+    int export_index = 0;
+    if (!explicit_name)
+    {
+        export_index = restart_export_count % max_restart_export_count;
+        restart_export_count = restart_export_count + 1;
+    }
     std::string prefix =
         export_index ? std::to_string(export_index) + "_" + filename : filename;
     if (Xponge::system.source == Xponge::InputSource::kAmber)
     {
-        strcpy(filename, prefix.c_str());
-        strcat(filename, ".rst7");
+        const std::string amber_filename = prefix + ".rst7";
         const char* sys_name = md_info->md_name;
         FILE* lin = NULL;
-        Open_File_Safely(&lin, filename, "w");
+        Open_File_Safely(&lin, amber_filename.c_str(), "w");
         fprintf(lin, "%s step=%d\n", sys_name, md_info->sys.steps);
         fprintf(lin, "%8d %.10lf\n", md_info->atom_numbers,
-                md_info->sys.Get_Current_Time());
+                md_info->sys.Get_Current_Time(state_is_post_iteration));
         int s = 0;
         for (int i = 0; i < md_info->atom_numbers; i = i + 1)
         {
@@ -277,9 +277,11 @@ void MD_INFORMATION::trajectory_output::Export_Restart_File(
         buffer = prefix + std::string("_velocity.txt");
         Open_File_Safely(&lin2, buffer.c_str(), "w");
         fprintf(lin, "%d %.10lf %d\n", md_info->atom_numbers,
-                md_info->sys.Get_Current_Time(), md_info->sys.steps);
+                md_info->sys.Get_Current_Time(state_is_post_iteration),
+                md_info->sys.steps);
         fprintf(lin2, "%d %.10lf %d\n", md_info->atom_numbers,
-                md_info->sys.Get_Current_Time(), md_info->sys.steps);
+                md_info->sys.Get_Current_Time(state_is_post_iteration),
+                md_info->sys.steps);
         for (int i = 0; i < md_info->atom_numbers; i++)
         {
             fprintf(lin, "%12.7f %12.7f %12.7f\n", md_info->coordinate[i].x,

@@ -14,6 +14,7 @@
 CONTROLLER controller;
 Xponge::System Xponge::system;
 MD_INFORMATION md_info;
+INITIAL_VELOCITY_INFORMATION initial_velocity;
 DOMAIN_INFORMATION dd;
 MIDDLE_Langevin_INFORMATION middle_langevin;
 ANDERSEN_THERMOSTAT_INFORMATION ad_thermo;
@@ -333,6 +334,7 @@ void Main_Initial(int argc, char* argv[])
                   cv_controller.cv_vatom_name, md_info.h_mass,
                   &md_info.sys.freedom, &md_info.sys.connectivity);
     vatom.Coordinate_Refresh(md_info.crd, md_info.pbc.cell, md_info.pbc.rcell);
+    initial_velocity.Initial(&controller, &md_info);
 
     if (md_info.pbc.pbc)
     {
@@ -367,6 +369,7 @@ void Main_Initial(int argc, char* argv[])
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
         Main_Refresh_Local_State(true);
+        initial_velocity.Finalize(&controller, &md_info, &dd, &settle, &shake);
         plugin.Set_Domain_Information(&dd);
     }
 

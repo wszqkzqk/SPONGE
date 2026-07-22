@@ -57,6 +57,19 @@ void CONSTRAIN::Initial_Constrain(CONTROLLER* controller,
         fp = NULL;
     }
 
+    std::vector<int> constraint_degree(atom_numbers, 0);
+    maximum_constraint_degree = 0;
+    for (int i = 0; i < constrain_pair_numbers; ++i)
+    {
+        const CONSTRAIN_PAIR& pair = h_constrain_pair[i];
+        ++constraint_degree[pair.atom_i_serial];
+        ++constraint_degree[pair.atom_j_serial];
+        maximum_constraint_degree =
+            std::max(maximum_constraint_degree,
+                     std::max(constraint_degree[pair.atom_i_serial],
+                              constraint_degree[pair.atom_j_serial]));
+    }
+
     Device_Malloc_And_Copy_Safely(
         (void**)&d_constrain_pair, h_constrain_pair,
         sizeof(CONSTRAIN_PAIR) * constrain_pair_numbers);

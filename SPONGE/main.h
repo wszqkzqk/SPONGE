@@ -18,6 +18,7 @@
 #include "bias/restrain_cv.h"
 #include "bias/sinkmeta.h"
 #include "bias/steer.h"
+#include "bias/voronoi_detector.h"
 #include "bond/bond.h"
 #include "cmap/cmap.h"
 #include "collective_variable/collective_variable.h"

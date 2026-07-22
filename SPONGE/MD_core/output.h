@@ -14,7 +14,8 @@ struct trajectory_output
     FILE* box_traj = NULL;
     std::string restart_name;
     void Initial(CONTROLLER* controller, MD_INFORMATION* md_info);
-    void Export_Restart_File(const char* rst7_name = NULL);
+    void Export_Restart_File(const char* rst7_name = NULL,
+                             bool state_is_post_iteration = true);
     void Append_Crd_Traj_File(FILE* fp = NULL);
     void Append_Box_Traj_File(FILE* fp = NULL);
     // 20210827用于输出速度和力

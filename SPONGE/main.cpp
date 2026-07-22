@@ -43,6 +43,7 @@ COLLECTIVE_VARIABLE_CONTROLLER cv_controller;
 STEER_CV steer_cv;
 RESTRAIN_CV restrain_cv;
 META meta;
+VORONOI_DETECTOR voronoi_detector;
 LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
 HARD_WALL hard_wall;
@@ -103,11 +104,49 @@ static bool Main_Update_Neighbor_List(int update)
         md_info.nb.d_excluded_numbers);
 }
 
+static void Main_Export_Voronoi_Hit()
+{
+    const std::string basename = voronoi_detector.Hit_Restart_Basename();
+    if (basename.empty())
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "Main_Export_Voronoi_Hit",
+            "Reason:\n\tthe terminal Voronoi hit has no destination "
+            "artifact name\n");
+    }
+
+    // A hit is observed on the committed x_n state, before Main_Iteration.
+    // Gather that exact local state and force a host refresh; ordinary output
+    // may already have synchronized another state under the same step label.
+    md_info.Crd_Vel_dd_to_Device(dd.crd, dd.vel, dd.atom_local_label,
+                                 dd.atom_local_id, main_stream);
+    deviceStreamSynchronize(main_stream);
+    md_info.Crd_Vel_Device_To_Host(true);
+
+    const int completed_steps =
+        voronoi_detector.hit_step - voronoi_detector.initial_step;
+    const VORONOI_INTERFACE_RECORD& source =
+        voronoi_detector.interfaces[voronoi_detector.source_interface];
+    const VORONOI_INTERFACE_RECORD& destination =
+        voronoi_detector.Hit_Interface();
+    controller.printf(
+        "VORONOI_HIT source=%s from=%d destination=%s to=%d "
+        "completed_steps=%d hit_time_ps=%.10g source_recrossings=%llu "
+        "artifact=%s\n",
+        source.name.c_str(), voronoi_detector.hit_from_milestone,
+        destination.name.c_str(), voronoi_detector.destination_milestone,
+        completed_steps,
+        static_cast<double>(completed_steps) * md_info.sys.dt_in_ps,
+        static_cast<unsigned long long>(
+            voronoi_detector.source_recrossing_count),
+        basename.c_str());
+    md_info.output.Export_Restart_File(basename.c_str(), false);
+}
+
 int main(int argc, char* argv[])
 {
     Main_Initial(argc, argv);
-    for (md_info.sys.steps = 0;
-         md_info.sys.steps <= md_info.sys.step_limit;)
+    for (md_info.sys.steps = 0; md_info.sys.steps <= md_info.sys.step_limit;)
     {
         Main_Sync_Dynamic_Targets_To_Controllers();
         const bool mc_attempt = mc_baro.Will_Attempt(md_info.sys.steps);
@@ -119,6 +158,11 @@ int main(int argc, char* argv[])
         // The accepted state is the sole committed sample for this physical
         // step and is evaluated exactly after any box transaction.
         Main_Calculate_Force(FORCE_EVALUATION_CONTEXT(true, mc_attempt));
+        if (voronoi_detector.Has_Terminal_Hit())
+        {
+            Main_Export_Voronoi_Hit();
+            break;
+        }
         Main_Iteration();
         Main_Print();
         // Keep int-valued public/plugin step counters for compatibility, but
@@ -300,6 +344,7 @@ void Main_Initial(int argc, char* argv[])
     restrain_cv.Initial(&controller, &cv_controller);
     meta.Initial(&controller, &cv_controller, NULL,
                  md_info.sys.target_temperature);
+    voronoi_detector.Initial(&controller, &cv_controller);
 
     cv_controller.Print_Initial();
     plugin.After_Initial();
@@ -592,6 +637,10 @@ void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
                                  md_info.need_pressure, dd.frc, dd.d_energy,
                                  dd.d_virial, md_info.sys.target_temperature,
                                  evaluation.commit_sampling_state);
+            voronoi_detector.Observe(
+                cv_atom_numbers, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                md_info.pbc.reference_cell, md_info.sys.steps,
+                evaluation.commit_sampling_state, &controller);
             vatom.Force_Redistribute_CV(dd.crd, md_info.pbc.cell,
                                         md_info.pbc.rcell, dd.frc);
         }
@@ -887,8 +936,7 @@ void Main_Iteration()
             }
         }
     }
-    if (Next_Step_Is_Interval_Boundary(md_info.sys.steps,
-                                       dd.update_interval) ||
+    if (Next_Step_Is_Interval_Boundary(md_info.sys.steps, dd.update_interval) ||
         md_info.mode == md_info.RERUN)
     {
         controller.Get_Time_Recorder("Communication")->Start();
@@ -957,6 +1005,7 @@ void Main_Print()
         steer_cv.Step_Print(&controller);
         restrain_cv.Step_Print(&controller);
         meta.Step_Print(&controller);
+        voronoi_detector.Step_Print(&controller);
         soft_walls.Step_Print(&controller);
         controller.Print_To_Screen_And_Mdout();
     }

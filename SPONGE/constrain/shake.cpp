@@ -1,5 +1,7 @@
 ﻿#include "shake.h"
 
+#include "velocity_projection.h"
+
 static __global__ void Constrain_Force_Cycle(
     const int constrain_pair_numbers, const VECTOR* crd, const LTMatrix3 cell,
     const LTMatrix3 rcell, const CONSTRAIN_PAIR* constrain_pair,
@@ -215,7 +217,9 @@ compute_velocity_constraint_correction_shake(
         return false;
     }
 
-    VECTOR v_diff = vel[atom_i] - vel[atom_j];
+    const VECTOR velocity_i = vel[atom_i];
+    const VECTOR velocity_j = vel[atom_j];
+    VECTOR v_diff = velocity_i - velocity_j;
     float denom = (mass_i_inverse + mass_j_inverse) * dr2;
     if (denom < 1e-20f)
     {
@@ -226,8 +230,9 @@ compute_velocity_constraint_correction_shake(
     const float projection = dr * v_diff;
     if (constraint_violated != NULL)
     {
-        const float scale = sqrtf(dr2 * fmaxf(v_diff * v_diff, 1.0e-12f));
-        *constraint_violated = fabsf(projection) > relative_tolerance * scale;
+        const float tolerance = Velocity_Constraint_Residual_Tolerance(
+            dr2, velocity_i, velocity_j, v_diff, relative_tolerance);
+        *constraint_violated = fabsf(projection) > tolerance;
     }
     float lambda = projection / denom;
     correction_i[0] = (-mass_i_inverse * lambda) * dr;

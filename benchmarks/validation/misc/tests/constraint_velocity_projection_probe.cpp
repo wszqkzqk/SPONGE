@@ -1,4 +1,5 @@
-﻿#include <cmath>
+﻿#include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -26,6 +27,19 @@ const VECTOR kVelocities[kAtomCount] = {
 };
 const float kMassInverse[kAtomCount] = {1.0f / 16.0f, 1.0f, 1.0f};
 const int kPairs[kPairCount][2] = {{0, 1}, {0, 2}, {1, 2}};
+
+const VECTOR kRoundoffCoordinates[kAtomCount] = {
+    {0.0f, 0.0f, 0.0f},
+    {0.5699996948242188f, 0.779998779296875f, -0.25f},
+    {-0.5999984741210938f, 0.26000213623046875f, 0.7599983215332031f},
+};
+const VECTOR kRoundoffVelocities[kAtomCount] = {
+    {-0.174088716506958f, -0.10837503522634506f, 0.24693767726421356f},
+    {-1.4800273180007935f, 1.8255033493041992f, 0.039367739111185074f},
+    {-0.05815054848790169f, 1.55351984500885f, -1.609876275062561f},
+};
+const float kRoundoffMassInverse[kAtomCount] = {1.0f / 15.9994f, 1.0f / 1.008f,
+                                                1.0f / 1.008f};
 
 bool Fail(const char* message)
 {
@@ -71,6 +85,50 @@ bool Check_Velocity_Only_Result(const char* name,
     return true;
 }
 
+bool Check_Roundoff_Floor_Result(const char* name,
+                                 const VECTOR* original_coordinates,
+                                 const VECTOR* projected_coordinates,
+                                 const VECTOR* projected_velocities)
+{
+    if (std::memcmp(original_coordinates, projected_coordinates,
+                    sizeof(kRoundoffCoordinates)) != 0)
+        return Fail("roundoff-floor projection changed coordinates");
+
+    bool exercised_roundoff_floor = false;
+    for (const auto& pair : kPairs)
+    {
+        const VECTOR displacement =
+            projected_coordinates[pair[0]] - projected_coordinates[pair[1]];
+        const VECTOR velocity_i = projected_velocities[pair[0]];
+        const VECTOR velocity_j = projected_velocities[pair[1]];
+        const VECTOR velocity_difference = velocity_i - velocity_j;
+        const float displacement_squared = displacement * displacement;
+        const float projection = displacement * velocity_difference;
+        const float relative_scale =
+            sqrtf(displacement_squared *
+                  fmaxf(velocity_difference * velocity_difference, 1.0e-12f));
+        const float relative_limit = 1.0e-5f * relative_scale;
+        const float velocity_scale = fmaxf(sqrtf(velocity_i * velocity_i),
+                                           sqrtf(velocity_j * velocity_j));
+        const float roundoff_floor =
+            8.0f * FLT_EPSILON * sqrtf(displacement_squared) * velocity_scale;
+        const float tolerance = fmaxf(relative_limit, roundoff_floor);
+        if (!std::isfinite(projection) || !std::isfinite(tolerance) ||
+            std::fabs(projection) > tolerance)
+        {
+            std::fprintf(stderr,
+                         "%s residual %.9g exceeds attainable tolerance %.9g\n",
+                         name, static_cast<double>(std::fabs(projection)),
+                         static_cast<double>(tolerance));
+            return false;
+        }
+        exercised_roundoff_floor |= std::fabs(projection) > relative_limit &&
+                                    roundoff_floor > relative_limit;
+    }
+    return exercised_roundoff_floor ||
+           Fail("roundoff-floor case did not exercise the float bound");
+}
+
 bool Check_Settle()
 {
     CONSTRAIN constrain;
@@ -104,6 +162,16 @@ bool Check_Settle()
         return Fail("SETTLE velocity-only projection did not converge");
     if (!Check_Velocity_Only_Result("SETTLE", kCoordinates, coordinates,
                                     velocities))
+        return false;
+
+    std::memcpy(coordinates, kRoundoffCoordinates, sizeof(coordinates));
+    std::memcpy(velocities, kRoundoffVelocities, sizeof(velocities));
+    if (!settle.Project_Velocity_To_Constraint_Manifold(
+            velocities, coordinates, kRoundoffMassInverse, direct_space,
+            direct_space, false))
+        return Fail("SETTLE rejected a float-limited attainable projection");
+    if (!Check_Roundoff_Floor_Result("SETTLE", kRoundoffCoordinates,
+                                     coordinates, velocities))
         return false;
 
     std::memcpy(coordinates, kCoordinates, sizeof(coordinates));
@@ -146,6 +214,16 @@ bool Check_Shake()
         return Fail("SHAKE velocity-only projection did not converge");
     if (!Check_Velocity_Only_Result("SHAKE", kCoordinates, coordinates,
                                     velocities))
+        return false;
+
+    std::memcpy(coordinates, kRoundoffCoordinates, sizeof(coordinates));
+    std::memcpy(velocities, kRoundoffVelocities, sizeof(velocities));
+    if (!shake.Project_Velocity_To_Constraint_Manifold(
+            velocities, coordinates, kRoundoffMassInverse, direct_space,
+            direct_space, kAtomCount, false))
+        return Fail("SHAKE rejected a float-limited attainable projection");
+    if (!Check_Roundoff_Floor_Result("SHAKE", kRoundoffCoordinates, coordinates,
+                                     velocities))
         return false;
 
     std::memcpy(coordinates, kCoordinates, sizeof(coordinates));

@@ -308,6 +308,395 @@ static __global__ void settle_pair(int num_task_local, CONSTRAIN_PAIR* pairs,
     }
 }
 
+struct SETTLE_PAIR_NUMERIC_DIAGNOSTIC
+{
+    int index_valid;
+    int ownership_valid;
+    int atom_i;
+    int atom_j;
+    int global_i;
+    int global_j;
+    float constant_r;
+    float constrain_k;
+    float mass_i;
+    float mass_j;
+    VECTOR crd_i;
+    VECTOR crd_j;
+    VECTOR vel_i;
+    VECTOR vel_j;
+    VECTOR frc_i;
+    VECTOR frc_j;
+    VECTOR r1;
+    VECTOR r2;
+    float r1r1;
+    float r1r2;
+    float r2r2;
+    float radicand;
+    float root;
+    float k;
+};
+
+static __global__ void diagnose_settle_pairs(
+    const int pair_numbers, const int owned_atom_numbers,
+    const int active_atom_numbers, const CONSTRAIN_PAIR* pairs,
+    const int* atom_local, const VECTOR* frc, const float* mass,
+    const VECTOR* crd, const VECTOR* vel, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const VECTOR* last_pair_AB,
+    SETTLE_PAIR_NUMERIC_DIAGNOSTIC* diagnostics)
+{
+#ifdef USE_GPU
+    int pair_i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pair_i < pair_numbers)
+#else
+#pragma omp parallel for
+    for (int pair_i = 0; pair_i < pair_numbers; pair_i++)
+#endif
+    {
+        SETTLE_PAIR_NUMERIC_DIAGNOSTIC result = {};
+        const CONSTRAIN_PAIR pair = pairs[pair_i];
+        result.atom_i = pair.atom_i_serial;
+        result.atom_j = pair.atom_j_serial;
+        result.constant_r = pair.constant_r;
+        result.constrain_k = pair.constrain_k;
+        result.index_valid =
+            result.atom_i >= 0 && result.atom_i < active_atom_numbers &&
+            result.atom_j >= 0 && result.atom_j < active_atom_numbers;
+        if (result.index_valid)
+        {
+            result.global_i = atom_local[result.atom_i];
+            result.global_j = atom_local[result.atom_j];
+            result.ownership_valid = result.atom_i < owned_atom_numbers &&
+                                     result.atom_j < owned_atom_numbers;
+        }
+        if (result.ownership_valid)
+        {
+            result.mass_i = mass[result.atom_i];
+            result.mass_j = mass[result.atom_j];
+            result.crd_i = crd[result.atom_i];
+            result.crd_j = crd[result.atom_j];
+            result.vel_i = vel[result.atom_i];
+            result.vel_j = vel[result.atom_j];
+            result.frc_i = frc[result.atom_i];
+            result.frc_j = frc[result.atom_j];
+            result.r1 = Get_Periodic_Displacement(result.crd_j, result.crd_i,
+                                                  cell, rcell);
+            result.r2 = last_pair_AB[pair_i];
+            const float r0r0 = pair.constant_r * pair.constant_r;
+            result.r1r1 = result.r1 * result.r1;
+            result.r1r2 = result.r1 * result.r2;
+            result.r2r2 = result.r2 * result.r2;
+            result.radicand = result.r1r2 * result.r1r2 -
+                              result.r1r1 * result.r2r2 + result.r2r2 * r0r0;
+            result.root = sqrt(result.radicand);
+            result.k = (result.root - result.r1r2) / result.r2r2;
+        }
+        diagnostics[pair_i] = result;
+    }
+}
+
+static bool Settle_Diagnostic_Float_Is_Finite(const float& value)
+{
+    return Float_Memory_Is_Finite(&value);
+}
+
+static bool Settle_Diagnostic_Vector_Is_Finite(const VECTOR& value)
+{
+    return Settle_Diagnostic_Float_Is_Finite(value.x) &&
+           Settle_Diagnostic_Float_Is_Finite(value.y) &&
+           Settle_Diagnostic_Float_Is_Finite(value.z);
+}
+
+static bool Settle_Pair_Diagnostic_Is_Valid(
+    const SETTLE_PAIR_NUMERIC_DIAGNOSTIC& value)
+{
+    return value.index_valid && value.ownership_valid &&
+           Settle_Diagnostic_Float_Is_Finite(value.constant_r) &&
+           value.constant_r > 0.0f &&
+           Settle_Diagnostic_Float_Is_Finite(value.constrain_k) &&
+           Settle_Diagnostic_Float_Is_Finite(value.mass_i) &&
+           Settle_Diagnostic_Float_Is_Finite(value.mass_j) &&
+           value.mass_i + value.mass_j > 0.0f &&
+           Settle_Diagnostic_Vector_Is_Finite(value.crd_i) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.crd_j) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.vel_i) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.vel_j) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.frc_i) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.frc_j) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.r1) &&
+           Settle_Diagnostic_Vector_Is_Finite(value.r2) &&
+           Settle_Diagnostic_Float_Is_Finite(value.r1r1) &&
+           Settle_Diagnostic_Float_Is_Finite(value.r1r2) &&
+           Settle_Diagnostic_Float_Is_Finite(value.r2r2) && value.r2r2 > 0.0f &&
+           Settle_Diagnostic_Float_Is_Finite(value.radicand) &&
+           value.radicand >= 0.0f &&
+           Settle_Diagnostic_Float_Is_Finite(value.root) &&
+           Settle_Diagnostic_Float_Is_Finite(value.k);
+}
+
+static unsigned int Settle_Diagnostic_Float_Bits(const float value)
+{
+    static_assert(sizeof(unsigned int) == sizeof(float),
+                  "SPONGE requires 32-bit IEEE-754 floats");
+    unsigned int bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static bool Synchronize_Settle_Diagnostic_Kernel(CONTROLLER* controller,
+                                                 const char* function,
+                                                 const char* kernel_name)
+{
+#ifdef GPU_ARCH_NAME
+    const deviceError_t launch_error = deviceGetLastError();
+    if (launch_error != 0)
+    {
+        const std::string reason = std::string("Reason:\n\tthe ") +
+                                   kernel_name + " kernel failed to launch\n";
+        controller->Throw_Device_Error(launch_error, function, reason.c_str());
+        return false;
+    }
+    const deviceError_t synchronization_error = hostDeviceSynchronize();
+    if (synchronization_error != 0)
+    {
+        const std::string reason = std::string("Reason:\n\tthe ") +
+                                   kernel_name +
+                                   " kernel failed during execution\n";
+        controller->Throw_Device_Error(synchronization_error, function,
+                                       reason.c_str());
+        return false;
+    }
+#endif
+    return true;
+}
+
+static void Preflight_Settle_Pairs_Once(
+    CONTROLLER* controller, const int pair_numbers,
+    const int owned_atom_numbers, const int active_atom_numbers,
+    const CONSTRAIN_PAIR* pairs, const int* atom_local, const VECTOR* frc,
+    const float* mass, const VECTOR* crd, const VECTOR* vel,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const VECTOR* last_pair_AB,
+    const float dt, const float v_factor, const float x_factor,
+    std::vector<SETTLE_PAIR_NUMERIC_DIAGNOSTIC>* preflight)
+{
+    preflight->clear();
+    if (pair_numbers <= 0)
+    {
+        controller->printf(
+            "SETTLE_PAIR_DIAG stage=preflight status=no_pairs\n");
+        return;
+    }
+
+    SETTLE_PAIR_NUMERIC_DIAGNOSTIC* d_diagnostics = NULL;
+    Device_Malloc_Safely((void**)&d_diagnostics,
+                         sizeof(SETTLE_PAIR_NUMERIC_DIAGNOSTIC) * pair_numbers);
+    constexpr int diagnostic_threads = 128;
+    Launch_Device_Kernel(
+        diagnose_settle_pairs,
+        (pair_numbers + diagnostic_threads - 1) / diagnostic_threads,
+        diagnostic_threads, 0, NULL, pair_numbers, owned_atom_numbers,
+        active_atom_numbers, pairs, atom_local, frc, mass, crd, vel, cell,
+        rcell, last_pair_AB, d_diagnostics);
+    if (!Synchronize_Settle_Diagnostic_Kernel(
+            controller, "Preflight_Settle_Pairs_Once", "SETTLE pair preflight"))
+    {
+        deviceFree(d_diagnostics);
+        return;
+    }
+    std::vector<SETTLE_PAIR_NUMERIC_DIAGNOSTIC> diagnostics(pair_numbers);
+    deviceMemcpy(diagnostics.data(), d_diagnostics,
+                 sizeof(SETTLE_PAIR_NUMERIC_DIAGNOSTIC) * pair_numbers,
+                 deviceMemcpyDeviceToHost);
+    deviceFree(d_diagnostics);
+
+    int first_invalid = -1;
+    int invalid_count = 0;
+    int minimum_index = -1;
+    float minimum_radicand = FLT_MAX;
+    for (int pair_i = 0; pair_i < pair_numbers; pair_i++)
+    {
+        const SETTLE_PAIR_NUMERIC_DIAGNOSTIC& value = diagnostics[pair_i];
+        if (!Settle_Pair_Diagnostic_Is_Valid(value))
+        {
+            if (first_invalid < 0) first_invalid = pair_i;
+            invalid_count++;
+        }
+        if (Settle_Diagnostic_Float_Is_Finite(value.radicand) &&
+            value.radicand < minimum_radicand)
+        {
+            minimum_radicand = value.radicand;
+            minimum_index = pair_i;
+        }
+    }
+
+    if (first_invalid < 0)
+    {
+        const SETTLE_PAIR_NUMERIC_DIAGNOSTIC& minimum =
+            diagnostics[minimum_index];
+        controller->printf(
+            "SETTLE_PAIR_DIAG stage=preflight status=finite pairs=%d "
+            "min_pair=%d "
+            "local/global=(%d,%d)/(%d,%d) r0=%.9g radicand=%.9g\n",
+            pair_numbers, minimum_index, minimum.atom_i, minimum.atom_j,
+            minimum.global_i, minimum.global_j, minimum.constant_r,
+            minimum.radicand);
+        preflight->swap(diagnostics);
+        return;
+    }
+
+    const SETTLE_PAIR_NUMERIC_DIAGNOSTIC& bad = diagnostics[first_invalid];
+    const char* failure = !bad.index_valid ? "an out-of-range local mapping"
+                          : !bad.ownership_valid
+                              ? "a cross-domain ghost mapping"
+                              : "an invalid analytic update";
+    controller->Throw_Formatted_SPONGE_Error(
+        spongeErrorSimulationBreakDown, "Preflight_Settle_Pairs_Once",
+        "Reason:\n\tthe first SETTLE pair preflight found %s "
+        "(pair=%d, invalid_pairs=%d/%d, index/ownership_valid=(%d,%d), "
+        "owned/active_atoms=(%d,%d), "
+        "local=(%d,%d), global=(%d,%d), r0=%.9g, constrain_k=%.9g, "
+        "mass=(%.9g,%.9g), dt/v_factor/x_factor=(%.9g,%.9g,%.9g), "
+        "r1=(%.9g,%.9g,%.9g), r2=(%.9g,%.9g,%.9g), "
+        "r1r1/r1r2/r2r2=(%.9g,%.9g,%.9g), "
+        "radicand/root/k=(%.9g,%.9g,%.9g), radicand_bits=0x%08x, "
+        "crd_i=(%.9g,%.9g,%.9g), crd_j=(%.9g,%.9g,%.9g), "
+        "vel_i=(%.9g,%.9g,%.9g), vel_j=(%.9g,%.9g,%.9g), "
+        "frc_i=(%.9g,%.9g,%.9g), frc_j=(%.9g,%.9g,%.9g))\n",
+        failure, first_invalid, invalid_count, pair_numbers, bad.index_valid,
+        bad.ownership_valid, owned_atom_numbers, active_atom_numbers,
+        bad.atom_i, bad.atom_j, bad.global_i, bad.global_j, bad.constant_r,
+        bad.constrain_k, bad.mass_i, bad.mass_j, dt, v_factor, x_factor,
+        bad.r1.x, bad.r1.y, bad.r1.z, bad.r2.x, bad.r2.y, bad.r2.z, bad.r1r1,
+        bad.r1r2, bad.r2r2, bad.radicand, bad.root, bad.k,
+        Settle_Diagnostic_Float_Bits(bad.radicand), bad.crd_i.x, bad.crd_i.y,
+        bad.crd_i.z, bad.crd_j.x, bad.crd_j.y, bad.crd_j.z, bad.vel_i.x,
+        bad.vel_i.y, bad.vel_i.z, bad.vel_j.x, bad.vel_j.y, bad.vel_j.z,
+        bad.frc_i.x, bad.frc_i.y, bad.frc_i.z, bad.frc_j.x, bad.frc_j.y,
+        bad.frc_j.z);
+}
+
+static void Diagnose_Actual_Settle_Pair_Output_Once(
+    CONTROLLER* controller, const int owned_atom_numbers, const int* atom_local,
+    const VECTOR* crd, const VECTOR* vel, const float dt, const float v_factor,
+    const float x_factor,
+    const std::vector<SETTLE_PAIR_NUMERIC_DIAGNOSTIC>& preflight)
+{
+    if (!Synchronize_Settle_Diagnostic_Kernel(
+            controller, "Diagnose_Actual_Settle_Pair_Output_Once",
+            "actual SETTLE pair"))
+        return;
+
+    if (owned_atom_numbers <= 0)
+    {
+        controller->printf(
+            "SETTLE_PAIR_DIAG stage=post_pair status=no_owned_atoms\n");
+        return;
+    }
+
+    const std::size_t atom_count = static_cast<std::size_t>(owned_atom_numbers);
+    std::vector<VECTOR> coordinates(atom_count);
+    std::vector<VECTOR> velocities(atom_count);
+    std::vector<int> global_atoms(atom_count);
+    deviceMemcpy(coordinates.data(), crd, atom_count * sizeof(VECTOR),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(velocities.data(), vel, atom_count * sizeof(VECTOR),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(global_atoms.data(), atom_local, atom_count * sizeof(int),
+                 deviceMemcpyDeviceToHost);
+
+    int first_invalid = -1;
+    int invalid_atoms = 0;
+    for (int atom_i = 0; atom_i < owned_atom_numbers; atom_i++)
+    {
+        if (!Settle_Diagnostic_Vector_Is_Finite(coordinates[atom_i]) ||
+            !Settle_Diagnostic_Vector_Is_Finite(velocities[atom_i]))
+        {
+            if (first_invalid < 0) first_invalid = atom_i;
+            invalid_atoms++;
+        }
+    }
+    if (first_invalid < 0)
+    {
+        controller->printf(
+            "SETTLE_PAIR_DIAG stage=post_pair status=finite atoms=%d "
+            "pairs=%zu\n",
+            owned_atom_numbers, preflight.size());
+        return;
+    }
+
+    int writer_pair = -1;
+    int writer_matches = 0;
+    for (std::size_t pair_i = 0; pair_i < preflight.size(); pair_i++)
+    {
+        const SETTLE_PAIR_NUMERIC_DIAGNOSTIC& value = preflight[pair_i];
+        if (value.atom_i == first_invalid || value.atom_j == first_invalid)
+        {
+            if (writer_pair < 0) writer_pair = static_cast<int>(pair_i);
+            writer_matches++;
+        }
+    }
+
+    SETTLE_PAIR_NUMERIC_DIAGNOSTIC writer = {};
+    VECTOR post_crd_i = {};
+    VECTOR post_crd_j = {};
+    VECTOR post_vel_i = {};
+    VECTOR post_vel_j = {};
+    if (writer_pair >= 0)
+    {
+        writer = preflight[writer_pair];
+        post_crd_i = coordinates[writer.atom_i];
+        post_crd_j = coordinates[writer.atom_j];
+        post_vel_i = velocities[writer.atom_i];
+        post_vel_j = velocities[writer.atom_j];
+    }
+
+    const VECTOR& bad_crd = coordinates[first_invalid];
+    const VECTOR& bad_vel = velocities[first_invalid];
+    const char* bad_field = !Settle_Diagnostic_Vector_Is_Finite(bad_crd)
+                                ? "coordinate"
+                                : "velocity";
+    controller->Throw_Formatted_SPONGE_Error(
+        spongeErrorSimulationBreakDown,
+        "Diagnose_Actual_Settle_Pair_Output_Once",
+        "Reason:\n\tthe actual SETTLE pair kernel first produced a "
+        "non-finite %s (invalid_atoms=%d/%d, local/global atom=%d/%d, "
+        "writer_pair/matches=%d/%d, writer local/global=(%d,%d)/(%d,%d), "
+        "r0=%.9g, constrain_k=%.9g, mass=(%.9g,%.9g), "
+        "dt/v_factor/x_factor=(%.9g,%.9g,%.9g), "
+        "pre_crd_i=(%.9g,%.9g,%.9g), pre_crd_j=(%.9g,%.9g,%.9g), "
+        "pre_vel_i=(%.9g,%.9g,%.9g), pre_vel_j=(%.9g,%.9g,%.9g), "
+        "pre_frc_i=(%.9g,%.9g,%.9g), pre_frc_j=(%.9g,%.9g,%.9g), "
+        "pre_r1=(%.9g,%.9g,%.9g), pre_r2=(%.9g,%.9g,%.9g), "
+        "pre_r1r1/r1r2/r2r2=(%.9g,%.9g,%.9g), "
+        "pre_radicand/root/k=(%.9g,%.9g,%.9g), "
+        "radicand_bits=0x%08x, "
+        "bad_post_crd=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x), "
+        "bad_post_vel=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x), "
+        "writer_post_crd_i=(%.9g,%.9g,%.9g), "
+        "writer_post_crd_j=(%.9g,%.9g,%.9g), "
+        "writer_post_vel_i=(%.9g,%.9g,%.9g), "
+        "writer_post_vel_j=(%.9g,%.9g,%.9g))\n",
+        bad_field, invalid_atoms, owned_atom_numbers, first_invalid,
+        global_atoms[first_invalid], writer_pair, writer_matches, writer.atom_i,
+        writer.atom_j, writer.global_i, writer.global_j, writer.constant_r,
+        writer.constrain_k, writer.mass_i, writer.mass_j, dt, v_factor,
+        x_factor, writer.crd_i.x, writer.crd_i.y, writer.crd_i.z,
+        writer.crd_j.x, writer.crd_j.y, writer.crd_j.z, writer.vel_i.x,
+        writer.vel_i.y, writer.vel_i.z, writer.vel_j.x, writer.vel_j.y,
+        writer.vel_j.z, writer.frc_i.x, writer.frc_i.y, writer.frc_i.z,
+        writer.frc_j.x, writer.frc_j.y, writer.frc_j.z, writer.r1.x,
+        writer.r1.y, writer.r1.z, writer.r2.x, writer.r2.y, writer.r2.z,
+        writer.r1r1, writer.r1r2, writer.r2r2, writer.radicand, writer.root,
+        writer.k, Settle_Diagnostic_Float_Bits(writer.radicand), bad_crd.x,
+        bad_crd.y, bad_crd.z, Settle_Diagnostic_Float_Bits(bad_crd.x),
+        Settle_Diagnostic_Float_Bits(bad_crd.y),
+        Settle_Diagnostic_Float_Bits(bad_crd.z), bad_vel.x, bad_vel.y,
+        bad_vel.z, Settle_Diagnostic_Float_Bits(bad_vel.x),
+        Settle_Diagnostic_Float_Bits(bad_vel.y),
+        Settle_Diagnostic_Float_Bits(bad_vel.z), post_crd_i.x, post_crd_i.y,
+        post_crd_i.z, post_crd_j.x, post_crd_j.y, post_crd_j.z, post_vel_i.x,
+        post_vel_i.y, post_vel_i.z, post_vel_j.x, post_vel_j.y, post_vel_j.z);
+}
+
 static __global__ void Sum_Virial_Tensor_To_Stress(int N,
                                                    LTMatrix3* virial_tensor,
                                                    LTMatrix3* stress,
@@ -658,11 +1047,24 @@ void SETTLE::Get_Local(const int* atom_local_id, const char* atom_local_label,
                  deviceMemcpyDeviceToHost);
 }
 
-void SETTLE::Do_SETTLE(const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
+void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
+                       const int active_atom_numbers, const VECTOR* frc,
+                       const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
                        const LTMatrix3 rcell, VECTOR* vel,
                        const int need_pressure, LTMatrix3* d_stress)
 {
     if (!is_initialized) return;
+    const bool diagnose_pair_state = diagnose_pair_state_once;
+    std::vector<SETTLE_PAIR_NUMERIC_DIAGNOSTIC> pair_preflight;
+    if (diagnose_pair_state)
+    {
+        diagnose_pair_state_once = false;
+        Preflight_Settle_Pairs_Once(
+            controller, num_pair_local, local_atom_numbers, active_atom_numbers,
+            d_pairs_local, atom_local, frc, d_mass, crd, vel, cell, rcell,
+            last_pair_AB, constrain->dt, constrain->v_factor,
+            constrain->x_factor, &pair_preflight);
+    }
     Launch_Device_Kernel(settle_pair,
                          (num_pair_local + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
@@ -671,6 +1073,13 @@ void SETTLE::Do_SETTLE(const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
                          constrain->dt, constrain->v_factor,
                          constrain->x_factor, vel,
                          virial_tensor + triangle_numbers);
+
+    if (diagnose_pair_state)
+    {
+        Diagnose_Actual_Settle_Pair_Output_Once(
+            controller, local_atom_numbers, atom_local, crd, vel, constrain->dt,
+            constrain->v_factor, constrain->x_factor, pair_preflight);
+    }
 
     Launch_Device_Kernel(
         settle_triangle,

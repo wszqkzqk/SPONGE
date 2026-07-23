@@ -69,6 +69,170 @@ deviceStream_t main_stream;
 static std::uint64_t coordinate_generation_counter = 0;
 static std::uint64_t current_coordinate_generation = 0;
 
+struct MAIN_STEP_ZERO_ARRAY_SUMMARY
+{
+    int first_nonfinite = -1;
+    int max_atom = -1;
+    int max_component = -1;
+    float max_absolute_value = -1.0f;
+};
+
+static unsigned int Main_Float_Bits(float value)
+{
+    static_assert(sizeof(unsigned int) == sizeof(float),
+                  "SPONGE requires 32-bit IEEE-754 floats");
+    unsigned int bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static MAIN_STEP_ZERO_ARRAY_SUMMARY Main_Summarize_Vector_Array(
+    const std::vector<VECTOR>& values)
+{
+    MAIN_STEP_ZERO_ARRAY_SUMMARY summary;
+    for (std::size_t atom = 0; atom < values.size(); atom++)
+    {
+        const float components[3] = {values[atom].x, values[atom].y,
+                                     values[atom].z};
+        for (int component = 0; component < 3; component++)
+        {
+            if (!Float_Memory_Is_Finite(components + component))
+            {
+                if (summary.first_nonfinite < 0)
+                    summary.first_nonfinite = static_cast<int>(atom);
+                continue;
+            }
+            const float absolute_value = fabsf(components[component]);
+            if (absolute_value > summary.max_absolute_value)
+            {
+                summary.max_absolute_value = absolute_value;
+                summary.max_atom = static_cast<int>(atom);
+                summary.max_component = component;
+            }
+        }
+    }
+    return summary;
+}
+
+static float Main_Vector_Component(const VECTOR& value, int component)
+{
+    if (component == 0) return value.x;
+    if (component == 1) return value.y;
+    return value.z;
+}
+
+// This branch is intentionally diagnostic-only.  Synchronize and inspect the
+// complete owned step-0 state at producer boundaries so the cluster rerun can
+// identify the first writer of the non-finite coordinate without changing the
+// validated production branch or adding a steady-state performance cost.
+static void Main_Diagnose_Step_Zero_State(const char* stage)
+{
+    if (md_info.sys.steps != 0 ||
+        CONTROLLER::MPI_rank >= CONTROLLER::PP_MPI_size)
+        return;
+
+#ifdef GPU_ARCH_NAME
+    const deviceError_t launch_error = deviceGetLastError();
+    if (launch_error != 0)
+    {
+        std::string reason =
+            std::string("Reason:\n\ta device launch failure was pending at ") +
+            stage + "\n";
+        controller.Throw_Device_Error(
+            launch_error, "Main_Diagnose_Step_Zero_State", reason.c_str());
+        return;
+    }
+    const deviceError_t synchronization_error = hostDeviceSynchronize();
+    if (synchronization_error != 0)
+    {
+        std::string reason =
+            std::string("Reason:\n\ta device execution failure occurred by ") +
+            stage + "\n";
+        controller.Throw_Device_Error(synchronization_error,
+                                      "Main_Diagnose_Step_Zero_State",
+                                      reason.c_str());
+        return;
+    }
+#endif
+
+    const std::size_t atom_numbers = static_cast<std::size_t>(dd.atom_numbers);
+    std::vector<VECTOR> coordinates(atom_numbers);
+    std::vector<VECTOR> velocities(atom_numbers);
+    std::vector<VECTOR> forces(atom_numbers);
+    std::vector<int> global_atoms(atom_numbers);
+    deviceMemcpy(coordinates.data(), dd.crd, atom_numbers * sizeof(VECTOR),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(velocities.data(), dd.vel, atom_numbers * sizeof(VECTOR),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(forces.data(), dd.frc, atom_numbers * sizeof(VECTOR),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(global_atoms.data(), dd.atom_local, atom_numbers * sizeof(int),
+                 deviceMemcpyDeviceToHost);
+
+    const MAIN_STEP_ZERO_ARRAY_SUMMARY crd_summary =
+        Main_Summarize_Vector_Array(coordinates);
+    const MAIN_STEP_ZERO_ARRAY_SUMMARY vel_summary =
+        Main_Summarize_Vector_Array(velocities);
+    const MAIN_STEP_ZERO_ARRAY_SUMMARY frc_summary =
+        Main_Summarize_Vector_Array(forces);
+    auto global_atom = [&](const MAIN_STEP_ZERO_ARRAY_SUMMARY& summary)
+    { return summary.max_atom < 0 ? -1 : global_atoms[summary.max_atom]; };
+    auto max_value = [&](const std::vector<VECTOR>& values,
+                         const MAIN_STEP_ZERO_ARRAY_SUMMARY& summary)
+    {
+        return summary.max_atom < 0
+                   ? 0.0f
+                   : Main_Vector_Component(values[summary.max_atom],
+                                           summary.max_component);
+    };
+
+    controller.printf(
+        "NL_STEP0_DIAG stage=%s step=0 rank=%d atoms=%d "
+        "first_nonfinite(crd,vel,frc)=(%d,%d,%d) "
+        "max_crd=(local/global/axis/value/bits=%d/%d/%d/%.9g/0x%08x) "
+        "max_vel=(%d/%d/%d/%.9g/0x%08x) "
+        "max_frc=(%d/%d/%d/%.9g/0x%08x)\n",
+        stage, CONTROLLER::MPI_rank, dd.atom_numbers,
+        crd_summary.first_nonfinite, vel_summary.first_nonfinite,
+        frc_summary.first_nonfinite, crd_summary.max_atom,
+        global_atom(crd_summary), crd_summary.max_component,
+        max_value(coordinates, crd_summary),
+        Main_Float_Bits(max_value(coordinates, crd_summary)),
+        vel_summary.max_atom, global_atom(vel_summary),
+        vel_summary.max_component, max_value(velocities, vel_summary),
+        Main_Float_Bits(max_value(velocities, vel_summary)),
+        frc_summary.max_atom, global_atom(frc_summary),
+        frc_summary.max_component, max_value(forces, frc_summary),
+        Main_Float_Bits(max_value(forces, frc_summary)));
+
+    int invalid_atom = dd.atom_numbers;
+    if (crd_summary.first_nonfinite >= 0)
+        invalid_atom = std::min(invalid_atom, crd_summary.first_nonfinite);
+    if (vel_summary.first_nonfinite >= 0)
+        invalid_atom = std::min(invalid_atom, vel_summary.first_nonfinite);
+    if (frc_summary.first_nonfinite >= 0)
+        invalid_atom = std::min(invalid_atom, frc_summary.first_nonfinite);
+    if (invalid_atom == dd.atom_numbers) return;
+
+    const VECTOR& crd = coordinates[invalid_atom];
+    const VECTOR& vel = velocities[invalid_atom];
+    const VECTOR& frc = forces[invalid_atom];
+    controller.Throw_Formatted_SPONGE_Error(
+        spongeErrorSimulationBreakDown, "Main_Diagnose_Step_Zero_State",
+        "Reason:\n\tstep-0 state first became non-finite by stage '%s' "
+        "(rank=%d, local/global atom=%d/%d, first crd/vel/frc=%d/%d/%d, "
+        "crd=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x), "
+        "vel=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x), "
+        "frc=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x))\n",
+        stage, CONTROLLER::MPI_rank, invalid_atom, global_atoms[invalid_atom],
+        crd_summary.first_nonfinite, vel_summary.first_nonfinite,
+        frc_summary.first_nonfinite, crd.x, crd.y, crd.z,
+        Main_Float_Bits(crd.x), Main_Float_Bits(crd.y), Main_Float_Bits(crd.z),
+        vel.x, vel.y, vel.z, Main_Float_Bits(vel.x), Main_Float_Bits(vel.y),
+        Main_Float_Bits(vel.z), frc.x, frc.y, frc.z, Main_Float_Bits(frc.x),
+        Main_Float_Bits(frc.y), Main_Float_Bits(frc.z));
+}
+
 static void Main_Advance_Coordinate_Generation(const char* reason)
 {
     if (coordinate_generation_counter ==
@@ -159,6 +323,7 @@ int main(int argc, char* argv[])
         // The accepted state is the sole committed sample for this physical
         // step and is evaluated exactly after any box transaction.
         Main_Calculate_Force(FORCE_EVALUATION_CONTEXT(true, mc_attempt));
+        Main_Diagnose_Step_Zero_State("post_force_pre_integrator");
         if (voronoi_detector.Has_Terminal_Hit())
         {
             Main_Export_Voronoi_Hit();
@@ -166,6 +331,7 @@ int main(int argc, char* argv[])
         }
         Main_Iteration();
         Main_Print();
+        Main_Diagnose_Step_Zero_State("post_print");
         // Keep int-valued public/plugin step counters for compatibility, but
         // do not overflow the loop increment at the supported upper bound.
         if (md_info.sys.steps == std::numeric_limits<int>::max()) break;
@@ -884,13 +1050,17 @@ void Main_Iteration()
                                            md_info.sys.freedom);
             }
 
+            Main_Diagnose_Step_Zero_State("post_integrator");
             settle.Do_SETTLE(dd.d_mass, dd.crd, md_info.pbc.cell,
                              md_info.pbc.rcell, dd.vel, md_info.need_pressure,
                              md_info.sys.d_stress);
+            Main_Diagnose_Step_Zero_State("post_settle");
             shake.Constrain(dd.atom_numbers, dd.crd, dd.vel, dd.d_mass_inverse,
                             dd.d_mass, md_info.pbc.cell, md_info.pbc.rcell,
                             md_info.need_pressure, md_info.sys.d_stress);
+            Main_Diagnose_Step_Zero_State("post_shake");
             hard_wall.Reflect(dd.atom_numbers, dd.crd, dd.vel);
+            Main_Diagnose_Step_Zero_State("post_hard_wall");
         }
         if (md_info.need_pressure && !mc_baro.is_initialized)
         {
@@ -919,6 +1089,7 @@ void Main_Iteration()
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
         vatom.Coordinate_Refresh(dd.crd, md_info.pbc.cell, md_info.pbc.rcell);
+        Main_Diagnose_Step_Zero_State("post_virtual_atom_refresh");
         if (Next_Step_Is_Interval_Boundary(md_info.sys.steps,
                                            dd.update_interval) ||
             md_info.mode == md_info.RERUN)

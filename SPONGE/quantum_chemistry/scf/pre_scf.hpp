@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 #include <cstring>
@@ -128,12 +128,16 @@ static __global__ void QC_Initialize_Env_From_Crd_Kernel(
     {
         const VECTOR anchor = crd[atom_local[0]];
         const VECTOR r = crd[atom_local[i]];
-        if (!QC_Validate_Geometry_Vector(
-                anchor, geometry_failure,
-                QC_GEOMETRY_FAILURE_RAW_COORDINATE, 0) ||
-            !QC_Validate_Geometry_Vector(
-                r, geometry_failure, QC_GEOMETRY_FAILURE_RAW_COORDINATE, i))
-            continue;
+        // An `ok` flag chain replaces the `continue` statements, which are
+        // illegal inside CUDA's SIMPLE_DEVICE_FOR (an `if` guard on device,
+        // not a loop).  Each validation runs only if all previous ones
+        // passed, preserving the original short-circuit order.
+        bool ok = QC_Validate_Geometry_Vector(
+                      anchor, geometry_failure,
+                      QC_GEOMETRY_FAILURE_RAW_COORDINATE, 0) &&
+                  QC_Validate_Geometry_Vector(
+                      r, geometry_failure, QC_GEOMETRY_FAILURE_RAW_COORDINATE,
+                      i);
         // Quantum-chemistry integrals are translationally invariant, while
         // their coordinates are stored in single precision.  Keep the first
         // QC atom at the origin so an arbitrary box-sized translation cannot
@@ -142,21 +146,24 @@ static __global__ void QC_Initialize_Env_From_Crd_Kernel(
             periodic_boundary
                 ? Get_Periodic_Displacement(r, anchor, box_length)
                 : r - anchor;
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 unwrapped, geometry_failure,
-                QC_GEOMETRY_FAILURE_ANCHOR_DISPLACEMENT, i))
-            continue;
+                QC_GEOMETRY_FAILURE_ANCHOR_DISPLACEMENT, i);
         const int ptr_coord = atm[i * 6 + 1];
         const VECTOR converted(unwrapped.x * to_bohr,
                                unwrapped.y * to_bohr,
                                unwrapped.z * to_bohr);
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 converted, geometry_failure,
-                QC_GEOMETRY_FAILURE_ANGSTROM_TO_BOHR, i))
-            continue;
-        env[ptr_coord + 0] = converted.x;
-        env[ptr_coord + 1] = converted.y;
-        env[ptr_coord + 2] = converted.z;
+                QC_GEOMETRY_FAILURE_ANGSTROM_TO_BOHR, i);
+        if (ok)
+        {
+            env[ptr_coord + 0] = converted.x;
+            env[ptr_coord + 1] = converted.y;
+            env[ptr_coord + 2] = converted.z;
+        }
     }
 }
 
@@ -170,34 +177,38 @@ static __global__ void QC_Update_Env_From_Crd_Kernel(
         const VECTOR anchor = crd[atom_local[0]];
         const int md_idx = atom_local[i];
         const VECTOR r = crd[md_idx];
-        if (!QC_Validate_Geometry_Vector(
-                anchor, geometry_failure,
-                QC_GEOMETRY_FAILURE_RAW_COORDINATE, 0) ||
-            !QC_Validate_Geometry_Vector(
-                r, geometry_failure, QC_GEOMETRY_FAILURE_RAW_COORDINATE, i))
-            continue;
+        // An `ok` flag chain replaces the `continue` statements, which are
+        // illegal inside CUDA's SIMPLE_DEVICE_FOR (an `if` guard on device,
+        // not a loop).  Each validation runs only if all previous ones
+        // passed, preserving the original short-circuit order.
+        bool ok = QC_Validate_Geometry_Vector(
+                      anchor, geometry_failure,
+                      QC_GEOMETRY_FAILURE_RAW_COORDINATE, 0) &&
+                  QC_Validate_Geometry_Vector(
+                      r, geometry_failure, QC_GEOMETRY_FAILURE_RAW_COORDINATE,
+                      i);
         const int ptr_coord = atm[i * 6 + 1];
         const VECTOR previous_bohr(env[ptr_coord + 0], env[ptr_coord + 1],
                                    env[ptr_coord + 2]);
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 previous_bohr, geometry_failure,
-                QC_GEOMETRY_FAILURE_PREVIOUS_COORDINATE, i))
-            continue;
+                QC_GEOMETRY_FAILURE_PREVIOUS_COORDINATE, i);
         const VECTOR prev(previous_bohr.x / to_bohr,
                           previous_bohr.y / to_bohr,
                           previous_bohr.z / to_bohr);
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 prev, geometry_failure,
-                QC_GEOMETRY_FAILURE_PREVIOUS_COORDINATE, i))
-            continue;
+                QC_GEOMETRY_FAILURE_PREVIOUS_COORDINATE, i);
         const VECTOR relative =
             periodic_boundary
                 ? Get_Periodic_Displacement(r, anchor, box_length)
                 : r - anchor;
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 relative, geometry_failure,
-                QC_GEOMETRY_FAILURE_ANCHOR_DISPLACEMENT, i))
-            continue;
+                QC_GEOMETRY_FAILURE_ANCHOR_DISPLACEMENT, i);
         // Select the periodic image nearest the previously accepted relative
         // coordinate.  This preserves trajectory continuity and MC rollback
         // semantics without reintroducing an absolute translation.
@@ -205,25 +216,28 @@ static __global__ void QC_Update_Env_From_Crd_Kernel(
             periodic_boundary
                 ? Get_Periodic_Displacement(relative, prev, box_length)
                 : relative - prev;
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 dr, geometry_failure,
-                QC_GEOMETRY_FAILURE_IMAGE_DISPLACEMENT, i))
-            continue;
+                QC_GEOMETRY_FAILURE_IMAGE_DISPLACEMENT, i);
         const VECTOR unwrapped(prev.x + dr.x, prev.y + dr.y, prev.z + dr.z);
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 unwrapped, geometry_failure,
-                QC_GEOMETRY_FAILURE_UNWRAPPED_COORDINATE, i))
-            continue;
+                QC_GEOMETRY_FAILURE_UNWRAPPED_COORDINATE, i);
         const VECTOR converted(unwrapped.x * to_bohr,
                                unwrapped.y * to_bohr,
                                unwrapped.z * to_bohr);
-        if (!QC_Validate_Geometry_Vector(
+        if (ok)
+            ok = QC_Validate_Geometry_Vector(
                 converted, geometry_failure,
-                QC_GEOMETRY_FAILURE_ANGSTROM_TO_BOHR, i))
-            continue;
-        env[ptr_coord + 0] = converted.x;
-        env[ptr_coord + 1] = converted.y;
-        env[ptr_coord + 2] = converted.z;
+                QC_GEOMETRY_FAILURE_ANGSTROM_TO_BOHR, i);
+        if (ok)
+        {
+            env[ptr_coord + 0] = converted.x;
+            env[ptr_coord + 1] = converted.y;
+            env[ptr_coord + 2] = converted.z;
+        }
     }
 }
 

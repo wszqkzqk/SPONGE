@@ -1,4 +1,4 @@
-﻿#include "neighbor_list.h"
+#include "neighbor_list.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -379,9 +379,9 @@ static __device__ __forceinline__ int Required_After_Reservation(int slot,
                                                                  int count)
 {
     const int64_t required = static_cast<int64_t>(slot) + count;
-    return required >= std::numeric_limits<int>::max()
-               ? std::numeric_limits<int>::max()
-               : static_cast<int>(required);
+    // INT_MAX: std::numeric_limits<int>::max() is a host-only constexpr
+    // under nvcc and cannot be called from this device function.
+    return required >= INT_MAX ? INT_MAX : static_cast<int>(required);
 }
 
 static __device__ __forceinline__ void Record_Neighbor_Update_Error(

@@ -1,4 +1,4 @@
-﻿#include "sinkmeta.h"
+#include "sinkmeta.h"
 
 #include <sys/stat.h>
 
@@ -2883,10 +2883,13 @@ static __global__ void Update_Edge_Effect_Grid(
 {
     SIMPLE_DEVICE_FOR(gidx, total_size)
     {
+        // NOTE: `continue` is illegal here under CUDA because
+        // SIMPLE_DEVICE_FOR is an `if (i < N)` guard on device, not a loop.
+        // When scatter_size <= 0 the loop below never runs and has_log stays
+        // false, so skipping the rest is equivalent to just setting the flag.
         if (scatter_size <= 0)
         {
             atomicExch(error_flag, 1);
-            continue;
         }
         double max_log = 0.0;
         double sum_exp = 0.0;
@@ -2932,18 +2935,28 @@ static __global__ void Update_Edge_Effect_Grid(
                 sum_exp += exp(pregauss - max_log);
             }
         }
-        if (!has_log) continue;
-        const double lse = max_log + log(sum_exp);
-        const float stored_lse = static_cast<float>(lse);
-        if (!isfinite(lse) || fabs(lse) > FLT_MAX ||
-            (stored_lse != 0.0f && fabsf(stored_lse) < FLT_MIN))
+        // Guard with a flag instead of `continue` (illegal under CUDA's
+        // SIMPLE_DEVICE_FOR, which is an `if` guard rather than a loop).
+        bool valid = has_log;
+        double lse = 0.0;
+        float stored_lse = 0.0f;
+        if (valid)
         {
-            atomicExch(error_flag, 1);
-            continue;
+            lse = max_log + log(sum_exp);
+            stored_lse = static_cast<float>(lse);
+            if (!isfinite(lse) || fabs(lse) > FLT_MAX ||
+                (stored_lse != 0.0f && fabsf(stored_lse) < FLT_MIN))
+            {
+                atomicExch(error_flag, 1);
+                valid = false;
+            }
         }
-        normal_lse[gidx] = stored_lse;
+        if (valid)
+        {
+            normal_lse[gidx] = stored_lse;
+        }
 
-        if (calculate_force)
+        if (valid && calculate_force)
         {
             for (int force_dim = 0; force_dim < ndim; ++force_dim)
             {

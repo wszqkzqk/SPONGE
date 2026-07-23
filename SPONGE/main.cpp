@@ -205,14 +205,14 @@ static void Main_Diagnose_Step_Zero_State(const char* stage)
         frc_summary.max_component, max_value(forces, frc_summary),
         Main_Float_Bits(max_value(forces, frc_summary)));
 
-    int invalid_atom = dd.atom_numbers;
-    if (crd_summary.first_nonfinite >= 0)
-        invalid_atom = std::min(invalid_atom, crd_summary.first_nonfinite);
-    if (vel_summary.first_nonfinite >= 0)
-        invalid_atom = std::min(invalid_atom, vel_summary.first_nonfinite);
-    if (frc_summary.first_nonfinite >= 0)
-        invalid_atom = std::min(invalid_atom, frc_summary.first_nonfinite);
-    if (invalid_atom == dd.atom_numbers) return;
+    const int invalid_atom =
+        crd_summary.first_nonfinite >= 0   ? crd_summary.first_nonfinite
+        : vel_summary.first_nonfinite >= 0 ? vel_summary.first_nonfinite
+                                           : frc_summary.first_nonfinite;
+    if (invalid_atom < 0) return;
+    const char* invalid_field = crd_summary.first_nonfinite >= 0 ? "coordinate"
+                                : vel_summary.first_nonfinite >= 0 ? "velocity"
+                                                                   : "force";
 
     const VECTOR& crd = coordinates[invalid_atom];
     const VECTOR& vel = velocities[invalid_atom];
@@ -220,17 +220,18 @@ static void Main_Diagnose_Step_Zero_State(const char* stage)
     controller.Throw_Formatted_SPONGE_Error(
         spongeErrorSimulationBreakDown, "Main_Diagnose_Step_Zero_State",
         "Reason:\n\tstep-0 state first became non-finite by stage '%s' "
-        "(rank=%d, local/global atom=%d/%d, first crd/vel/frc=%d/%d/%d, "
+        "(field=%s, rank=%d, local/global atom=%d/%d, "
+        "first crd/vel/frc=%d/%d/%d, "
         "crd=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x), "
         "vel=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x), "
         "frc=(%.9g,%.9g,%.9g;0x%08x,0x%08x,0x%08x))\n",
-        stage, CONTROLLER::MPI_rank, invalid_atom, global_atoms[invalid_atom],
-        crd_summary.first_nonfinite, vel_summary.first_nonfinite,
-        frc_summary.first_nonfinite, crd.x, crd.y, crd.z,
-        Main_Float_Bits(crd.x), Main_Float_Bits(crd.y), Main_Float_Bits(crd.z),
-        vel.x, vel.y, vel.z, Main_Float_Bits(vel.x), Main_Float_Bits(vel.y),
-        Main_Float_Bits(vel.z), frc.x, frc.y, frc.z, Main_Float_Bits(frc.x),
-        Main_Float_Bits(frc.y), Main_Float_Bits(frc.z));
+        stage, invalid_field, CONTROLLER::MPI_rank, invalid_atom,
+        global_atoms[invalid_atom], crd_summary.first_nonfinite,
+        vel_summary.first_nonfinite, frc_summary.first_nonfinite, crd.x, crd.y,
+        crd.z, Main_Float_Bits(crd.x), Main_Float_Bits(crd.y),
+        Main_Float_Bits(crd.z), vel.x, vel.y, vel.z, Main_Float_Bits(vel.x),
+        Main_Float_Bits(vel.y), Main_Float_Bits(vel.z), frc.x, frc.y, frc.z,
+        Main_Float_Bits(frc.x), Main_Float_Bits(frc.y), Main_Float_Bits(frc.z));
 }
 
 static void Main_Advance_Coordinate_Generation(const char* reason)
@@ -330,6 +331,7 @@ int main(int argc, char* argv[])
             break;
         }
         Main_Iteration();
+        Main_Diagnose_Step_Zero_State("post_iteration_pre_print");
         Main_Print();
         Main_Diagnose_Step_Zero_State("post_print");
         // Keep int-valued public/plugin step counters for compatibility, but

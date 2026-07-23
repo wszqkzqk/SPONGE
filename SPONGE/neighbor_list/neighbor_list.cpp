@@ -384,20 +384,67 @@ static __device__ __forceinline__ int Required_After_Reservation(int slot,
     return required >= INT_MAX ? INT_MAX : static_cast<int>(required);
 }
 
-static __device__ __forceinline__ void Record_Neighbor_Update_Error(
-    int* update_error, int error, int atom)
+static __device__ __forceinline__ unsigned int Neighbor_Float_Bits(float value)
 {
 #ifdef GPU_ARCH_NAME
-    if (atomicCAS(update_error, NEIGHBOR_LIST::UPDATE_OK, error) ==
-        NEIGHBOR_LIST::UPDATE_OK)
-        update_error[1] = atom;
+    return __float_as_uint(value);
+#else
+    unsigned int bits = 0;
+    static_assert(sizeof(bits) == sizeof(value),
+                  "SPONGE requires 32-bit IEEE-754 floats");
+    memcpy(&bits, &value, sizeof(value));
+#if defined(__GNUC__) || defined(__clang__)
+    // Keep -ffast-math from deriving finite-only facts about the original
+    // float and folding the integer exponent test below.
+    __asm__ __volatile__("" : "+r"(bits));
+#endif
+    return bits;
+#endif
+}
+
+static __device__ __forceinline__ UNSIGNED_INT_VECTOR
+Neighbor_Vector_Bits(const VECTOR& value)
+{
+    return {Neighbor_Float_Bits(value.x), Neighbor_Float_Bits(value.y),
+            Neighbor_Float_Bits(value.z)};
+}
+
+static __device__ __forceinline__ bool Neighbor_Vector_Bits_Are_Finite(
+    const UNSIGNED_INT_VECTOR& bits)
+{
+    return (bits.uint_x & 0x7f800000U) != 0x7f800000U &&
+           (bits.uint_y & 0x7f800000U) != 0x7f800000U &&
+           (bits.uint_z & 0x7f800000U) != 0x7f800000U;
+}
+
+static __device__ __forceinline__ void Record_Neighbor_Update_Error(
+    NEIGHBOR_LIST::UPDATE_ERROR_RECORD* update_error, int error, int local_atom,
+    int global_atom, UNSIGNED_INT_VECTOR raw_bits,
+    UNSIGNED_INT_VECTOR wrapped_bits, INT_VECTOR grid_index, int grid_id)
+{
+#ifdef GPU_ARCH_NAME
+    if (atomicCAS(&update_error->header.code, NEIGHBOR_LIST::UPDATE_OK,
+                  error) == NEIGHBOR_LIST::UPDATE_OK)
+    {
+        update_error->header.local_atom = local_atom;
+        update_error->global_atom = global_atom;
+        update_error->raw_bits = raw_bits;
+        update_error->wrapped_bits = wrapped_bits;
+        update_error->grid_index = grid_index;
+        update_error->grid_id = grid_id;
+    }
 #else
 #pragma omp critical(sponge_neighbor_list_update_error)
     {
-        if (update_error[0] == NEIGHBOR_LIST::UPDATE_OK)
+        if (update_error->header.code == NEIGHBOR_LIST::UPDATE_OK)
         {
-            update_error[0] = error;
-            update_error[1] = atom;
+            update_error->header.code = error;
+            update_error->header.local_atom = local_atom;
+            update_error->global_atom = global_atom;
+            update_error->raw_bits = raw_bits;
+            update_error->wrapped_bits = wrapped_bits;
+            update_error->grid_index = grid_index;
+            update_error->grid_id = grid_id;
         }
     }
 #endif
@@ -424,18 +471,20 @@ static __global__ void Put_Atom_In_Grids(
     ATOM_GROUP* nl, const int max_grid_atoms, int* neighbor_grid_overflow,
     int* grid_ghosts, int* grid_ghost_numbers, VECTOR* grid_ghost_crd,
     const int max_grid_ghosts, int* neighbor_grid_ghost_overflow,
-    int* update_error)
+    NEIGHBOR_LIST::UPDATE_ERROR_RECORD* update_error)
 {
     if (need[0] == 0) return;
     SIMPLE_DEVICE_FOR(tid, atom_numbers + ghost_numbers)
     {
-        VECTOR local_crd = crd[tid];
-        bool coordinate_is_finite = isfinite(local_crd.x) &&
-                                    isfinite(local_crd.y) &&
-                                    isfinite(local_crd.z);
-        if (coordinate_is_finite && need_copy && tid < atom_numbers)
+        const VECTOR raw_crd = crd[tid];
+        VECTOR local_crd = raw_crd;
+        const UNSIGNED_INT_VECTOR raw_bits = Neighbor_Vector_Bits(raw_crd);
+        bool coordinate_is_finite = Neighbor_Vector_Bits_Are_Finite(raw_bits);
+        const bool raw_coordinate_is_finite = coordinate_is_finite;
+        UNSIGNED_INT_VECTOR wrapped_bits = {0U, 0U, 0U};
+        if (raw_coordinate_is_finite && need_copy && tid < atom_numbers)
         {
-            old_crd[tid] = local_crd;
+            old_crd[tid] = raw_crd;
         }
         if (coordinate_is_finite)
         {
@@ -446,14 +495,24 @@ static __global__ void Put_Atom_In_Grids(
             local_crd.y -= k2 * cell.a22;
             local_crd.x -= k3 * cell.a31 + k2 * cell.a21;
             local_crd.x -= floorf(local_crd.x / cell.a11) * cell.a11;
-            coordinate_is_finite = isfinite(local_crd.x) &&
-                                   isfinite(local_crd.y) &&
-                                   isfinite(local_crd.z);
+            wrapped_bits = Neighbor_Vector_Bits(local_crd);
+            coordinate_is_finite =
+                Neighbor_Vector_Bits_Are_Finite(wrapped_bits);
         }
-        if (!coordinate_is_finite)
+        if (!raw_coordinate_is_finite)
         {
             Record_Neighbor_Update_Error(
-                update_error, NEIGHBOR_LIST::UPDATE_INVALID_GEOMETRY, tid);
+                update_error, NEIGHBOR_LIST::UPDATE_RAW_COORDINATE_NONFINITE,
+                tid, atom_local == NULL ? -1 : atom_local[tid], raw_bits,
+                wrapped_bits, {-1, -1, -1}, -1);
+        }
+        else if (!coordinate_is_finite)
+        {
+            Record_Neighbor_Update_Error(
+                update_error,
+                NEIGHBOR_LIST::UPDATE_WRAPPED_COORDINATE_NONFINITE, tid,
+                atom_local == NULL ? -1 : atom_local[tid], raw_bits,
+                wrapped_bits, {-1, -1, -1}, -1);
         }
         else
         {
@@ -468,7 +527,9 @@ static __global__ void Put_Atom_In_Grids(
             if (grid_id < 0 || grid_id >= grid_numbers)
             {
                 Record_Neighbor_Update_Error(
-                    update_error, NEIGHBOR_LIST::UPDATE_INVALID_GEOMETRY, tid);
+                    update_error, NEIGHBOR_LIST::UPDATE_GRID_INDEX_INVALID, tid,
+                    atom_local == NULL ? -1 : atom_local[tid], raw_bits,
+                    wrapped_bits, {nx, ny, nz}, grid_id);
             }
             else if (tid < atom_numbers)
             {
@@ -483,7 +544,7 @@ static __global__ void Put_Atom_In_Grids(
                     const size_t slot =
                         (size_t)max_grid_atoms * grid_id + (size_t)k1;
                     grid_atoms[slot] = tid;
-                    grid_crd[slot] = crd[tid];
+                    grid_crd[slot] = raw_crd;
                     nl[tid].atom_numbers = 0;
                     nl[tid].ghost_numbers = 0;
                 }
@@ -501,7 +562,7 @@ static __global__ void Put_Atom_In_Grids(
                     const size_t slot =
                         (size_t)max_grid_ghosts * grid_id + (size_t)k1;
                     grid_ghosts[slot] = tid;
-                    grid_ghost_crd[slot] = crd[tid];
+                    grid_ghost_crd[slot] = raw_crd;
                 }
             }
         }
@@ -519,11 +580,11 @@ static __global__ void Find_Neighbors_Gridly(
     VECTOR* grid_ghost_crd, int max_ghost_numbers_in_grid,
     int* grid_ghost_numbers, int* grid_ghosts,
     const int* neighbor_grid_overflow, const int* neighbor_grid_ghost_overflow,
-    const int* update_error)
+    const NEIGHBOR_LIST::UPDATE_ERROR_RECORD* update_error)
 {
     if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
         neighbor_grid_ghost_overflow[0] != 0 ||
-        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        update_error->header.code != NEIGHBOR_LIST::UPDATE_OK)
         return;
     extern __shared__ unsigned char shared_mem[];
     VECTOR* sh_crd = reinterpret_cast<VECTOR*>(shared_mem);
@@ -756,11 +817,11 @@ static __global__ void Find_Neighbors_Gridly(
     VECTOR* grid_ghost_crd, int max_ghost_numbers_in_grid,
     int* grid_ghost_numbers, int* grid_ghosts,
     const int* neighbor_grid_overflow, const int* neighbor_grid_ghost_overflow,
-    const int* update_error)
+    const NEIGHBOR_LIST::UPDATE_ERROR_RECORD* update_error)
 {
     if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
         neighbor_grid_ghost_overflow[0] != 0 ||
-        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        update_error->header.code != NEIGHBOR_LIST::UPDATE_OK)
         return;
 #pragma omp parallel for schedule(dynamic)
     for (int grid_i = 0; grid_i < grid_numbers; grid_i++)
@@ -866,12 +927,12 @@ static __global__ void Delete_Excluded_Atoms_Serial_In_Neighbor_List(
     ATOM_GROUP* nl, const int* excluded_list_start, const int* excluded_list,
     const int* excluded_atom_numbers, const int* neighbor_grid_overflow,
     const int* neighbor_grid_ghost_overflow, const int* neighbor_list_overflow,
-    const int* update_error)
+    const NEIGHBOR_LIST::UPDATE_ERROR_RECORD* update_error)
 {
     if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
         neighbor_grid_ghost_overflow[0] != 0 ||
         neighbor_list_overflow[0] != 0 ||
-        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        update_error->header.code != NEIGHBOR_LIST::UPDATE_OK)
         return;
     SIMPLE_DEVICE_FOR(atom_i_local, local_atom_numbers)
     {
@@ -951,8 +1012,8 @@ void NEIGHBOR_LIST::UPDATOR::Update(
     int max_atom_in_grid_numbers, int max_ghost_in_grid_numbers,
     int max_neighbor_numbers, float grid_length, int* d_neighbor_grid_overflow,
     int* d_neighbor_grid_ghost_overflow, int* d_neighbor_list_overflow,
-    int* d_update_error, ATOM_GROUP* d_nl, int* excluded_list_start,
-    int* excluded_list, int* excluded_numbers)
+    NEIGHBOR_LIST::UPDATE_ERROR_RECORD* d_update_error, ATOM_GROUP* d_nl,
+    int* excluded_list_start, int* excluded_list, int* excluded_numbers)
 {
     int total_atom_numbers = local_atom_numbers + ghost_numbers;
     if (total_atom_numbers <= 0) return;
@@ -1139,7 +1200,8 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
         !Device_Malloc_And_Copy_Safely((void**)&d_neighbor_grid_ghost_overflow,
                                        &h_neighbor_grid_ghost_overflow,
                                        sizeof(int)) ||
-        !Device_Malloc_Safely((void**)&d_update_error, 2 * sizeof(int)) ||
+        !Device_Malloc_Safely((void**)&d_update_error,
+                              sizeof(UPDATE_ERROR_RECORD)) ||
         !Malloc_Safely((void**)&h_nl, group_bytes) ||
         !Device_Malloc_Safely((void**)&d_temp, neighbor_bytes))
     {
@@ -1148,7 +1210,7 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
                                        "NEIGHBOR_LIST::Initial");
         return;
     }
-    deviceMemset(d_update_error, 0, 2 * sizeof(int));
+    deviceMemset(d_update_error, 0, sizeof(UPDATE_ERROR_RECORD));
     for (int i = 0; i < atom_numbers; ++i)
     {
         h_nl[i].atom_numbers = 0;
@@ -1253,7 +1315,7 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
          update != NEIGHBOR_LIST_UPDATE_PARAMETER::CONDITIONAL_UPDATE))
     {
         last_update_error =
-            invalid_geometry ? UPDATE_INVALID_GEOMETRY : UPDATE_OK;
+            invalid_geometry ? UPDATE_INVALID_PERIODIC_GEOMETRY : UPDATE_OK;
         last_error_atom = -1;
         if (is_initialized)
         {
@@ -1274,7 +1336,7 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
     h_neighbor_list_overflow = 0;
     last_update_error = UPDATE_OK;
     last_error_atom = -1;
-    deviceMemset(d_update_error, 0, 2 * sizeof(int));
+    deviceMemset(d_update_error, 0, sizeof(UPDATE_ERROR_RECORD));
     if (full_neighbor_list.is_initialized)
     {
         deviceMemset(full_neighbor_list.d_overflow, 0, sizeof(int));
@@ -1315,11 +1377,12 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
                  deviceMemcpyDeviceToHost);
     deviceMemcpy(&h_neighbor_list_overflow, d_neighbor_list_overflow,
                  sizeof(int), deviceMemcpyDeviceToHost);
-    int update_error[2] = {UPDATE_OK, -1};
-    deviceMemcpy(update_error, d_update_error, sizeof(update_error),
+    UPDATE_ERROR_HEADER update_error = {UPDATE_OK, -1};
+    deviceMemcpy(&update_error, d_update_error, sizeof(update_error),
                  deviceMemcpyDeviceToHost);
-    last_update_error = update_error[0];
-    last_error_atom = update_error[1];
+    last_update_error = update_error.code;
+    last_error_atom =
+        last_update_error == UPDATE_OK ? -1 : update_error.local_atom;
     if (last_update_error != UPDATE_OK || h_neighbor_grid_overflow != 0 ||
         h_neighbor_grid_ghost_overflow != 0 || h_neighbor_list_overflow != 0)
     {
@@ -1437,12 +1500,79 @@ bool NEIGHBOR_LIST::Update_With_Overflow_Recovery(
         {
             if (last_update_error != UPDATE_OK)
             {
-                controller->Throw_Formatted_SPONGE_Error(
-                    spongeErrorSimulationBreakDown,
-                    "NEIGHBOR_LIST::Update_With_Overflow_Recovery",
-                    "Reason:\n\tneighbor-list build rejected non-finite or "
-                    "invalid periodic geometry (atom=%d)\n",
-                    last_error_atom);
+                if (last_update_error == UPDATE_INVALID_PERIODIC_GEOMETRY)
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorSimulationBreakDown,
+                        "NEIGHBOR_LIST::Update_With_Overflow_Recovery",
+                        "Reason:\n\tneighbor-list build rejected invalid "
+                        "periodic geometry\n\t(step=%d, MPI/PP rank=%d/%d, "
+                        "owned/ghost=%d/%d, grid_shape=(%d,%d,%d), "
+                        "grid_count=%d)\n",
+                        step, CONTROLLER::MPI_rank, CONTROLLER::PP_MPI_rank,
+                        local_atom_numbers, ghost_numbers, grids.Nx, grids.Ny,
+                        grids.Nz, grids.grid_numbers);
+                }
+                else
+                {
+                    UPDATE_ERROR_RECORD error_record = {};
+                    deviceMemcpy(&error_record, d_update_error,
+                                 sizeof(error_record),
+                                 deviceMemcpyDeviceToHost);
+                    const char* ownership =
+                        error_record.header.local_atom >= 0 &&
+                                error_record.header.local_atom <
+                                    local_atom_numbers
+                            ? "owned"
+                            : (error_record.header.local_atom >=
+                                           local_atom_numbers &&
+                                       error_record.header.local_atom <
+                                           coordinate_numbers
+                                   ? "ghost"
+                                   : "invalid");
+                    const char* failure_stage = "unknown update error";
+                    if (last_update_error == UPDATE_RAW_COORDINATE_NONFINITE)
+                        failure_stage = "raw coordinate non-finite";
+                    else if (last_update_error ==
+                             UPDATE_WRAPPED_COORDINATE_NONFINITE)
+                        failure_stage = "wrapped coordinate non-finite";
+                    else if (last_update_error == UPDATE_GRID_INDEX_INVALID)
+                        failure_stage = "grid index invalid";
+                    const char* wrapped_available =
+                        last_update_error == UPDATE_RAW_COORDINATE_NONFINITE
+                            ? "no"
+                            : "yes";
+                    const char* grid_available =
+                        last_update_error == UPDATE_GRID_INDEX_INVALID ? "yes"
+                                                                       : "no";
+
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorSimulationBreakDown,
+                        "NEIGHBOR_LIST::Update_With_Overflow_Recovery",
+                        "Reason:\n\tneighbor-list build rejected: %s\n"
+                        "\t(error=%d, step=%d, MPI/PP rank=%d/%d, "
+                        "local/global atom (0-based)=%d/%d, ownership=%s, "
+                        "owned/ghost=%d/%d, raw_bits=(0x%08x,0x%08x,"
+                        "0x%08x), wrapped_available=%s, "
+                        "wrapped_bits=(0x%08x,0x%08x,0x%08x), "
+                        "grid_available=%s, grid_index=(%d,%d,%d), "
+                        "grid_id=%d, grid_shape=(%d,%d,%d), "
+                        "grid_count=%d)\n",
+                        failure_stage, last_update_error, step,
+                        CONTROLLER::MPI_rank, CONTROLLER::PP_MPI_rank,
+                        error_record.header.local_atom,
+                        error_record.global_atom, ownership, local_atom_numbers,
+                        ghost_numbers, error_record.raw_bits.uint_x,
+                        error_record.raw_bits.uint_y,
+                        error_record.raw_bits.uint_z, wrapped_available,
+                        error_record.wrapped_bits.uint_x,
+                        error_record.wrapped_bits.uint_y,
+                        error_record.wrapped_bits.uint_z, grid_available,
+                        error_record.grid_index.int_x,
+                        error_record.grid_index.int_y,
+                        error_record.grid_index.int_z, error_record.grid_id,
+                        grids.Nx, grids.Ny, grids.Nz, grids.grid_numbers);
+                }
             }
             else if (is_needed_full)
             {

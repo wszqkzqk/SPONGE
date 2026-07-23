@@ -9,7 +9,26 @@ struct NEIGHBOR_LIST
     enum UPDATE_ERROR
     {
         UPDATE_OK = 0,
-        UPDATE_INVALID_GEOMETRY = 1
+        UPDATE_INVALID_PERIODIC_GEOMETRY = 1,
+        UPDATE_RAW_COORDINATE_NONFINITE = 2,
+        UPDATE_WRAPPED_COORDINATE_NONFINITE = 3,
+        UPDATE_GRID_INDEX_INVALID = 4
+    };
+
+    struct UPDATE_ERROR_HEADER
+    {
+        int code;
+        int local_atom;
+    };
+
+    struct UPDATE_ERROR_RECORD
+    {
+        UPDATE_ERROR_HEADER header;
+        int global_atom;
+        UNSIGNED_INT_VECTOR raw_bits;
+        UNSIGNED_INT_VECTOR wrapped_bits;
+        INT_VECTOR grid_index;
+        int grid_id;
     };
 
     bool is_initialized = 0;
@@ -17,7 +36,7 @@ struct NEIGHBOR_LIST
     int active_local_atom_numbers = 0;
     int last_update_error = UPDATE_OK;
     int last_error_atom = -1;
-    int* d_update_error = NULL;
+    UPDATE_ERROR_RECORD* d_update_error = NULL;
 
     // 是否需要构建半近邻表（默认需要）
     bool is_needed_half = true;
@@ -125,9 +144,10 @@ struct NEIGHBOR_LIST
                     int max_ghost_in_grid_numbers, int max_neighbor_numbers,
                     float grid_length, int* d_neighbor_grid_overflow,
                     int* d_neighbor_grid_ghost_overflow,
-                    int* d_neighbor_list_overflow, int* d_update_error,
-                    ATOM_GROUP* d_nl, int* excluded_list_start = NULL,
-                    int* excluded_list = NULL, int* excluded_numbers = NULL);
+                    int* d_neighbor_list_overflow,
+                    UPDATE_ERROR_RECORD* d_update_error, ATOM_GROUP* d_nl,
+                    int* excluded_list_start = NULL, int* excluded_list = NULL,
+                    int* excluded_numbers = NULL);
         void Clear();
     } updator;
 

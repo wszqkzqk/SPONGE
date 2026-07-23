@@ -112,10 +112,10 @@ static __global__ void Effective_Born_Radii_Device(const int atom_numbers,
 static __host__ __device__ __forceinline__ bool GB_Is_Positive_Normal_Float(
     const float value)
 {
-// __CUDA_ARCH__ (not GPU_ARCH_NAME) must gate the device path: nvcc defines
-// GPU_ARCH_NAME for both compilation passes, while __float_as_uint is only
-// available in the device pass of a __host__ __device__ function.
-#if defined(GPU_ARCH_NAME) && defined(__CUDA_ARCH__)
+    // The backend name is visible in both host and device passes.  Gate the
+    // intrinsic on the compiler's device-pass marker instead.
+#if defined(__CUDA_ARCH__) || \
+    (defined(__HIP_DEVICE_COMPILE__) && __HIP_DEVICE_COMPILE__)
     const unsigned int bits = __float_as_uint(value);
 #else
     unsigned int bits = 0;

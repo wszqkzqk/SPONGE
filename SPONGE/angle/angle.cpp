@@ -1,4 +1,4 @@
-﻿#include "angle.h"
+#include "angle.h"
 
 #include "../xponge/load/native/angle.hpp"
 #include "../xponge/xponge.h"
@@ -179,8 +179,9 @@ static __device__ __forceinline__ bool Compute_Angle_Geometry(
     const double inverse_u = 1.0 / sqrt(u_squared);
     const double inverse_v = 1.0 / sqrt(v_squared);
     const double inverse_normal = 1.0 / normal_length;
-    const double maximum_float =
-        static_cast<double>(std::numeric_limits<float>::max());
+    // FLT_MAX: std::numeric_limits<float>::max() is a host-only constexpr
+    // under nvcc and cannot be called from this device function.
+    const double maximum_float = static_cast<double>(FLT_MAX);
     if (!Angle_Double_Is_Finite(inverse_u) ||
         !Angle_Double_Is_Finite(inverse_v) ||
         !Angle_Double_Is_Finite(inverse_normal) || inverse_u > maximum_float ||

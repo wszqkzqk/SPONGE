@@ -101,8 +101,9 @@ static __device__ __forceinline__ TORSION_DOUBLE_VECTOR Torsion_Double_Cross(
 static __device__ __forceinline__ bool Torsion_Checked_Narrow(
     double value, float* result)
 {
-    const double maximum_float =
-        static_cast<double>(std::numeric_limits<float>::max());
+    // FLT_MAX: std::numeric_limits<float>::max() is a host-only constexpr
+    // under nvcc and cannot be called from this device function.
+    const double maximum_float = static_cast<double>(FLT_MAX);
     if (!Torsion_Double_Is_Finite(value) || value > maximum_float ||
         value < -maximum_float)
     {

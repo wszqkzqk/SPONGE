@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // 依赖: 此文件需要在 vxc.hpp 相关 kernel 可用之后 include
 // (dft.hpp 定义了 QC_Eval_AO_Grid_Kernel, QC_Eval_Rho_Kernel 等)
@@ -303,11 +303,13 @@ static __global__ void QC_Build_Becke_Atom_Weights_Kernel(
                 atom_weights[(size_t)ig * natm + a] = 0.0;
             QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
                                  grid_offset + ig);
-            continue;
         }
-        const double inverse_denominator = 1.0 / denominator;
-        for (int a = 0; a < natm; ++a)
-            atom_weights[(size_t)ig * natm + a] *= inverse_denominator;
+        else
+        {
+            const double inverse_denominator = 1.0 / denominator;
+            for (int a = 0; a < natm; ++a)
+                atom_weights[(size_t)ig * natm + a] *= inverse_denominator;
+        }
     }
 }
 
@@ -330,15 +332,18 @@ static __global__ void QC_Accumulate_Becke_Grid_Response_Kernel(
     {
         const double weighted_energy =
             (double)grid_weights[ig] * exc[ig];
-        if (weighted_energy == 0.0) continue;
-
         const int owner = (grid_offset + ig) / points_per_atom;
-        if (owner < 0 || owner >= natm ||
-            !QC_XC_Double_Is_Finite(weighted_energy))
+        // A `process` flag replaces the two `continue` statements, which are
+        // illegal inside CUDA's SIMPLE_DEVICE_FOR (an `if` guard on device,
+        // not a loop).
+        bool process = weighted_energy != 0.0;
+        if (process &&
+            (owner < 0 || owner >= natm ||
+             !QC_XC_Double_Is_Finite(weighted_energy)))
         {
             QC_Record_XC_Failure(failure, QC_XC_INVALID_GRID_RESPONSE,
                                  grid_offset + ig);
-            continue;
+            process = false;
         }
 
         const double x = (double)grid_coords[ig * 3 + 0];
@@ -346,7 +351,7 @@ static __global__ void QC_Accumulate_Becke_Grid_Response_Kernel(
         const double z = (double)grid_coords[ig * 3 + 2];
         bool valid = true;
 
-        for (int a = 0; a < natm && valid; ++a)
+        for (int a = 0; process && a < natm && valid; ++a)
         {
             const double coefficient =
                 (a == owner ? 1.0 : 0.0) -

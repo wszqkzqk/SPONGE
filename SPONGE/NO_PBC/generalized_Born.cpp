@@ -1,4 +1,4 @@
-﻿#include "generalized_Born.h"
+#include "generalized_Born.h"
 
 #include "../Lennard_Jones_force/pair_activity.h"
 #include "../xponge/load/native/gb.hpp"
@@ -112,7 +112,10 @@ static __global__ void Effective_Born_Radii_Device(const int atom_numbers,
 static __host__ __device__ __forceinline__ bool GB_Is_Positive_Normal_Float(
     const float value)
 {
-#ifdef GPU_ARCH_NAME
+// __CUDA_ARCH__ (not GPU_ARCH_NAME) must gate the device path: nvcc defines
+// GPU_ARCH_NAME for both compilation passes, while __float_as_uint is only
+// available in the device pass of a __host__ __device__ function.
+#if defined(GPU_ARCH_NAME) && defined(__CUDA_ARCH__)
     const unsigned int bits = __float_as_uint(value);
 #else
     unsigned int bits = 0;

@@ -1,4 +1,4 @@
-﻿#include "full_neighbor_list.h"
+#include "full_neighbor_list.h"
 
 #include <algorithm>
 #include <cmath>
@@ -105,7 +105,9 @@ static __device__ __forceinline__ int Reserve_One_Count(int* counter,
     int observed = atomicAdd(counter, 0);
     while (true)
     {
-        if (observed == std::numeric_limits<int>::max())
+        // INT_MAX: std::numeric_limits<int>::max() is a host-only constexpr
+        // under nvcc and cannot be called from this device function.
+        if (observed == INT_MAX)
         {
             Record_Required_Capacity(required_capacity, observed);
             return observed;
@@ -138,9 +140,9 @@ static __device__ __forceinline__ void Append_Full_Neighbor(
     if (slot < max_neighbor_numbers)
         full_nl[atom_i].atom_serial[slot] = atom_j;
     else
-        Record_Required_Capacity(
-            overflow_flag,
-            slot == std::numeric_limits<int>::max() ? slot : slot + 1);
+        // INT_MAX: see Reserve_One_Count above.
+        Record_Required_Capacity(overflow_flag,
+                                 slot == INT_MAX ? slot : slot + 1);
 }
 
 static __device__ __forceinline__ bool Validate_Half_Group(
@@ -255,10 +257,11 @@ static __global__ void Build_Full_Neighbor_List_Kernel(
     SIMPLE_DEVICE_FOR(atom_i, owned_atom_numbers)
     {
         const ATOM_GROUP half_group = half_nl[atom_i];
-        if (!Validate_Half_Group(half_group, atom_i, max_neighbor_numbers,
-                                 build_error))
-            continue;
-        for (int k = 0; k < half_group.atom_numbers; ++k)
+        // Guard the loop instead of `continue`, which is illegal inside
+        // CUDA's SIMPLE_DEVICE_FOR (an `if` guard, not a loop).
+        const bool half_group_valid = Validate_Half_Group(
+            half_group, atom_i, max_neighbor_numbers, build_error);
+        for (int k = 0; half_group_valid && k < half_group.atom_numbers; ++k)
         {
             const int atom_j = half_group.atom_serial[k];
             if (atom_j < 0 || atom_j >= coordinate_numbers)
@@ -332,11 +335,12 @@ static __global__ void Build_Full_Neighbor_List_With_Cutoff_Kernel(
     SIMPLE_DEVICE_FOR(atom_i, owned_atom_numbers)
     {
         const ATOM_GROUP half_group = half_nl[atom_i];
-        if (!Validate_Half_Group(half_group, atom_i, max_neighbor_numbers,
-                                 build_error))
-            continue;
+        // Guard the loop instead of `continue`, which is illegal inside
+        // CUDA's SIMPLE_DEVICE_FOR (an `if` guard, not a loop).
+        const bool half_group_valid = Validate_Half_Group(
+            half_group, atom_i, max_neighbor_numbers, build_error);
         const VECTOR ri = crd[atom_i];
-        for (int k = 0; k < half_group.atom_numbers; ++k)
+        for (int k = 0; half_group_valid && k < half_group.atom_numbers; ++k)
         {
             const int atom_j = half_group.atom_serial[k];
             if (atom_j < 0 || atom_j >= coordinate_numbers)

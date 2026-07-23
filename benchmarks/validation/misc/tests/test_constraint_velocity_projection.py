@@ -9,6 +9,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 PROBE_SOURCE = Path(__file__).with_name("constraint_velocity_projection_probe.cpp")
+PAIR_GUARD_PROBE_SOURCE = Path(__file__).with_name("settle_pair_guard_probe.cpp")
 
 
 def _compiler_command():
@@ -78,6 +79,53 @@ def test_velocity_only_constraint_projection_converges_without_moving_crd(
     )
     assert compile_result.returncode == 0, (
         "failed to compile constraint projection probe\n"
+        f"stdout:\n{compile_result.stdout}\nstderr:\n{compile_result.stderr}"
+    )
+
+    run_result = subprocess.run(
+        [str(executable)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+
+
+def test_settle_pair_rejects_no_real_root_before_writing_state(tmp_path):
+    executable = tmp_path / "settle_pair_guard_probe"
+    dead_code_flags = (
+        ["-Wl,-dead_strip"]
+        if sys.platform == "darwin"
+        else ["-Wl,--gc-sections"]
+    )
+    compile_result = subprocess.run(
+        [
+            *_compiler_command(),
+            "-std=c++17",
+            "-DUSE_CPU",
+            "-DNO_GLOBAL_CONTROLLER",
+            "-O3",
+            "-march=native",
+            "-ffast-math",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-w",
+            f"-I{REPOSITORY_ROOT / 'SPONGE'}",
+            f"-I{_dependency_include()}",
+            str(PAIR_GUARD_PROBE_SOURCE),
+            str(REPOSITORY_ROOT / "SPONGE/common.cpp"),
+            *dead_code_flags,
+            "-o",
+            str(executable),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert compile_result.returncode == 0, (
+        "failed to compile SETTLE pair guard probe\n"
         f"stdout:\n{compile_result.stdout}\nstderr:\n{compile_result.stderr}"
     )
 

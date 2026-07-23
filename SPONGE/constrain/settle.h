@@ -40,7 +40,8 @@ struct SETTLE
                                    const LTMatrix3 rcell);
 
     LTMatrix3* virial_tensor = NULL;
-    void Do_SETTLE(const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
+    void Do_SETTLE(CONTROLLER* controller, const int* atom_local,
+                   const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
                    const LTMatrix3 rcell, VECTOR* vel, const int need_pressure,
                    LTMatrix3* d_stress);
     bool Project_Velocity_To_Constraint_Manifold(

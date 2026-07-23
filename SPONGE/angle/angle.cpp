@@ -212,14 +212,16 @@ static __device__ __forceinline__ bool Compute_Angle_Geometry(
     return true;
 }
 
-static __global__ void Angle_Force_With_Atom_Energy_And_Virial_Device(
-    const int angle_numbers, const VECTOR* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const int local_atom_numbers, const int* atom_a,
-    const int* atom_b, const int* atom_c, const float* angle_k,
-    const float* angle_theta0, VECTOR* frc, int need_atom_energy,
-    float* atom_energy, float* angle_energy, int need_virial, LTMatrix3* virial,
-    const int* global_index, const int* global_atom_a, const int* global_atom_b,
-    const int* global_atom_c, int* invalid_geometry_term)
+static __global__
+    __launch_bounds__(256) void Angle_Force_With_Atom_Energy_And_Virial_Device(
+        const int angle_numbers, const VECTOR* crd, const LTMatrix3 cell,
+        const LTMatrix3 rcell, const int local_atom_numbers, const int* atom_a,
+        const int* atom_b, const int* atom_c, const float* angle_k,
+        const float* angle_theta0, VECTOR* frc, int need_atom_energy,
+        float* atom_energy, float* angle_energy, int need_virial,
+        LTMatrix3* virial, const int* global_index, const int* global_atom_a,
+        const int* global_atom_b, const int* global_atom_c,
+        int* invalid_geometry_term)
 {
 #ifdef USE_GPU
     int angle_i = blockDim.x * blockIdx.x + threadIdx.x;
@@ -628,17 +630,30 @@ void ANGLE::Angle_Force_With_Atom_Energy_And_Virial(
 #ifndef GPU_ARCH_NAME
         deviceMemset(d_invalid_geometry_term, -1, sizeof(int));
 #endif
+        const unsigned int threads_per_block =
+            std::min(CONTROLLER::device_max_thread, 256U);
         Launch_Device_Kernel(
             Angle_Force_With_Atom_Energy_And_Virial_Device,
-            (num_angle_local + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, this->num_angle_local, crd,
-            cell, rcell, this->local_atom_numbers, this->d_atom_a_local,
+            Positive_Int_Ceil_Div(num_angle_local,
+                                  static_cast<int>(threads_per_block)),
+            threads_per_block, 0, NULL, this->num_angle_local, crd, cell, rcell,
+            this->local_atom_numbers, this->d_atom_a_local,
             this->d_atom_b_local, this->d_atom_c_local, this->d_angle_k_local,
             this->d_angle_theta0_local, frc, need_atom_energy, atom_energy,
             this->d_angle_ene, need_virial, atom_virial_tensor,
             this->d_global_index_local, this->d_atom_a, this->d_atom_b,
             this->d_atom_c, this->d_invalid_geometry_term);
+#ifdef GPU_ARCH_NAME
+        const deviceError_t launch_error = deviceGetLastError();
+        if (launch_error != 0)
+        {
+            controller->Throw_Device_Error(
+                launch_error, "ANGLE::Angle_Force_With_Atom_Energy_And_Virial",
+                "Reason:\n\ta device failure was observed immediately after "
+                "the angle force kernel launch\n");
+            return;
+        }
+#endif
 #ifndef GPU_ARCH_NAME
         int invalid_code = -1;
         deviceMemcpy(&invalid_code, d_invalid_geometry_term, sizeof(int),

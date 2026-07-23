@@ -39,14 +39,15 @@ static __device__ __forceinline__ void Dihedral_Fail_Invalid_Geometry(
 #endif
 }
 
-static __global__ void Dihedral_Force_With_Atom_Energy_And_Virial_Device(
-    const int dihedral_numbers, const VECTOR* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const int local_atom_numbers, const int* atom_a,
-    const int* atom_b, const int* atom_c, const int* atom_d, const float* pk,
-    const float* gamc, const float* gams, const float* pn,
-    const int* global_index, VECTOR* frc, int need_atom_energy, float* ene,
-    float* di_ene, int need_virial, LTMatrix3* virial,
-    int* invalid_geometry_term)
+static __global__
+    __launch_bounds__(256) void Dihedral_Force_With_Atom_Energy_And_Virial_Device(
+        const int dihedral_numbers, const VECTOR* crd, const LTMatrix3 cell,
+        const LTMatrix3 rcell, const int local_atom_numbers, const int* atom_a,
+        const int* atom_b, const int* atom_c, const int* atom_d,
+        const float* pk, const float* gamc, const float* gams, const float* pn,
+        const int* global_index, VECTOR* frc, int need_atom_energy, float* ene,
+        float* di_ene, int need_virial, LTMatrix3* virial,
+        int* invalid_geometry_term)
 {
 #ifdef USE_GPU
     int dihedral_i = blockDim.x * blockIdx.x + threadIdx.x;
@@ -483,16 +484,31 @@ void DIHEDRAL::Dihedral_Force_With_Atom_Energy_And_Virial(
 #ifndef GPU_ARCH_NAME
         deviceMemset(d_invalid_geometry_term, -1, sizeof(int));
 #endif
+        const unsigned int threads_per_block =
+            std::min(CONTROLLER::device_max_thread, 256U);
         Launch_Device_Kernel(
             Dihedral_Force_With_Atom_Energy_And_Virial_Device,
-            (num_dihe_local - 1) / CONTROLLER::device_max_thread + 1,
-            CONTROLLER::device_max_thread, 0, NULL, this->num_dihe_local, crd,
-            cell, rcell, this->local_atom_numbers, this->d_atom_a_local,
+            Positive_Int_Ceil_Div(num_dihe_local,
+                                  static_cast<int>(threads_per_block)),
+            threads_per_block, 0, NULL, this->num_dihe_local, crd, cell, rcell,
+            this->local_atom_numbers, this->d_atom_a_local,
             this->d_atom_b_local, this->d_atom_c_local, this->d_atom_d_local,
             this->d_pk_local, this->d_gamc_local, this->d_gams_local,
             this->d_pn_local, this->d_global_index_local, frc, need_atom_energy,
             atom_energy, d_dihedral_ene, need_virial, atom_virial,
             d_invalid_geometry_term);
+#ifdef GPU_ARCH_NAME
+        const deviceError_t launch_error = deviceGetLastError();
+        if (launch_error != 0)
+        {
+            controller->Throw_Device_Error(
+                launch_error,
+                "DIHEDRAL::Dihedral_Force_With_Atom_Energy_And_Virial",
+                "Reason:\n\ta device failure was observed immediately after "
+                "the proper dihedral force kernel launch\n");
+            return;
+        }
+#endif
 #ifndef GPU_ARCH_NAME
         int invalid_code = -1;
         deviceMemcpy(&invalid_code, d_invalid_geometry_term, sizeof(int),

@@ -163,7 +163,6 @@ struct LENNARD_JONES_INFORMATION
 
     // 长程能量和维里修正
     float long_range_factor = 0;
-    float* d_long_range_factor = NULL;
     // 求力的时候对能量和维里的长程修正
     void Long_Range_Correction(int need_pressure, LTMatrix3* d_virial,
                                int need_potential, float* d_potential,

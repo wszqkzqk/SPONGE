@@ -143,46 +143,6 @@ void LENNARD_JONES_INFORMATION::LJ_Malloc()
     Malloc_Safely((void**)&h_LJ_energy_atom, sizeof(float) * atom_numbers);
 }
 
-static __global__ void Total_C6_Get(int atom_numbers, int* atom_lj_type,
-                                    float* d_lj_b, float* d_factor)
-{
-    int j;
-    double temp_sum = 0;
-    int x, y;
-    int itype, jtype, atom_pair_LJ_type;
-#ifdef USE_GPU
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < atom_numbers;
-         i += gridDim.x * blockDim.x)
-#else
-#pragma omp parallel for firstprivate( \
-        j, x, y, itype, jtype, atom_pair_LJ_type) reduction(+ : temp_sum)
-    for (int i = 0; i < atom_numbers; i++)
-#endif
-    {
-        itype = atom_lj_type[i];
-        double temp_small_sum = 0;
-#ifdef USE_GPU
-        for (j = blockIdx.y * blockDim.y + threadIdx.y; j < atom_numbers;
-             j += gridDim.y * blockDim.y)
-#else
-        for (j = 0; j < atom_numbers; j++)
-#endif
-        {
-            jtype = atom_lj_type[j];
-            y = (jtype - itype);
-            x = y >> 31;
-            y = (y ^ x) - x;
-            x = jtype + itype;
-            jtype = (x + y) >> 1;
-            x = (x - y) >> 1;
-            atom_pair_LJ_type = (jtype * (jtype + 1) >> 1) + x;
-            temp_small_sum += d_lj_b[atom_pair_LJ_type];
-        }
-        temp_sum += temp_small_sum;
-    }
-    atomicAdd(d_factor, temp_sum);
-}
-
 void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
                                         const char* module_name)
 {
@@ -244,24 +204,30 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
             crd_with_LJ_parameters, d_atom_LJ_type);
         controller->printf("    Start initializing long range LJ correction\n");
-        long_range_factor = 0;
-
-        Device_Malloc_And_Copy_Safely((void**)&d_long_range_factor,
-                                      &long_range_factor, sizeof(float));
-        deviceMemset(d_long_range_factor, 0, sizeof(float));
-
-        dim3 gridSize = {(atom_numbers + CONTROLLER::device_max_thread - 1) /
-                             CONTROLLER::device_max_thread,
-                         1};
-        dim3 blockSize = {
-            CONTROLLER::device_warp,
-            CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-        Launch_Device_Kernel(Total_C6_Get, gridSize, blockSize, 0, NULL,
-                             atom_numbers, d_atom_LJ_type, d_LJ_B,
-                             d_long_range_factor);
-
-        deviceMemcpy(&long_range_factor, d_long_range_factor, sizeof(float),
-                     deviceMemcpyDeviceToHost);
+        // 全对求和 Σ_i Σ_j B[type_i, type_j] 等于按类型直方图的
+        // Σ_a count_a · Σ_b count_b · B[pair(a,b)]，后者按固定顺序双精度
+        // 累加，结果确定；此前的全对 kernel 复杂度为 O(N²) 且依赖 float
+        // 原子加顺序，本身就有运行间波动。
+        std::vector<int64_t> type_count(atom_type_numbers, 0);
+        for (int i = 0; i < atom_numbers; i++)
+        {
+            type_count[h_atom_LJ_type[i]] += 1;
+        }
+        double c6_sum = 0.0;
+        for (int itype = 0; itype < atom_type_numbers; itype++)
+        {
+            if (type_count[itype] == 0) continue;
+            double inner_sum = 0.0;
+            for (int jtype = 0; jtype < atom_type_numbers; jtype++)
+            {
+                if (type_count[jtype] == 0) continue;
+                inner_sum +=
+                    static_cast<double>(type_count[jtype]) *
+                    static_cast<double>(h_LJ_B[Get_LJ_Type(itype, jtype)]);
+            }
+            c6_sum += static_cast<double>(type_count[itype]) * inner_sum;
+        }
+        long_range_factor = static_cast<float>(c6_sum);
         printf("        Total C6 factor is %e\n", long_range_factor);
 
         long_range_factor *=

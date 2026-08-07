@@ -74,60 +74,183 @@ bool Parse_Int_Exactly(const char* token, int* value)
 }
 }  // namespace
 
+// 按 grid_j 升序逐个检查 27 种周期镜像位移，命中即记录，输出为升序邻居表。
+static __host__ __device__ __forceinline__ int Find_Neighbor_Grids_Scan(
+    int grid_i, int Nx, int Ny, int Nz, int64_t dxy, int64_t dxz, int64_t dyz,
+    LTMatrix3 cell, int* neighbor_i)
+{
+    const int64_t NyNz = static_cast<int64_t>(Ny) * Nz;
+    int local = 0;
+    int dx, dy, dz;
+    const int64_t grid_i_x = grid_i / NyNz;
+    const int64_t grid_i_y = (grid_i % NyNz) / Nz;
+    const int64_t grid_i_z = grid_i % Nz;
+    int cx, cy;
+    int grid_j = 0;
+    for (int64_t grid_j_x = 0; grid_j_x < Nx; grid_j_x += 1)
+    {
+        const int64_t base_x = grid_i_x - grid_j_x;
+        for (int64_t grid_j_y = 0; grid_j_y < Ny; grid_j_y += 1)
+        {
+            const int64_t base_y = grid_i_y - grid_j_y;
+            for (int64_t grid_j_z = 0; grid_j_z < Nz;
+                 grid_j_z += 1, grid_j += 1)
+            {
+                const int64_t base_z = grid_i_z - grid_j_z;
+                for (int k = 0; k < 27; k += 1)
+                {
+                    dx = k / 9 - 1;
+                    dy = (k % 9) / 3 - 1;
+                    dz = k % 3 - 1;
+                    const int64_t temp_x = base_x +
+                                           static_cast<int64_t>(dx) * Nx +
+                                           dy * dxy + dz * dxz;
+                    const int64_t temp_y = base_y +
+                                           static_cast<int64_t>(dy) * Ny +
+                                           dz * dyz;
+                    const int64_t temp_z = base_z + static_cast<int64_t>(dz) * Nz;
+                    cx = static_cast<double>(dy) * cell.a21 +
+                                     static_cast<double>(dz) * cell.a31 ==
+                                 0.0
+                             ? -2
+                             : -3;
+                    cy = static_cast<double>(dz) * cell.a32 == 0.0 ? -2 : -3;
+                    if (temp_x <= 2 && temp_x >= cx && temp_y <= 2 &&
+                        temp_y >= cy && temp_z <= 2 && temp_z >= -2)
+                    {
+                        if (local >= MAX_GRID_NEIGHBORS)
+                        {
+                            local = -1;
+                        }
+                        else
+                        {
+                            neighbor_i[local++] = grid_j;
+                        }
+                        break;
+                    }
+                }
+                if (local < 0) break;
+            }
+            if (local < 0) break;
+        }
+        if (local < 0) break;
+    }
+    return local;
+}
+
+#ifdef GPU_ARCH_NAME
+// 枚举路径单线程候选上限；超出即回退到全扫描，语义不变
+#define GRID_ENUM_CAPACITY 2048
+#endif
+
 static __global__ void Find_Neighor_Grids_Device(
     int grid_numbers, int* neighbor_grid_numbers, int* neighbor_grids, int Nx,
     int Ny, int Nz, int64_t dxy, int64_t dxz, int64_t dyz, LTMatrix3 cell)
 {
     SIMPLE_DEVICE_FOR(grid_i, grid_numbers)
     {
-        const int64_t NyNz = static_cast<int64_t>(Ny) * Nz;
-        int local = 0;
-        int dx, dy, dz;
         int* neighbor_i = neighbor_grids + (size_t)MAX_GRID_NEIGHBORS * grid_i;
-        const int64_t grid_i_x = grid_i / NyNz;
-        const int64_t grid_i_y = (grid_i % NyNz) / Nz;
+        int local = 0;
+#ifdef GPU_ARCH_NAME
+        // 全扫描是 O(grid_numbers^2)。命中条件对每种周期镜像 (dx,dy,dz)
+        // 都是关于 grid_j 三个分量的区间约束，因此可以按镜像直接枚举候选
+        // 小盒，再排序去重得到与全扫描逐位一致的升序邻居表。
+        const int64_t grid_i_x = grid_i / (static_cast<int64_t>(Ny) * Nz);
+        const int64_t grid_i_y =
+            (grid_i % (static_cast<int64_t>(Ny) * Nz)) / Nz;
         const int64_t grid_i_z = grid_i % Nz;
-        int cx, cy;
-        for (int grid_j = 0; grid_j < grid_numbers; grid_j += 1)
+        int candidates[GRID_ENUM_CAPACITY];
+        int candidate_numbers = 0;
+        bool enumeration_ok = true;
+        for (int k = 0; k < 27 && enumeration_ok; k += 1)
         {
-            const int64_t grid_j_x = grid_j / NyNz;
-            const int64_t grid_j_y = (grid_j % NyNz) / Nz;
-            const int64_t grid_j_z = grid_j % Nz;
-            for (int k = 0; k < 27; k += 1)
+            const int dx = k / 9 - 1;
+            const int dy = (k % 9) / 3 - 1;
+            const int dz = k % 3 - 1;
+            const int cx = static_cast<double>(dy) * cell.a21 +
+                                       static_cast<double>(dz) * cell.a31 ==
+                                   0.0
+                               ? -2
+                               : -3;
+            const int cy =
+                static_cast<double>(dz) * cell.a32 == 0.0 ? -2 : -3;
+            const int64_t shift_x =
+                static_cast<int64_t>(dx) * Nx + dy * dxy + dz * dxz;
+            const int64_t shift_y = static_cast<int64_t>(dy) * Ny + dz * dyz;
+            const int64_t shift_z = static_cast<int64_t>(dz) * Nz;
+            const int64_t lo_x = grid_i_x + shift_x - 2 > 0
+                                     ? grid_i_x + shift_x - 2
+                                     : 0;
+            const int64_t hi_x = grid_i_x + shift_x - cx < Nx - 1
+                                     ? grid_i_x + shift_x - cx
+                                     : Nx - 1;
+            const int64_t lo_y = grid_i_y + shift_y - 2 > 0
+                                     ? grid_i_y + shift_y - 2
+                                     : 0;
+            const int64_t hi_y = grid_i_y + shift_y - cy < Ny - 1
+                                     ? grid_i_y + shift_y - cy
+                                     : Ny - 1;
+            const int64_t lo_z =
+                grid_i_z + shift_z - 2 > 0 ? grid_i_z + shift_z - 2 : 0;
+            const int64_t hi_z =
+                grid_i_z + shift_z + 2 < Nz - 1 ? grid_i_z + shift_z + 2
+                                                : Nz - 1;
+            if (lo_x > hi_x || lo_y > hi_y || lo_z > hi_z) continue;
+            const int64_t box =
+                (hi_x - lo_x + 1) * (hi_y - lo_y + 1) * (hi_z - lo_z + 1);
+            if (candidate_numbers + box > GRID_ENUM_CAPACITY)
             {
-                dx = k / 9 - 1;
-                dy = (k % 9) / 3 - 1;
-                dz = k % 3 - 1;
-                const int64_t temp_x = grid_i_x +
-                                       static_cast<int64_t>(dx) * Nx +
-                                       dy * dxy + dz * dxz - grid_j_x;
-                const int64_t temp_y = grid_i_y +
-                                       static_cast<int64_t>(dy) * Ny +
-                                       dz * dyz - grid_j_y;
-                const int64_t temp_z =
-                    grid_i_z + static_cast<int64_t>(dz) * Nz - grid_j_z;
-                cx = static_cast<double>(dy) * cell.a21 +
-                                 static_cast<double>(dz) * cell.a31 ==
-                             0.0
-                         ? -2
-                         : -3;
-                cy = static_cast<double>(dz) * cell.a32 == 0.0 ? -2 : -3;
-                if (temp_x <= 2 && temp_x >= cx && temp_y <= 2 &&
-                    temp_y >= cy && temp_z <= 2 && temp_z >= -2)
+                enumeration_ok = false;
+                break;
+            }
+            for (int64_t jx = lo_x; jx <= hi_x; jx += 1)
+            {
+                for (int64_t jy = lo_y; jy <= hi_y; jy += 1)
                 {
-                    if (local >= MAX_GRID_NEIGHBORS)
+                    for (int64_t jz = lo_z; jz <= hi_z; jz += 1)
                     {
-                        local = -1;
+                        candidates[candidate_numbers] =
+                            static_cast<int>((jx * Ny + jy) * Nz + jz);
+                        candidate_numbers += 1;
                     }
-                    else
-                    {
-                        neighbor_i[local++] = grid_j;
-                    }
-                    break;
                 }
             }
-            if (local < 0) break;
         }
+        if (enumeration_ok)
+        {
+            for (int gap = candidate_numbers / 2; gap > 0; gap /= 2)
+            {
+                for (int i = gap; i < candidate_numbers; i += 1)
+                {
+                    const int value = candidates[i];
+                    int j = i;
+                    for (; j >= gap && candidates[j - gap] > value; j -= gap)
+                    {
+                        candidates[j] = candidates[j - gap];
+                    }
+                    candidates[j] = value;
+                }
+            }
+            for (int i = 0; i < candidate_numbers; i += 1)
+            {
+                if (i > 0 && candidates[i] == candidates[i - 1]) continue;
+                if (local >= MAX_GRID_NEIGHBORS)
+                {
+                    local = -1;
+                    break;
+                }
+                neighbor_i[local++] = candidates[i];
+            }
+        }
+        else
+        {
+            local = Find_Neighbor_Grids_Scan(grid_i, Nx, Ny, Nz, dxy, dxz, dyz,
+                                             cell, neighbor_i);
+        }
+#else
+        local = Find_Neighbor_Grids_Scan(grid_i, Nx, Ny, Nz, dxy, dxz, dyz,
+                                         cell, neighbor_i);
+#endif
         neighbor_grid_numbers[grid_i] = local;
     }
 }

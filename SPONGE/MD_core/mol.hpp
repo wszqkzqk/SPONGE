@@ -724,11 +724,9 @@ static void Get_Molecule_Atoms(CONTROLLER* controller, int atom_numbers,
     free(edge_next);
 }
 
-static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
-                                                 const CONECT connectivity,
-                                                 const VECTOR* crd,
-                                                 const LTMatrix3 cell,
-                                                 const LTMatrix3 rcell)
+static std::vector<int> Check_Periodic_Molecules(
+    const CPP_ATOM_GROUP& mol_atoms, const CONECT& connectivity,
+    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell)
 {
     std::vector<int> periodic_mols;
     int max_atom_idx = -1;
@@ -746,6 +744,7 @@ static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
 
     std::vector<int> mark(max_atom_idx + 1, 0);
     std::vector<int> visited(max_atom_idx + 1, 0);
+    std::vector<VECTOR> mapped(max_atom_idx + 1);
     std::deque<int> queue;
 
     for (int i = 0; i < mol_atoms.size(); i++)
@@ -770,7 +769,6 @@ static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
         frac0.z = frac0.z - floorf(frac0.z);
         VECTOR mapped_anchor = frac0 * cell;
 
-        std::vector<VECTOR> mapped(max_atom_idx + 1);
         mapped[anchor] = mapped_anchor;
         visited[anchor] = 1;
         queue.clear();

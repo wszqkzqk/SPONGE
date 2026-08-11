@@ -14,7 +14,7 @@
 ; !define VARIANT         "CPU"
 ; !define STAGE_DIR       "release-artifacts\nsis\stage"
 ; !define OUTPUT_PATH     "release-artifacts\nsis\SPONGE-CPU-v2.0.0-installer.exe"
-; !define LICENSE_FILE    "packaging\windows\license.rtf"
+; !define LICENSE_FILE    "LICENSE"
 
 ; ---------- Derived names ----------
 !define PRODUCT_NAME    "SPONGE ${VARIANT}"

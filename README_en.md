@@ -34,4 +34,4 @@ When you need to understand or work with SPONGE:
 
 ## License
 
-[Apache License 2.0](LICENSE) - Copyright (c) 2022-2026 SPONGE Development Team
+[SPONGE Licensing Agreement (English, controlling)](LICENSE) · [Chinese translation](LICENSE.zh-CN.md) · [Third-Party Notices](THIRD_PARTY_NOTICES)

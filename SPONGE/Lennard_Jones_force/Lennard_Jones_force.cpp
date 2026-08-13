@@ -1,7 +1,9 @@
 ﻿#include "Lennard_Jones_force.h"
 
 #include <cstdint>
+#include <cstdlib>
 
+#include "../neighbor_list/neighbor_list.h"
 #include "../xponge/load/native/lj.hpp"
 #include "../xponge/xponge.h"
 #include "pair_activity.h"
@@ -27,6 +29,34 @@ __global__ void Repack_LJ_Crd(const int atom_numbers, const VECTOR* crd,
         lj_crd_q[atom_i].x = r.x;
         lj_crd_q[atom_i].y = r.y;
         lj_crd_q[atom_i].z = r.z;
+    }
+}
+
+// S3：把 atom 序的 LJ 打包数据按 cluster 序重排（每步一次；cluster 内 8 槽
+// 连续，tile kernel 的 cluster 载入变为全合并 LDG，且不再需要经
+// cluster_atoms 的二级间接 gather）。padding 槽（cluster_atoms 为 -1）写零，
+// 构建保证对应掩码位恒 0，内容不会被消费。
+__global__ void Gather_LJ_Cluster_Data(const int cluster_atom_slots,
+                                       const int* cluster_atoms,
+                                       const float4* crd_q, const int2* type_g,
+                                       float4* cluster_crd_q,
+                                       int2* cluster_type_g)
+{
+    SIMPLE_DEVICE_FOR(slot, cluster_atom_slots)
+    {
+        const int atom = cluster_atoms[slot];
+        if (atom >= 0)
+        {
+            cluster_crd_q[slot] = crd_q[atom];
+            cluster_type_g[slot] = type_g[atom];
+        }
+        else
+        {
+            const float4 zero4 = {0.0f, 0.0f, 0.0f, 0.0f};
+            const int2 pad2 = {0, -1};
+            cluster_crd_q[slot] = zero4;
+            cluster_type_g[slot] = pad2;
+        }
     }
 }
 
@@ -156,6 +186,299 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
     }
 }
 
+#ifdef USE_CUDA
+// ---- S3：tile LJ+直接库仑 kernel（设计文档 LJ_TILING_DESIGN.md §2）----
+// tile = 8×8=64 对；lane l 负责 i=l/4、j∈{l%4, l%4+4} 两对。tile 表按
+// cluster_i 分组排序（neighbor_list 重建时计数排序），一个 warp 连续消费
+// LJ_TILE_WARP_SPAN 个 tile，同一 i-cluster 段内 f_i/能量/维里在寄存器
+// 累计、段末一次归约写出（i 侧全局原子加是全 kernel 的吞吐瓶颈，实测占
+// 首版 tile kernel 的 2/3）。活对的逐语句语义与
+// Lennard_Jones_And_Direct_Coulomb_Device 完全一致（dr、dr_abs<cutoff
+// 复判、Get_LJ_Type 查表、pair_activity 分类、零重叠 trap），差别只在
+// 数据来源（tile 掩码 + cluster 序打包坐标）与归约写出方式。
+
+// 4-lane 组内 / stride-4 跨组的 xor-shuffle 归约辅助
+static __device__ __forceinline__ VECTOR LJ_Tile_Xor_Sum(VECTOR v,
+                                                         const int offset)
+{
+    v.x += __shfl_xor_sync(FULL_MASK, v.x, offset);
+    v.y += __shfl_xor_sync(FULL_MASK, v.y, offset);
+    v.z += __shfl_xor_sync(FULL_MASK, v.z, offset);
+    return v;
+}
+
+static __device__ __forceinline__ LTMatrix3 LJ_Tile_Xor_Sum(LTMatrix3 m,
+                                                            const int offset)
+{
+    m.a11 += __shfl_xor_sync(FULL_MASK, m.a11, offset);
+    m.a21 += __shfl_xor_sync(FULL_MASK, m.a21, offset);
+    m.a22 += __shfl_xor_sync(FULL_MASK, m.a22, offset);
+    m.a31 += __shfl_xor_sync(FULL_MASK, m.a31, offset);
+    m.a32 += __shfl_xor_sync(FULL_MASK, m.a32, offset);
+    m.a33 += __shfl_xor_sync(FULL_MASK, m.a33, offset);
+    return m;
+}
+
+// SPONGE_LJ_FORCE_ABLATE：tile kernel 消融测时（仅诊断，结果不正确）：
+// bit0 跳过对相互作用评估（保留 dr/掩码），bit1 跳过归约与写出，
+// bit2 跳过 cluster 打包数据载入（r1/r2 用常量，atom 下标照常读）
+static int LJ_Force_Ablate_Mode()
+{
+    static int mode = -1;
+    if (mode < 0)
+    {
+        const char* v = std::getenv("SPONGE_LJ_FORCE_ABLATE");
+        mode = v != NULL ? atoi(v) : 0;
+    }
+    return mode;
+}
+
+// 每 warp 连续消费的分组序 tile 数：tile 表已按 cluster_i 排序，warp 顺序
+// 走过同一段（同一 i-cluster）时 f_i/能量/维里在寄存器累计，段末一次归约
+// 写出——i 侧全局原子加从每 tile 8 次降为每段 8 次（段均 ~76 tile）
+#define LJ_TILE_WARP_SPAN 64
+
+template <bool need_force, bool need_energy, bool need_virial,
+          bool need_coulomb, int ABLATE = 0>
+static __global__ void __launch_bounds__(256)
+Lennard_Jones_And_Direct_Coulomb_Tile_Device(
+    const int tile_numbers, const LJ_TILE* tiles, const int* tile_sorted,
+    const int* cluster_atoms, const int* cluster_flags,
+    const float4* cluster_crd_q, const int2* cluster_type_g,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float* LJ_type_A,
+    const float* LJ_type_B, const float cutoff, VECTOR* frc,
+    const float pme_beta, float* atom_energy, LTMatrix3* atom_virial,
+    float* atom_direct_cf_energy, float* atom_LJ_ene, int* pair_overlap_error)
+{
+    // 要求 32 lane warp（CUDA 上恒成立）；tile 段界是 warp 一致的，越界的
+    // warp 整体退出，循环内 shuffle 均在满 warp 下执行
+    const int lane = threadIdx.x & (warpSize - 1);
+    const int warp_global =
+        blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
+    const int tile_begin = warp_global * LJ_TILE_WARP_SPAN;
+    if (tile_begin >= tile_numbers) return;
+    const int tile_end = min(tile_begin + LJ_TILE_WARP_SPAN, tile_numbers);
+
+    const int i_local = lane >> 2;  // 0..7，4 lane 一组共享同一 i
+    const int j_local[2] = {lane & 3, (lane & 3) + 4};
+
+    // 当前 i 段的累计状态（cluster 序打包：slot = cluster*8 + 槽位，连续
+    // 8 槽全合并读；同 4-lane 组读同一 i 槽、stride-4 的 8 个 lane 读同一
+    // j 槽，L1 广播合并。atom 下标仅用于力回写与 padding 判定）
+    int cur_ci = -1;
+    int atom_i = -1;
+    VECTOR_LJ r1 = {{0.11f, 0.23f, 0.37f}, 0, 0.5f, 0};
+    VECTOR frc_i = {0.0f, 0.0f, 0.0f};
+    float energy_lj = 0.0f;
+    float energy_coulomb = 0.0f;
+    LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    // 段末冲刷：4-lane 组内 xor 归约后组长一次原子加。组内无活对（或活对
+    // 全被 cutoff 复判剔除）时部分和恒零，跳过原子加——语义等价（加 0
+    // 不改变值），而全局原子加是本 kernel 的吞吐瓶颈
+    auto flush_i = [&]()
+    {
+        if (ABLATE & 2) return;
+        if (need_force)
+        {
+            frc_i = LJ_Tile_Xor_Sum(frc_i, 1);
+            frc_i = LJ_Tile_Xor_Sum(frc_i, 2);
+            if ((lane & 3) == 0 && atom_i >= 0 &&
+                (frc_i.x != 0.0f || frc_i.y != 0.0f || frc_i.z != 0.0f))
+            {
+                atomicAdd(frc + atom_i, frc_i);
+            }
+        }
+        if (need_energy)
+        {
+            // 能量按对记入 i 侧的三个 per-atom 数组（×ij_factor 已在循环内乘）
+            float energy_total = energy_lj + energy_coulomb;
+            for (int offset = 1; offset < 4; offset <<= 1)
+            {
+                energy_total += __shfl_xor_sync(FULL_MASK, energy_total, offset);
+                energy_lj += __shfl_xor_sync(FULL_MASK, energy_lj, offset);
+                energy_coulomb +=
+                    __shfl_xor_sync(FULL_MASK, energy_coulomb, offset);
+            }
+            if ((lane & 3) == 0 && atom_i >= 0)
+            {
+                atomicAdd(atom_energy + atom_i, energy_total);
+                atomicAdd(atom_LJ_ene + atom_i, energy_lj);
+                if (need_coulomb)
+                    atomicAdd(atom_direct_cf_energy + atom_i, energy_coulomb);
+            }
+        }
+        if (need_virial)
+        {
+            virial = LJ_Tile_Xor_Sum(virial, 1);
+            virial = LJ_Tile_Xor_Sum(virial, 2);
+            if ((lane & 3) == 0 && atom_i >= 0)
+            {
+                atomicAdd(atom_virial + atom_i, virial);
+            }
+        }
+    };
+
+    for (int t = tile_begin; t < tile_end; ++t)
+    {
+        const LJ_TILE tile = tiles[tile_sorted[t]];
+        if (tile.cluster_i != cur_ci)
+        {
+            if (cur_ci >= 0) flush_i();
+            cur_ci = tile.cluster_i;
+            const int slot_i = cur_ci * LJ_TILE_CLUSTER_SIZE + i_local;
+            atom_i = cluster_atoms[slot_i];
+            if (!(ABLATE & 4))
+                r1 = Load_VECTOR_LJ(cluster_crd_q, cluster_type_g, slot_i);
+            frc_i.x = 0.0f;
+            frc_i.y = 0.0f;
+            frc_i.z = 0.0f;
+            energy_lj = 0.0f;
+            energy_coulomb = 0.0f;
+            virial.a11 = 0.0f;
+            virial.a21 = 0.0f;
+            virial.a22 = 0.0f;
+            virial.a31 = 0.0f;
+            virial.a32 = 0.0f;
+            virial.a33 = 0.0f;
+        }
+        // ij_factor 是 tile 级常量：local×local tile 恒 1，local×ghost tile
+        // 恒 0.5（ghost cluster_j 的能量/维里减半、j 力不写、i 力全额）
+        const bool j_is_ghost = (cluster_flags[tile.cluster_j] & 1) != 0;
+        const float ij_factor = j_is_ghost ? 0.5f : 1.0f;
+        const int* atoms_j =
+            cluster_atoms + tile.cluster_j * LJ_TILE_CLUSTER_SIZE;
+        const int slot_j[2] = {tile.cluster_j * LJ_TILE_CLUSTER_SIZE +
+                                   j_local[0],
+                               tile.cluster_j * LJ_TILE_CLUSTER_SIZE +
+                                   j_local[1]};
+        const int atom_j[2] = {atoms_j[j_local[0]], atoms_j[j_local[1]]};
+        VECTOR_LJ r2[2] = {{{0.42f, 0.53f, 0.61f}, 0, -0.5f, 1},
+                           {{0.74f, 0.85f, 0.96f}, 0, 0.25f, 2}};
+        if (!(ABLATE & 4))
+        {
+            r2[0] = Load_VECTOR_LJ(cluster_crd_q, cluster_type_g, slot_j[0]);
+            r2[1] = Load_VECTOR_LJ(cluster_crd_q, cluster_type_g, slot_j[1]);
+        }
+        VECTOR frc_j[2] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+
+#pragma unroll
+        for (int k = 0; k < 2; ++k)
+        {
+            // 掩码 bit 在重建时刻判定（带 skin），运行期按 cutoff 复判
+            if (((tile.mask >> (i_local * LJ_TILE_CLUSTER_SIZE + j_local[k])) &
+                 1ULL) == 0ULL)
+            {
+                continue;
+            }
+            if (atom_i < 0 || atom_j[k] < 0) continue;  // padding 保险
+            VECTOR dr =
+                Get_Periodic_Displacement(r2[k].crd, r1.crd, cell, rcell);
+            float dr_abs = norm3df(dr.x, dr.y, dr.z);
+            if (ABLATE & 1)
+            {
+                energy_lj += dr_abs * 1.0e-30f;  // 消融：跳过相互作用评估
+                continue;
+            }
+            if (dr_abs < cutoff)
+            {
+                int atom_pair_LJ_type = Get_LJ_Type(r1.LJ_type, r2[k].LJ_type);
+                float A = LJ_type_A[atom_pair_LJ_type];
+                float B = LJ_type_B[atom_pair_LJ_type];
+                const PairwiseInteraction::Pair_Activity activity =
+                    PairwiseInteraction::Classify(
+                        A, B,
+                        need_coulomb && PairwiseInteraction::Coulomb_Is_Active(
+                                            r1.charge, r2[k].charge));
+                if (!activity.Any())
+                {
+                    continue;
+                }
+                if (dr_abs == 0.0f)
+                {
+                    PairwiseInteraction::Fail_Exact_Overlap(
+                        r1.global_atom, r2[k].global_atom,
+                        PairwiseInteraction::Components(activity.lennard_jones,
+                                                        activity.coulomb),
+                        pair_overlap_error);
+                    continue;
+                }
+                if (need_force)
+                {
+                    float frc_abs = 0.0f;
+                    if (activity.lennard_jones)
+                    {
+                        frc_abs = Get_LJ_Force(r1, r2[k], dr_abs, A, B);
+                    }
+                    if (activity.coulomb)
+                    {
+                        float frc_cf_abs = Get_Direct_Coulomb_Force(
+                            r1, r2[k], dr_abs, pme_beta);
+                        frc_abs = frc_abs - frc_cf_abs;
+                    }
+                    VECTOR frc_lin = frc_abs * dr;
+                    frc_i = frc_i + frc_lin;
+                    frc_j[k] = frc_j[k] - frc_lin;
+                    if (need_virial)
+                    {
+                        virial = virial - ij_factor * Get_Virial_From_Force_Dis(
+                                                          frc_lin, dr);
+                    }
+                }
+                if (need_energy)
+                {
+                    if (activity.lennard_jones)
+                    {
+                        energy_lj +=
+                            ij_factor * Get_LJ_Energy(r1, r2[k], dr_abs, A, B);
+                    }
+                    if (activity.coulomb)
+                    {
+                        energy_coulomb +=
+                            ij_factor * Get_Direct_Coulomb_Energy(r1, r2[k],
+                                                                  dr_abs,
+                                                                  pme_beta);
+                    }
+                }
+            }
+        }
+
+        // f_j：同一 j 的部分和在 stride-4 的 8 个 lane 上，跨组 xor 归约后
+        // lane 0..3 各落一个 j（零和跳过写出）；ghost tile 整体跳过
+        if (!(ABLATE & 2) && need_force && !j_is_ghost)
+        {
+#pragma unroll
+            for (int k = 0; k < 2; ++k)
+            {
+                frc_j[k] = LJ_Tile_Xor_Sum(frc_j[k], 4);
+                frc_j[k] = LJ_Tile_Xor_Sum(frc_j[k], 8);
+                frc_j[k] = LJ_Tile_Xor_Sum(frc_j[k], 16);
+            }
+            if (lane < 4)
+            {
+                if (atom_j[0] >= 0 &&
+                    (frc_j[0].x != 0.0f || frc_j[0].y != 0.0f ||
+                     frc_j[0].z != 0.0f))
+                    atomicAdd(frc + atom_j[0], frc_j[0]);
+                if (atom_j[1] >= 0 &&
+                    (frc_j[1].x != 0.0f || frc_j[1].y != 0.0f ||
+                     frc_j[1].z != 0.0f))
+                    atomicAdd(frc + atom_j[1], frc_j[1]);
+            }
+        }
+    }
+    if (cur_ci >= 0) flush_i();
+    if (ABLATE & 2)
+    {
+        // 消融：跳过全部归约与写出；以下条件运行时恒假，仅防死代码消除
+        if (frc_i.x == 1.0e30f && energy_lj == 1.0e30f && virial.a11 == 1.0e30f)
+        {
+            pair_overlap_error[0] = atom_i;
+        }
+    }
+}
+#endif  // USE_CUDA
+
 void LENNARD_JONES_INFORMATION::LJ_Malloc()
 {
     Malloc_Safely((void**)&h_atom_LJ_type, sizeof(int) * atom_numbers);
@@ -175,6 +498,25 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
     else
     {
         strcpy(this->module_name, module_name);
+    }
+#ifdef USE_CUDA
+    // S3：tile kernel 的 lane 映射假设 32-lane warp（CUDA 上恒成立），
+    // CUDA 构建默认启用，可用 mdin 命令 "LJ use_tile = 0" 回退旧 kernel
+    use_tile = CONTROLLER::device_warp == 32;
+#endif
+    if (controller->Command_Exist(this->module_name, "use_tile"))
+    {
+        use_tile = controller->Get_Bool(this->module_name, "use_tile",
+                                        "LENNARD_JONES_INFORMATION::Initial");
+#ifndef USE_CUDA
+        if (use_tile)
+        {
+            controller->printf(
+                "    LJ tile force kernel is CUDA-only; falling back to the "
+                "legacy kernel\n");
+            use_tile = false;
+        }
+#endif
     }
     controller->printf("START INITIALIZING LENNADR JONES INFORMATION:\n");
     const auto& lj = Xponge::system.classical_force_field.lj;
@@ -340,6 +682,8 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
         is_controller_printf_initialized = 1;
         controller->printf("    structure last modify date is %d\n",
                            last_modify_date);
+        controller->printf("    LJ tile force kernel (use_tile): %s\n",
+                           use_tile ? "on" : "off");
     }
     controller->printf("END INITIALIZING LENNADR JONES INFORMATION\n\n");
 }
@@ -542,7 +886,8 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
     const float* charge, VECTOR* frc, const LTMatrix3 cell,
     const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
     const int need_atom_energy, float* atom_energy, const int need_virial,
-    LTMatrix3* atom_virial, float* atom_direct_pme_energy)
+    LTMatrix3* atom_virial, float* atom_direct_pme_energy,
+    const LJ_TILE_SET* tile_set)
 {
     if (is_initialized)
     {
@@ -571,6 +916,128 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         if (atom_numbers == 0 || local_atom_numbers == 0) return;
 
         Reset_Pair_Overlap_Error();
+
+#ifdef USE_CUDA
+        // S3 tile 路径：tile 表覆盖全部 local i 的半表对（溶剂对也在内，
+        // 调用方必须同时停用溶剂 dispatch，否则水-水双计），solvent_numbers
+        // 在此不起作用。tile_set 为空（use_tile=0 / 邻居表未产出 tile 表 /
+        // SITS 选择性施加）时走下方旧 kernel，主/溶剂分工保持不变。
+        if (tile_set != NULL && use_tile && tile_set->tiles != NULL &&
+            tile_set->cluster_atoms != NULL && tile_set->cluster_flags != NULL &&
+            tile_set->tile_sorted != NULL)
+        {
+            // cluster 序打包数组：容量随 cluster 槽数惰性增长（溢出恢复扩容
+            // 重建后槽数可能变大），每步从 atom 序数组重排一次
+            if (tile_set->cluster_atom_slots > lj_cluster_array_capacity)
+            {
+                if (d_lj_cluster_crd_q != NULL)
+                    Free_Single_Device_Pointer((void**)&d_lj_cluster_crd_q);
+                if (d_lj_cluster_type_g != NULL)
+                    Free_Single_Device_Pointer((void**)&d_lj_cluster_type_g);
+                lj_cluster_array_capacity = 0;
+                if (!Device_Malloc_Safely(
+                        (void**)&d_lj_cluster_crd_q,
+                        sizeof(float4) * tile_set->cluster_atom_slots) ||
+                    !Device_Malloc_Safely(
+                        (void**)&d_lj_cluster_type_g,
+                        sizeof(int2) * tile_set->cluster_atom_slots))
+                {
+                    controller->Throw_SPONGE_Error(
+                        spongeErrorMallocFailed,
+                        "LENNARD_JONES_INFORMATION::"
+                        "LJ_PME_Direct_Force_With_Atom_Energy_And_Virial");
+                    return;
+                }
+                lj_cluster_array_capacity = tile_set->cluster_atom_slots;
+            }
+            if (tile_set->tile_numbers > 0 && tile_set->cluster_atom_slots > 0)
+            {
+                Launch_Device_Kernel(
+                    Gather_LJ_Cluster_Data,
+                    (tile_set->cluster_atom_slots +
+                     CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL,
+                    tile_set->cluster_atom_slots, tile_set->cluster_atoms,
+                    d_lj_crd_q, d_lj_type_g, d_lj_cluster_crd_q,
+                    d_lj_cluster_type_g);
+                // tile kernel 固定 256 线程块（8 warp），每 warp 连续消费
+                // LJ_TILE_WARP_SPAN 个分组序 tile
+                dim3 tileBlock(256);
+                dim3 tileGrid(
+                    (tile_set->tile_numbers +
+                     (256 / 32) * LJ_TILE_WARP_SPAN - 1) /
+                    ((256 / 32) * LJ_TILE_WARP_SPAN));
+                auto ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                    true, false, false, true>;
+                if (!need_atom_energy && !need_virial)
+                {
+                    // 消融测时实例（仅诊断；生产 ABLATE=0 编译期消除）。
+                    // 仅对主力实例 <true,false,false,true> 提供
+                    switch (LJ_Force_Ablate_Mode())
+                    {
+                        case 1:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 1>;
+                            break;
+                        case 2:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 2>;
+                            break;
+                        case 3:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 3>;
+                            break;
+                        case 4:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 4>;
+                            break;
+                        case 5:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 5>;
+                            break;
+                        case 6:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 6>;
+                            break;
+                        case 7:
+                            ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                                true, false, false, true, 7>;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                else if (need_atom_energy && !need_virial)
+                {
+                    ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                        true, true, false, true>;
+                }
+                else if (!need_atom_energy && need_virial)
+                {
+                    ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                        true, false, true, true>;
+                }
+                else
+                {
+                    ft = Lennard_Jones_And_Direct_Coulomb_Tile_Device<
+                        true, true, true, true>;
+                }
+                Launch_Device_Kernel(
+                    ft, tileGrid, tileBlock, 0, NULL, tile_set->tile_numbers,
+                    tile_set->tiles, tile_set->tile_sorted,
+                    tile_set->cluster_atoms, tile_set->cluster_flags,
+                    d_lj_cluster_crd_q, d_lj_cluster_type_g, cell, rcell,
+                    d_LJ_A, d_LJ_B, cutoff, frc, pme_beta, atom_energy,
+                    atom_virial, atom_direct_pme_energy, d_LJ_energy_atom,
+                    d_pair_overlap_error);
+            }
+            Check_Pair_Overlap_Error(
+                "LENNARD_JONES_INFORMATION::"
+                "LJ_PME_Direct_Force_With_Atom_Energy_And_Virial");
+            return;
+        }
+#endif
 
         dim3 blockSize = {
             CONTROLLER::device_warp,

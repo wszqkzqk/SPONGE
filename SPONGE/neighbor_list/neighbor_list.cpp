@@ -1592,6 +1592,89 @@ static __global__ void Build_LJ_Tile_List(
     }
 }
 
+// ---- S3：tile 按 cluster_i 计数排序（分组序下标表）----
+// tile kernel 按行（同一 i-cluster 的连续 tile 段）消费时，f_i/能量/维里可
+// 在寄存器累计、每段只归约写出一次，i 侧全局原子加降一个量级。行内顺序
+// 任意（散射原子加序），消费端不依赖行界，靠 tile.cluster_i 变化检测分段。
+static __global__ void Zero_LJ_Tile_Rows(const int* need, int* row_cursor,
+                                         const int cluster_capacity,
+                                         const int* update_error)
+{
+    if (need[0] == 0 || update_error[0] != NEIGHBOR_LIST::UPDATE_OK) return;
+    SIMPLE_DEVICE_FOR(i, cluster_capacity)
+    {
+        row_cursor[i] = 0;
+    }
+}
+
+static __global__ void Count_LJ_Tile_Rows(const int* need, const LJ_TILE* tiles,
+                                          const int* tile_count,
+                                          int* row_cursor,
+                                          const int* update_error)
+{
+    if (need[0] == 0 || update_error[0] != NEIGHBOR_LIST::UPDATE_OK) return;
+    const int n = tile_count[0];
+    for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < n;
+         t += gridDim.x * blockDim.x)
+    {
+        atomicAdd(row_cursor + tiles[t].cluster_i, 1);
+    }
+}
+// 单块独占前缀扫描：把 row_cursor 从行计数改写为各行散射游标（行首槽位）。
+// local cluster 数从 d_lj_cluster_numbers[0] 读取（host 侧重建末才回读）
+static __global__ void Scan_LJ_Tile_Rows(const int* need,
+                                         const int* cluster_numbers,
+                                         int* row_cursor,
+                                         const int* update_error)
+{
+    if (need[0] == 0 || update_error[0] != NEIGHBOR_LIST::UPDATE_OK) return;
+    const int n = cluster_numbers[0];
+    __shared__ int sh_scan[1024];
+    __shared__ int sh_carry;
+    if (threadIdx.x == 0) sh_carry = 0;
+    __syncthreads();
+    for (int base = 0; base < n; base += blockDim.x)
+    {
+        const int idx = base + threadIdx.x;
+        const int v = idx < n ? row_cursor[idx] : 0;
+        sh_scan[threadIdx.x] = v;
+        __syncthreads();
+        for (int offset = 1; offset < blockDim.x; offset <<= 1)
+        {
+            const int t =
+                threadIdx.x >= offset ? sh_scan[threadIdx.x - offset] : 0;
+            __syncthreads();
+            sh_scan[threadIdx.x] += t;
+            __syncthreads();
+        }
+        if (idx < n)
+        {
+            row_cursor[idx] = sh_carry + sh_scan[threadIdx.x] - v;
+        }
+        __syncthreads();
+        if (threadIdx.x == blockDim.x - 1)
+        {
+            sh_carry += sh_scan[threadIdx.x];
+        }
+        __syncthreads();
+    }
+}
+
+static __global__ void Scatter_LJ_Tile_Rows(const int* need,
+                                            const LJ_TILE* tiles,
+                                            const int* tile_count,
+                                            int* row_cursor, int* tile_sorted,
+                                            const int* update_error)
+{
+    if (need[0] == 0 || update_error[0] != NEIGHBOR_LIST::UPDATE_OK) return;
+    const int n = tile_count[0];
+    for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < n;
+         t += gridDim.x * blockDim.x)
+    {
+        tile_sorted[atomicAdd(row_cursor + tiles[t].cluster_i, 1)] = t;
+    }
+}
+
 #else
 static __global__ void Find_Neighbors_Gridly(
     int* atom_local, int atom_numbers, const int* need, int grid_numbers,
@@ -2195,6 +2278,26 @@ void NEIGHBOR_LIST::UPDATOR::Update(
                     ms[0], ms[1], ms[2], h_clusters[0], h_clusters[1]);
             for (int e = 0; e < 4; ++e) deviceEventDestroy(tile_events[e]);
         }
+        // S3：tile 按 cluster_i 分组排序（tile kernel 按行消费，i 侧全局
+        // 原子加降一个量级）；四个内核自带 need/错误短路，非重建步零开销
+        Launch_Device_Kernel(
+            Zero_LJ_Tile_Rows,
+            (owner->lj_cluster_capacity + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, d_need_update,
+            owner->d_lj_tile_row_cursor, owner->lj_cluster_capacity,
+            d_update_error);
+        Launch_Device_Kernel(Count_LJ_Tile_Rows, 2048, 256, 0, NULL,
+                             d_need_update, owner->d_lj_tiles,
+                             owner->d_lj_tile_count, owner->d_lj_tile_row_cursor,
+                             d_update_error);
+        Launch_Device_Kernel(Scan_LJ_Tile_Rows, 1, 1024, 0, NULL, d_need_update,
+                             owner->d_lj_cluster_numbers,
+                             owner->d_lj_tile_row_cursor, d_update_error);
+        Launch_Device_Kernel(Scatter_LJ_Tile_Rows, 2048, 256, 0, NULL,
+                             d_need_update, owner->d_lj_tiles,
+                             owner->d_lj_tile_count, owner->d_lj_tile_row_cursor,
+                             owner->d_lj_tile_sorted, d_update_error);
     }
 #else
     Launch_Device_Kernel(
@@ -2437,7 +2540,11 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
             !Device_Malloc_Safely((void**)&d_lj_cluster_flags, flag_bytes) ||
             !Device_Malloc_Safely((void**)&d_lj_excl_range,
                                   (size_t)atom_numbers * sizeof(LJ_EXCL_RANGE)) ||
-            !Device_Malloc_Safely((void**)&d_lj_tiles, tile_bytes))
+            !Device_Malloc_Safely((void**)&d_lj_tiles, tile_bytes) ||
+            !Device_Malloc_Safely((void**)&d_lj_tile_row_cursor,
+                                  flag_bytes) ||
+            !Device_Malloc_Safely((void**)&d_lj_tile_sorted,
+                                  (size_t)lj_tile_capacity * sizeof(int)))
         {
             Clear();
             controller->Throw_SPONGE_Error(spongeErrorMallocFailed,
@@ -2615,6 +2722,16 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
         h_neighbor_list_overflow = status[UPDATE_STATUS_LIST_OVERFLOW];
         h_neighbor_tile_overflow = status[UPDATE_STATUS_TILE_OVERFLOW];
         h_lj_tile_numbers = status[UPDATE_STATUS_TILE_COUNT];
+#ifdef USE_GPU
+        if (d_lj_cluster_numbers != NULL)
+        {
+            int h_clusters[2] = {0, 0};
+            deviceMemcpy(h_clusters, d_lj_cluster_numbers, sizeof(h_clusters),
+                         deviceMemcpyDeviceToHost);
+            h_lj_cluster_atom_slots =
+                (h_clusters[0] + h_clusters[1]) * LJ_TILE_CLUSTER_SIZE;
+        }
+#endif
         last_update_error = status[UPDATE_STATUS_ERROR];
         last_error_atom = status[UPDATE_STATUS_ERROR + 1];
         if (last_update_error != UPDATE_OK || h_neighbor_grid_overflow != 0 ||
@@ -2886,12 +3003,17 @@ void NEIGHBOR_LIST::Clear()
     if (d_lj_cluster_flags != NULL)
         Free_Single_Device_Pointer((void**)&d_lj_cluster_flags);
     if (d_lj_tiles != NULL) Free_Single_Device_Pointer((void**)&d_lj_tiles);
+    if (d_lj_tile_row_cursor != NULL)
+        Free_Single_Device_Pointer((void**)&d_lj_tile_row_cursor);
+    if (d_lj_tile_sorted != NULL)
+        Free_Single_Device_Pointer((void**)&d_lj_tile_sorted);
     if (d_lj_excl_range != NULL)
         Free_Single_Device_Pointer((void**)&d_lj_excl_range);
     lj_excl_range_built = 0;
     lj_cluster_capacity = 0;
     lj_tile_capacity = 0;
     h_lj_tile_numbers = 0;
+    h_lj_cluster_atom_slots = 0;
     h_neighbor_tile_overflow = 0;
     d_neighbor_tile_overflow = NULL;
     d_lj_tile_count = NULL;

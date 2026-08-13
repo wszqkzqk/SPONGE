@@ -90,6 +90,24 @@ __global__ void Repack_LJ_Crd(const int atom_numbers, const VECTOR* crd,
                               float4* lj_crd_q);
 #endif
 
+// S3：tile 表视图（设计文档 _local/LJ_TILING_DESIGN.md §2）。LJ_TILE 定义在
+// neighbor_list/neighbor_list.h，此处前向声明避免头文件互拉。指针在每次调用
+// 时从 NEIGHBOR_LIST 现取（溢出恢复扩容会重绑定 device 数组），tile_numbers
+// 取 host 侧回读的 h_lj_tile_numbers。
+struct LJ_TILE;
+struct LJ_TILE_SET
+{
+    const LJ_TILE* tiles = NULL;
+    const int* cluster_atoms = NULL;
+    const int* cluster_flags = NULL;
+    // tile 按 cluster_i 分组排序的下标表（kernel 按行消费）
+    const int* tile_sorted = NULL;
+    int tile_numbers = 0;
+    // cluster 原子槽总数（(local+ghost cluster)×8，含 padding），用于
+    // cluster 序打包数组的定容与 gather 范围
+    int cluster_atom_slots = 0;
+};
+
 // 用于记录与计算LJ相关的信息
 struct LENNARD_JONES_INFORMATION
 {
@@ -133,6 +151,11 @@ struct LENNARD_JONES_INFORMATION
     float cutoff = 10.0;
     VECTOR_LJ* crd_with_LJ_parameters = NULL;
 
+    // S3：warp-per-tile 力 kernel 开关（mdin 命令 "LJ use_tile"；CUDA 构建
+    // 默认开，CPU/HIP 恒关走旧 warp-per-atom kernel）。开关只是意图，真正
+    // 走 tile 路径还要求调用方传入非空的 LJ_TILE_SET。
+    bool use_tile = false;
+
     /*
         以下用于区域分解
     */
@@ -143,6 +166,13 @@ struct LENNARD_JONES_INFORMATION
     // 是静态的，由 Get_Local 在初始化/域刷新时填充
     float4* d_lj_crd_q = NULL;
     int2* d_lj_type_g = NULL;
+    // S3：cluster 序的 LJ 打包数据（slot = cluster*8 + 槽位，cluster 内 8
+    // 槽连续；tile kernel 的 cluster 载入因此是全合并 LDG，无需经
+    // cluster_atoms 的二级间接）。每步由 Gather_LJ_Cluster_Data 从
+    // d_lj_crd_q/d_lj_type_g 重排；容量随邻居表重建的 cluster 槽数惰性增长
+    float4* d_lj_cluster_crd_q = NULL;
+    int2* d_lj_cluster_type_g = NULL;
+    int lj_cluster_array_capacity = 0;
     int* d_pair_overlap_error = NULL;
     int* d_local_metadata_error = NULL;
     bool local_metadata_is_ready = false;
@@ -155,13 +185,17 @@ struct LENNARD_JONES_INFORMATION
     bool Check_Pair_Overlap_Error(const char* error_by);
 
     // 可以根据外界传入的need_atom_energy和need_virial，选择性计算能量和维里。其中的维里对PME直接部分计算的原子能量，在和PME其他部分加和后即维里。
+    // tile_set 非空时走 S3 的 warp-per-tile kernel（覆盖全部 local i 的半表
+    // 对，溶剂 dispatch 必须由调用方同时停用，否则水-水双计）；为空走旧的
+    // warp-per-atom kernel（i 范围 [0, local_atom_numbers - solvent_numbers)）。
     void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
         const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
         const float* charge, VECTOR* frc, const LTMatrix3 cell,
         const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
         const int need_atom_energy, float* atom_energy, const int need_virial,
-        LTMatrix3* atom_virial, float* atom_direct_pme_energy);
+        LTMatrix3* atom_virial, float* atom_direct_pme_energy,
+        const LJ_TILE_SET* tile_set);
 
 #ifdef KPCCL_TASKLOOP
     void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial_Init(

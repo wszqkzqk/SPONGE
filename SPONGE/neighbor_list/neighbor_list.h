@@ -132,6 +132,14 @@ struct NEIGHBOR_LIST
     // tile 表容量溢出（0=本次构建装得下；否则为被拒绝构建所需的最小容量）
     int h_neighbor_tile_overflow = 0, *d_neighbor_tile_overflow = NULL;
     int* d_lj_tile_count = NULL;  // 状态块槽位 6 的别名：构建期 atomicAdd 计数
+    // 上次成功重建的 cluster 原子槽总数（(local+ghost cluster 数)×8，含
+    // padding），供 S3 tile kernel 的 cluster 序打包数组定容
+    int h_lj_cluster_atom_slots = 0;
+    // S3：tile 按 cluster_i 分组排序（计数排序，重建时随 tile 表产出）。
+    // d_lj_tile_row_cursor 是计数/扫描/散射共用的 per-cluster 工作数组；
+    // d_lj_tile_sorted 是分组后的 tile 下标表，供 tile kernel 按行消费
+    int* d_lj_tile_row_cursor = NULL;
+    int* d_lj_tile_sorted = NULL;
 
     struct GRIDS
     {

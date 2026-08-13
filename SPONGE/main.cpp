@@ -467,6 +467,20 @@ void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
                 dd.d_virial);
         }
 
+        // S3：tile kernel 覆盖全部 local i（含溶剂原子）的半表对，启用时
+        // 必须跳过下方的溶剂 dispatch，否则水-水对双计（tile 路径等价于强制
+        // solvent_numbers=0 由 tile kernel 统一覆盖）。SITS 选择性施加时主
+        // kernel 不参与非键计算，tile 路径必须停用，溶剂 kernel 保持原分工。
+        LJ_TILE_SET lj_tile_set;
+        lj_tile_set.tiles = neighbor_list.d_lj_tiles;
+        lj_tile_set.cluster_atoms = neighbor_list.d_lj_cluster_atoms;
+        lj_tile_set.cluster_flags = neighbor_list.d_lj_cluster_flags;
+        lj_tile_set.tile_sorted = neighbor_list.d_lj_tile_sorted;
+        lj_tile_set.tile_numbers = neighbor_list.h_lj_tile_numbers;
+        lj_tile_set.cluster_atom_slots = neighbor_list.h_lj_cluster_atom_slots;
+        const bool lj_tile_active =
+            lj.use_tile && !(sits.is_initialized && sits.selectively_applied) &&
+            lj_tile_set.tiles != NULL && lj_tile_set.cluster_atoms != NULL;
         if (sits.is_initialized && sits.selectively_applied)
         {
             sits_dihedral.Dihedral_Force_With_Atom_Energy_And_Virial(
@@ -507,7 +521,8 @@ void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
                 dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
                 neighbor_list.d_nl, pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
-                pm.d_direct_atom_energy);
+                pm.d_direct_atom_energy,
+                lj_tile_active ? &lj_tile_set : NULL);
 
             lj_soft.LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 md_info.atom_numbers, dd.atom_numbers,
@@ -517,11 +532,15 @@ void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
         }
-        solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd, dd.d_charge,
-            dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
-            pm.beta, md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial, pm.d_direct_atom_energy);
+        if (!lj_tile_active)
+        {
+            solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd,
+                dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
+                neighbor_list.d_nl, pm.beta, md_info.need_potential,
+                dd.d_energy, md_info.need_pressure, dd.d_virial,
+                pm.d_direct_atom_energy);
+        }
 
         lj.Long_Range_Correction(
             md_info.need_pressure, dd.d_virial, md_info.need_potential,

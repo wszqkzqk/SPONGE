@@ -1,4 +1,4 @@
-﻿#include "control.h"
+#include "control.h"
 
 #define SPONGE_CODENAME "2026-04-01 April Fools' Day"
 #define SPONGE_VERSION "v" SPONGE_VERSION_STR " " SPONGE_CODENAME
@@ -974,7 +974,8 @@ void CONTROLLER::Initial(int argc, char** argv, const char* subpackage_hint)
     Get_Time_Recorder("Force Calculation");
     Get_Time_Recorder("Iteration");
     Get_Time_Recorder("Printing & Dumping");
-    Get_Time_Recorder("Communication");
+    // MPI 通信段主要耗在 CPU 侧等待，保持“同步 + 墙钟”计时
+    Get_Time_Recorder("Communication")->use_chrono_only = true;
     printf("END INITIALIZING CONTROLLER\n\n");
 }
 
@@ -1009,8 +1010,6 @@ TIME_RECORDER* CONTROLLER::Get_Time_Recorder(const char* name)
 {
     if (time_recorders.count(name)) return &time_recorders[name];
     time_recorder_names.push_back(name);
-    TIME_RECORDER t;
-    time_recorders[name] = t;
     return &time_recorders[name];
 }
 
@@ -1047,6 +1046,12 @@ void CONTROLLER::Final_Time_Summary(int steps, float time_factor,
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
     core_time.Stop();
+    // 结算所有 event 计时器，保证下面读取的 time 字段是完整值
+    core_time.Flush();
+    for (int i = 0; i < this->time_recorder_names.size(); i++)
+    {
+        this->time_recorders[this->time_recorder_names[i]].Flush();
+    }
     float print_time_unit_factor = 1.0f;
     std::string print_time_unit = "second";
     int left_padding = 0, right_padding = 0;

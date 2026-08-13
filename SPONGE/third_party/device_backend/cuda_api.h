@@ -1,4 +1,4 @@
-﻿#ifndef BASIC_BACKEND_H
+#ifndef BASIC_BACKEND_H
 #define BASIC_BACKEND_H
 #define GPU_ARCH_NAME "CUDA"
 
@@ -68,6 +68,13 @@ static __device__ __forceinline__ double atomicAdd(double* address, double val)
 #define deviceStreamCreate cudaStreamCreate
 #define deviceStreamDestroy cudaStreamDestroy
 #define deviceStreamSynchronize cudaStreamSynchronize
+
+#define deviceEvent_t cudaEvent_t
+#define deviceEventCreate cudaEventCreate
+#define deviceEventDestroy cudaEventDestroy
+#define deviceEventRecord cudaEventRecord
+#define deviceEventSynchronize cudaEventSynchronize
+#define deviceEventElapsedTime cudaEventElapsedTime
 
 #define Launch_Device_Kernel(kernel, grid, block, sm_memory, stream, ...) \
     kernel<<<grid, block, sm_memory, stream>>>(__VA_ARGS__)

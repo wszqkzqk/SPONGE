@@ -1,4 +1,4 @@
-﻿#ifndef BASIC_BACKEND_H
+#ifndef BASIC_BACKEND_H
 #define BASIC_BACKEND_H
 #define GPU_ARCH_NAME "HIP"
 
@@ -45,6 +45,13 @@
 #define deviceStreamCreate hipStreamCreate
 #define deviceStreamDestroy hipStreamDestroy
 #define deviceStreamSynchronize hipStreamSynchronize
+
+#define deviceEvent_t hipEvent_t
+#define deviceEventCreate hipEventCreate
+#define deviceEventDestroy hipEventDestroy
+#define deviceEventRecord hipEventRecord
+#define deviceEventSynchronize hipEventSynchronize
+#define deviceEventElapsedTime hipEventElapsedTime
 
 #define Launch_Device_Kernel(kernel, grid, block, sm_memory, stream, ...) \
     kernel<<<grid, block, sm_memory, stream>>>(__VA_ARGS__)

@@ -29,10 +29,11 @@ template <int WAT_POINTS, bool need_force, bool need_energy, bool need_virial,
 static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
     const int atom_numbers, const int coordinate_numbers, const ATOM_GROUP* nl,
     const int solvent_start_residue, const int res_numbers,
-    const int* d_res_start, const VECTOR_LJ* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const float* LJ_type_A, const float* LJ_type_B,
-    const float cutoff, VECTOR* frc, const float pme_beta, float* atom_energy,
-    LTMatrix3* atom_lj_virial, float* atom_direct_cf_energy, float* this_energy,
+    const int* d_res_start, const float4* crd_q, const int2* type_g,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float* LJ_type_A,
+    const float* LJ_type_B, const float cutoff, VECTOR* frc,
+    const float pme_beta, float* atom_energy, LTMatrix3* atom_lj_virial,
+    float* atom_direct_cf_energy, float* this_energy,
     int* pair_overlap_error, int* dispatch_error)
 {
     __shared__ float r1s_x[128];
@@ -67,7 +68,7 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
         if (threadIdx.x < WAT_POINTS)
         {
             const int shared_idx = threadIdx.y * WAT_POINTS + threadIdx.x;
-            VECTOR_LJ r1 = crd[atom_i + threadIdx.x];
+            VECTOR_LJ r1 = Load_VECTOR_LJ(crd_q, type_g, atom_i + threadIdx.x);
             r1s_x[shared_idx] = r1.crd.x;
             r1s_y[shared_idx] = r1.crd.y;
             r1s_z[shared_idx] = r1.crd.z;
@@ -103,7 +104,7 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
                 continue;
             }
             float ij_factor = atom_j < atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ r2 = crd[atom_j];
+            VECTOR_LJ r2 = Load_VECTOR_LJ(crd_q, type_g, atom_j);
             frc_record_j = {0.0f, 0.0f, 0.0f};
             for (int i = 0; i < WAT_POINTS; i++)
             {
@@ -481,7 +482,8 @@ void SOLVENT_LENNARD_JONES::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
     if (selected_residues > atom_numbers / water_points ||
         local_solvent_numbers != selected_residues * water_points ||
         d_res_start == NULL || crd == NULL || charge == NULL || nl == NULL ||
-        frc == NULL || lj_info->crd_with_LJ_parameters_local == NULL ||
+        frc == NULL || lj_info->d_lj_crd_q == NULL ||
+        lj_info->d_lj_type_g == NULL ||
         lj_info->d_LJ_A == NULL || lj_info->d_LJ_B == NULL ||
         d_dispatch_error == NULL ||
         (need_atom_energy &&
@@ -550,7 +552,7 @@ void SOLVENT_LENNARD_JONES::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                     f, gridSize, blockSize, 0, NULL, atom_numbers,
                     coordinate_numbers, nl, solvent_start_local,
                     residue_numbers, d_res_start,
-                    lj_info->crd_with_LJ_parameters_local, cell, rcell,
+                    lj_info->d_lj_crd_q, lj_info->d_lj_type_g, cell, rcell,
                     lj_info->d_LJ_A, lj_info->d_LJ_B, lj_info->cutoff, frc,
                     pme_beta, atom_energy, atom_lj_virial,
                     atom_direct_pme_energy, lj_info->d_LJ_energy_atom,
@@ -586,7 +588,7 @@ void SOLVENT_LENNARD_JONES::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                     f, gridSize, blockSize, 0, NULL, atom_numbers,
                     coordinate_numbers, nl, solvent_start_local,
                     residue_numbers, d_res_start,
-                    lj_info->crd_with_LJ_parameters_local, cell, rcell,
+                    lj_info->d_lj_crd_q, lj_info->d_lj_type_g, cell, rcell,
                     lj_info->d_LJ_A, lj_info->d_LJ_B, lj_info->cutoff, frc,
                     pme_beta, atom_energy, atom_lj_virial,
                     atom_direct_pme_energy, lj_info->d_LJ_energy_atom,

@@ -759,7 +759,8 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     ad_thermo.Get_Local(dd.atom_local, dd.atom_numbers);
     nhc.Get_Local(dd.atom_local, dd.atom_numbers);
 
-    lj.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
+    lj.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
+                 dd.d_charge);
     lj_soft.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
     solvent_lj.Get_Local(dd.res_numbers, dd.res_len, dd.atom_numbers,
                          dd.d_mass);

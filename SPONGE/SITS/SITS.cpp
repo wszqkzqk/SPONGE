@@ -10,13 +10,14 @@ template <bool need_force, bool need_energy, bool need_virial,
           bool need_coulomb>
 static __global__ void Selective_Lennard_Jones_And_Direct_Coulomb_Device(
     const int local_atom_numbers, const int solvent_numbers,
-    const ATOM_GROUP* nl, float* atom_ene_LJ, const VECTOR_LJ* crd,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const float* LJ_type_A,
-    const float* LJ_type_B, const int* atom_sys_mark, const float cutoff,
-    VECTOR* frc, VECTOR* frc_enhancing, const float pme_beta,
-    float* atom_energy, float* atom_energy_enhancing, LTMatrix3* atom_virial,
-    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
-    const float pwwp_factor, int* pair_overlap_error)
+    const ATOM_GROUP* nl, float* atom_ene_LJ, const float4* crd_q,
+    const int2* type_g, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const float* LJ_type_A, const float* LJ_type_B, const int* atom_sys_mark,
+    const float cutoff, VECTOR* frc, VECTOR* frc_enhancing,
+    const float pme_beta, float* atom_energy, float* atom_energy_enhancing,
+    LTMatrix3* atom_virial, LTMatrix3* atom_virial_enhancing,
+    float* atom_direct_cf_energy, const float pwwp_factor,
+    int* pair_overlap_error)
 {
 #ifdef USE_GPU
     int atom_i = blockDim.y * blockIdx.x + threadIdx.y;
@@ -28,7 +29,7 @@ static __global__ void Selective_Lennard_Jones_And_Direct_Coulomb_Device(
 #endif
     {
         ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR_LJ r1 = crd[atom_i];
+        VECTOR_LJ r1 = Load_VECTOR_LJ(crd_q, type_g, atom_i);
         int atom_mark_i = atom_sys_mark[atom_i];
         VECTOR frc_record = {0.0f, 0.0f, 0.0f},
                frc_enhancing_record = {0.0f, 0.0f, 0.0f};
@@ -43,7 +44,7 @@ static __global__ void Selective_Lennard_Jones_And_Direct_Coulomb_Device(
         {
             int atom_j = nl_i.atom_serial[j];
             float ij_factor = atom_j < local_atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ r2 = crd[atom_j];
+            VECTOR_LJ r2 = Load_VECTOR_LJ(crd_q, type_g, atom_j);
             VECTOR dr = Get_Periodic_Displacement(r2, r1, cell, rcell);
             float dr_abs = norm3df(dr.x, dr.y, dr.z);
             if (dr_abs < cutoff)
@@ -2135,12 +2136,11 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
             return;
         }
         Launch_Device_Kernel(
-            Copy_Crd_And_Charge_To_New_Crd,
+            Repack_LJ_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL,
-            local_atom_numbers + ghost_numbers, crd,
-            lj_info->crd_with_LJ_parameters_local, charge);
+            local_atom_numbers + ghost_numbers, crd, lj_info->d_lj_crd_q);
 
         if (need_potential)
         {
@@ -2183,11 +2183,10 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
 
         Launch_Device_Kernel(
             f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-            solvent_numbers, nl, lj_info->d_LJ_energy_atom,
-            lj_info->crd_with_LJ_parameters_local, cell, rcell, lj_info->d_LJ_A,
-            lj_info->d_LJ_B, atom_sys_mark_local, cutoff, md_frc,
-            pw_select.select_force[0], pme_beta, atom_energy,
-            pw_select.select_atom_energy[0], atom_virial,
+            solvent_numbers, nl, lj_info->d_LJ_energy_atom, lj_info->d_lj_crd_q,
+            lj_info->d_lj_type_g, cell, rcell, lj_info->d_LJ_A, lj_info->d_LJ_B,
+            atom_sys_mark_local, cutoff, md_frc, pw_select.select_force[0],
+            pme_beta, atom_energy, pw_select.select_atom_energy[0], atom_virial,
             pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
             pwwp_enhance_factor, lj_info->d_pair_overlap_error);
         lj_info->Check_Pair_Overlap_Error(

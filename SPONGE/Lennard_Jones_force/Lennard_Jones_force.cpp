@@ -18,24 +18,15 @@ __global__ void Copy_LJ_Type_To_New_Crd(const int atom_numbers,
     }
 }
 
-__global__ void Copy_Crd_And_Charge_To_New_Crd(const int atom_numbers,
-                                               const VECTOR* crd,
-                                               VECTOR_LJ* new_crd,
-                                               const float* charge)
+__global__ void Repack_LJ_Crd(const int atom_numbers, const VECTOR* crd,
+                              float4* lj_crd_q)
 {
     SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
     {
-        new_crd[atom_i].crd = crd[atom_i];
-        new_crd[atom_i].charge = charge[atom_i];
-    }
-}
-
-__global__ void Copy_Crd_To_New_Crd(const int atom_numbers, const VECTOR* crd,
-                                    VECTOR_LJ* new_crd)
-{
-    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
-    {
-        new_crd[atom_i].crd = crd[atom_i];
+        const VECTOR r = crd[atom_i];
+        lj_crd_q[atom_i].x = r.x;
+        lj_crd_q[atom_i].y = r.y;
+        lj_crd_q[atom_i].z = r.z;
     }
 }
 
@@ -48,11 +39,11 @@ template <bool need_force, bool need_energy, bool need_virial,
           bool need_coulomb>
 static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
     const int local_atom_numbers, const int solvent_numbers,
-    const ATOM_GROUP* nl, const VECTOR_LJ* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const float* LJ_type_A, const float* LJ_type_B,
-    const float cutoff, VECTOR* frc, const float pme_beta, float* atom_energy,
-    LTMatrix3* atom_virial, float* atom_direct_cf_energy, float* atom_LJ_ene,
-    int* pair_overlap_error)
+    const ATOM_GROUP* nl, const float4* crd_q, const int2* type_g,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float* LJ_type_A,
+    const float* LJ_type_B, const float cutoff, VECTOR* frc,
+    const float pme_beta, float* atom_energy, LTMatrix3* atom_virial,
+    float* atom_direct_cf_energy, float* atom_LJ_ene, int* pair_overlap_error)
 {
 #ifdef USE_GPU
     int atom_i = 0 + blockDim.y * blockIdx.x + threadIdx.y;
@@ -69,7 +60,7 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
         float energy_coulomb = 0.0f;
         float energy_total = 0.0f;
         ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR_LJ r1 = crd[atom_i];
+        VECTOR_LJ r1 = Load_VECTOR_LJ(crd_q, type_g, atom_i);
 #ifdef USE_GPU
         for (int j = threadIdx.x; j < nl_i.atom_numbers; j += blockDim.x)
 #else
@@ -78,7 +69,7 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
         {
             int atom_j = nl_i.atom_serial[j];
             float ij_factor = atom_j < local_atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ r2 = crd[atom_j];
+            VECTOR_LJ r2 = Load_VECTOR_LJ(crd_q, type_g, atom_j);
             VECTOR dr = Get_Periodic_Displacement(r2, r1, cell, rcell);
             float dr_abs = norm3df(dr.x, dr.y, dr.z);
             if (dr_abs < cutoff)
@@ -357,7 +348,8 @@ static __global__ void get_local_device(int* atom_local, int local_atom_numbers,
                                         int ghost_numbers,
                                         int global_atom_numbers,
                                         int* d_atom_LJ_type,
-                                        VECTOR_LJ* crd_with_LJ_parameters_local,
+                                        const float* charge, float4* d_lj_crd_q,
+                                        int2* d_lj_type_g,
                                         int* invalid_local_index)
 {
     SIMPLE_DEVICE_FOR(i, local_atom_numbers + ghost_numbers)
@@ -369,15 +361,17 @@ static __global__ void get_local_device(int* atom_local, int local_atom_numbers,
         }
         else
         {
-            crd_with_LJ_parameters_local[i].LJ_type = d_atom_LJ_type[atom_i];
-            crd_with_LJ_parameters_local[i].global_atom = atom_i;
+            d_lj_type_g[i].x = d_atom_LJ_type[atom_i];
+            d_lj_type_g[i].y = atom_i;
+            d_lj_crd_q[i].w = charge[i];
         }
     }
 }
 
 void LENNARD_JONES_INFORMATION::Get_Local(int* atom_local,
                                           int local_atom_numbers,
-                                          int ghost_numbers)
+                                          int ghost_numbers,
+                                          const float* charge)
 {
     if (!is_initialized) return;
     local_metadata_is_ready = false;
@@ -407,8 +401,8 @@ void LENNARD_JONES_INFORMATION::Get_Local(int* atom_local,
         (local_coordinate_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, atom_local, local_atom_numbers,
-        ghost_numbers, atom_numbers, d_atom_LJ_type,
-        crd_with_LJ_parameters_local, d_local_metadata_error);
+        ghost_numbers, atom_numbers, d_atom_LJ_type, charge, d_lj_crd_q,
+        d_lj_type_g, d_local_metadata_error);
     int invalid_local_index = -1;
     deviceMemcpy(&invalid_local_index, d_local_metadata_error, sizeof(int),
                  deviceMemcpyDeviceToHost);
@@ -534,8 +528,8 @@ void LENNARD_JONES_INFORMATION::Parameter_Host_To_Device()
                                   sizeof(float));
     Device_Malloc_Safely((void**)&d_LJ_energy_atom,
                          sizeof(float) * atom_numbers);
-    Device_Malloc_Safely((void**)&crd_with_LJ_parameters_local,
-                         sizeof(VECTOR_LJ) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_lj_crd_q, sizeof(float4) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_lj_type_g, sizeof(int2) * atom_numbers);
     Device_Malloc_Safely((void**)&d_local_metadata_error, sizeof(int));
 #ifndef GPU_ARCH_NAME
     Device_Malloc_Safely((void**)&d_pair_overlap_error, 3 * sizeof(int));
@@ -561,12 +555,11 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             return;
         }
         Launch_Device_Kernel(
-            Copy_Crd_And_Charge_To_New_Crd,
+            Repack_LJ_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL,
-            this->local_atom_numbers + this->ghost_numbers, crd,
-            crd_with_LJ_parameters_local, charge);
+            this->local_atom_numbers + this->ghost_numbers, crd, d_lj_crd_q);
         if (need_atom_energy)
         {
             deviceMemset(atom_direct_pme_energy, 0,
@@ -606,7 +599,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         }
         Launch_Device_Kernel(
             f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-            solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
+            solvent_numbers, nl, d_lj_crd_q, d_lj_type_g, cell, rcell,
             d_LJ_A, d_LJ_B, cutoff, frc, pme_beta, atom_energy, atom_virial,
             atom_direct_pme_energy, d_LJ_energy_atom, d_pair_overlap_error);
         Check_Pair_Overlap_Error(

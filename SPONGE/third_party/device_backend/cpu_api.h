@@ -28,6 +28,10 @@ struct float4
 {
     float x, y, z, w;
 };
+struct int2
+{
+    int x, y;
+};
 float rnorm3df(float, float, float);
 float norm3df(float, float, float);
 float erfcxf(float);

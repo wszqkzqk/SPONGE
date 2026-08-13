@@ -72,14 +72,22 @@ struct VECTOR_LJ
                 erfcf(beta_dr));
     }
 };
+// 从 16B 对齐双数组（float4: crd.xyz+charge，int2: LJ_type+global_atom）
+// 装载一个 VECTOR_LJ 值；消费 kernel 内的语义与旧 AoS 布局逐语句一致
+__host__ __device__ __forceinline__ VECTOR_LJ Load_VECTOR_LJ(
+    const float4* crd_q, const int2* type_g, const int idx)
+{
+    const float4 cq = crd_q[idx];
+    const int2 tg = type_g[idx];
+    VECTOR_LJ r = {{cq.x, cq.y, cq.z}, tg.x, cq.w, tg.y};
+    return r;
+}
 __global__ void Copy_LJ_Type_To_New_Crd(const int atom_numbers,
                                         VECTOR_LJ* new_crd, const int* LJ_type);
-__global__ void Copy_Crd_And_Charge_To_New_Crd(const int atom_numbers,
-                                               const VECTOR* crd,
-                                               VECTOR_LJ* new_crd,
-                                               const float* charge);
-__global__ void Copy_Crd_To_New_Crd(const int atom_numbers, const VECTOR* crd,
-                                    VECTOR_LJ* new_crd);
+// 每步重打包：只把 crd gather 进 lj_crd_q 的 xyz；w（charge）与
+// LJ_type/global_atom 是静态的，由 Get_Local 在初始化/域刷新时填充
+__global__ void Repack_LJ_Crd(const int atom_numbers, const VECTOR* crd,
+                              float4* lj_crd_q);
 #endif
 
 // 用于记录与计算LJ相关的信息
@@ -130,13 +138,16 @@ struct LENNARD_JONES_INFORMATION
     */
     int local_atom_numbers = 0;
     int ghost_numbers = 0;
-    VECTOR_LJ* crd_with_LJ_parameters_local =
-        NULL;  // 局域原子的坐标，电荷LJ_type打包
+    // 局域原子的坐标/电荷与 LJ_type/global_atom 打包（atom 序，16B 对齐双数组）：
+    // d_lj_crd_q 的 xyz 每步由 Repack_LJ_Crd 刷新，w（charge）与 d_lj_type_g
+    // 是静态的，由 Get_Local 在初始化/域刷新时填充
+    float4* d_lj_crd_q = NULL;
+    int2* d_lj_type_g = NULL;
     int* d_pair_overlap_error = NULL;
     int* d_local_metadata_error = NULL;
     bool local_metadata_is_ready = false;
-    void Get_Local(int* atom_local, int local_atom_numbers,
-                   int ghost_numbers);  // 获取局域粒子信息
+    void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
+                   const float* charge);  // 获取局域粒子信息
     bool Validate_Local_State(const char* error_by, int global_atom_numbers,
                               int local_atom_numbers, int ghost_numbers,
                               int solvent_numbers);

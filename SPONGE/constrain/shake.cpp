@@ -1,4 +1,4 @@
-﻿#include "shake.h"
+#include "shake.h"
 
 #include "velocity_projection.h"
 
@@ -423,6 +423,69 @@ static __global__ void Sum_Virial_Tensor_To_Stress(
     Warp_Sum_To(stress, virial_sum, warpSize);
 }
 
+void SHAKE::Execute_Constrain_Kernels(int atom_numbers, VECTOR* crd,
+                                      VECTOR* vel, const float* mass_inverse,
+                                      LTMatrix3 cell, LTMatrix3 rcell,
+                                      int need_pressure, LTMatrix3* d_stress,
+                                      deviceStream_t stream)
+{
+    for (int i = 0; i < iteration_numbers; i = i + 1)
+    {
+        Launch_Device_Kernel(
+            Refresh_Coordinate,
+            (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, stream, atom_numbers, crd,
+            test_crd, constrain_frc, mass_inverse, constrain->x_factor);
+
+        if (need_pressure > 0)
+        {
+            Launch_Device_Kernel(Constrain_Force_Cycle_With_Virial,
+                                 (constrain->num_pair_local +
+                                  CONTROLLER::device_max_thread - 1) /
+                                     CONTROLLER::device_max_thread,
+                                 CONTROLLER::device_max_thread, 0, stream,
+                                 constrain->num_pair_local, test_crd, cell,
+                                 rcell, constrain->constrain_pair_local,
+                                 last_pair_dr, constrain_frc, d_pair_virial);
+        }
+        else
+        {
+            Launch_Device_Kernel(Constrain_Force_Cycle,
+                                 (constrain->num_pair_local +
+                                  CONTROLLER::device_max_thread - 1) /
+                                     CONTROLLER::device_max_thread,
+                                 CONTROLLER::device_max_thread, 0, stream,
+                                 constrain->num_pair_local, test_crd, cell,
+                                 rcell, constrain->constrain_pair_local,
+                                 last_pair_dr, constrain_frc);
+        }
+    }
+
+    if (need_pressure > 0)
+    {
+        dim3 blockSize = {
+            CONTROLLER::device_warp,
+            CONTROLLER::device_max_thread / CONTROLLER::device_warp};
+        Launch_Device_Kernel(Sum_Virial_Tensor_To_Stress,
+                             (constrain->num_pair_local +
+                              CONTROLLER::device_max_thread - 1) /
+                                 CONTROLLER::device_max_thread,
+                             blockSize, 0, stream, constrain->num_pair_local,
+                             d_stress, d_pair_virial,
+                             1 / constrain->dt / constrain->dt * rcell.a11 *
+                                 rcell.a22 * rcell.a33);
+    }
+
+    Launch_Device_Kernel(Refresh_Crd_Vel,
+                         (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                             CONTROLLER::device_max_thread,
+                         CONTROLLER::device_max_thread, 0, stream, atom_numbers,
+                         constrain->dt_inverse, constrain->dt, crd, vel,
+                         constrain_frc, mass_inverse, constrain->v_factor,
+                         constrain->x_factor);
+}
+
 void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
                       const float* mass_inverse, const float* d_mass,
                       const LTMatrix3 cell, const LTMatrix3 rcell,
@@ -438,61 +501,93 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
                          sizeof(LTMatrix3) * constrain->num_pair_local);
             deviceMemset(d_virial, 0, sizeof(LTMatrix3));
         }
-        for (int i = 0; i < iteration_numbers; i = i + 1)
+#ifdef USE_CUDA
+        GRAPH_SIGNATURE signature;
+        memset(&signature, 0, sizeof(signature));
+        signature.crd = crd;
+        signature.vel = vel;
+        signature.mass_inverse = mass_inverse;
+        signature.d_stress = d_stress;
+        signature.constrain_pair_local = constrain->constrain_pair_local;
+        signature.cell = cell;
+        signature.rcell = rcell;
+        signature.x_factor = constrain->x_factor;
+        signature.v_factor = constrain->v_factor;
+        signature.dt = constrain->dt;
+        signature.dt_inverse = constrain->dt_inverse;
+        signature.atom_numbers = atom_numbers;
+        signature.pair_numbers = constrain->num_pair_local;
+        signature.need_pressure = need_pressure;
+        signature.iteration_numbers = iteration_numbers;
+        if (!graph_disabled)
         {
-            Launch_Device_Kernel(
-                Refresh_Coordinate,
-                (atom_numbers + CONTROLLER::device_max_thread - 1) /
-                    CONTROLLER::device_max_thread,
-                CONTROLLER::device_max_thread, 0, NULL, atom_numbers, crd,
-                test_crd, constrain_frc, mass_inverse, constrain->x_factor);
-
-            if (need_pressure > 0)
+            int slot = -1;
+            for (int s = 0; s < 2; s = s + 1)
             {
-                Launch_Device_Kernel(Constrain_Force_Cycle_With_Virial,
-                                     (constrain->num_pair_local +
-                                      CONTROLLER::device_max_thread - 1) /
-                                         CONTROLLER::device_max_thread,
-                                     CONTROLLER::device_max_thread, 0, NULL,
-                                     constrain->num_pair_local, test_crd, cell,
-                                     rcell, constrain->constrain_pair_local,
-                                     last_pair_dr, constrain_frc,
-                                     d_pair_virial);
+                if (graph_signature_valid[s] &&
+                    memcmp(&signature, &graph_signature[s],
+                           sizeof(signature)) == 0)
+                {
+                    slot = s;
+                    break;
+                }
+            }
+            if (slot >= 0)
+            {
+                graph_consecutive_captures = 0;
+                graph_last_used_slot = slot;
+                cudaGraphLaunch(graph_exec[slot], NULL);
+                return;
+            }
+            graph_consecutive_captures = graph_consecutive_captures + 1;
+            if (graph_consecutive_captures >= 4)
+            {
+                // 签名连续多步不稳定，捕获开销无法摊销
+                graph_disabled = true;
             }
             else
             {
-                Launch_Device_Kernel(Constrain_Force_Cycle,
-                                     (constrain->num_pair_local +
-                                      CONTROLLER::device_max_thread - 1) /
-                                         CONTROLLER::device_max_thread,
-                                     CONTROLLER::device_max_thread, 0, NULL,
-                                     constrain->num_pair_local, test_crd, cell,
-                                     rcell, constrain->constrain_pair_local,
-                                     last_pair_dr, constrain_frc);
+                slot = 1 - graph_last_used_slot;
+                if (graph_exec[slot] != NULL)
+                {
+                    cudaGraphExecDestroy(graph_exec[slot]);
+                    graph_exec[slot] = NULL;
+                }
+                graph_signature_valid[slot] = false;
+                if (graph_stream == NULL) cudaStreamCreate(&graph_stream);
+                cudaGraph_t graph = NULL;
+                if (cudaStreamBeginCapture(graph_stream,
+                                           cudaStreamCaptureModeGlobal) ==
+                    cudaSuccess)
+                {
+                    Execute_Constrain_Kernels(atom_numbers, crd, vel,
+                                              mass_inverse, cell, rcell,
+                                              need_pressure, d_stress,
+                                              graph_stream);
+                    if (cudaStreamEndCapture(graph_stream, &graph) ==
+                            cudaSuccess &&
+                        graph != NULL &&
+                        cudaGraphInstantiateWithFlags(&graph_exec[slot], graph,
+                                                      0) == cudaSuccess)
+                    {
+                        graph_signature[slot] = signature;
+                        graph_signature_valid[slot] = true;
+                    }
+                    if (graph != NULL) cudaGraphDestroy(graph);
+                }
+                if (graph_exec[slot] != NULL)
+                {
+                    graph_last_used_slot = slot;
+                    cudaGraphLaunch(graph_exec[slot], NULL);
+                    return;
+                }
+                // 捕获失败：清除捕获期间的错误状态并永久回退到逐次启动
+                cudaGetLastError();
+                graph_disabled = true;
             }
         }
-
-        if (need_pressure > 0)
-        {
-            dim3 blockSize = {
-                CONTROLLER::device_warp,
-                CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-            Launch_Device_Kernel(Sum_Virial_Tensor_To_Stress,
-                                 (constrain->num_pair_local +
-                                  CONTROLLER::device_max_thread - 1) /
-                                     CONTROLLER::device_max_thread,
-                                 blockSize, 0, NULL, constrain->num_pair_local,
-                                 d_stress, d_pair_virial,
-                                 1 / constrain->dt / constrain->dt * rcell.a11 *
-                                     rcell.a22 * rcell.a33);
-        }
-
-        Launch_Device_Kernel(
-            Refresh_Crd_Vel,
-            (atom_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
-            constrain->dt_inverse, constrain->dt, crd, vel, constrain_frc,
-            mass_inverse, constrain->v_factor, constrain->x_factor);
+#endif
+        Execute_Constrain_Kernels(atom_numbers, crd, vel, mass_inverse, cell,
+                                  rcell, need_pressure, d_stress, 0);
     }
 }

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "../common.h"
 #include "../control.h"
 #include "constrain.h"
@@ -45,4 +45,36 @@ struct SHAKE
                    const float* mass_inverse, const float* d_mass,
                    const LTMatrix3 cell, const LTMatrix3 rcell,
                    int need_pressure, LTMatrix3* d_stress);
+
+    // 约束迭代的全部 kernel 启动序列（CUDA 构建下同时用于 graph 捕获与回退执行）
+    void Execute_Constrain_Kernels(int atom_numbers, VECTOR* crd, VECTOR* vel,
+                                   const float* mass_inverse, LTMatrix3 cell,
+                                   LTMatrix3 rcell, int need_pressure,
+                                   LTMatrix3* d_stress, deviceStream_t stream);
+
+#ifdef USE_CUDA
+    // 固定轮数的约束 kernel 序列在运行中保持静态，捕获为 CUDA Graph 后
+    // 每步一次 graph launch 执行；签名任一字段变化即重新捕获。
+    // 双槽缓存覆盖 need_pressure 开/关两种变体；签名持续不稳定时
+    // （如 NPT 每步变盒子）永久回退到逐次启动。
+    struct GRAPH_SIGNATURE
+    {
+        const void* crd;
+        const void* vel;
+        const void* mass_inverse;
+        const void* d_stress;
+        const void* constrain_pair_local;
+        LTMatrix3 cell;
+        LTMatrix3 rcell;
+        float x_factor, v_factor, dt, dt_inverse;
+        int atom_numbers, pair_numbers, need_pressure, iteration_numbers;
+    };
+    GRAPH_SIGNATURE graph_signature[2];
+    bool graph_signature_valid[2] = {false, false};
+    cudaGraphExec_t graph_exec[2] = {NULL, NULL};
+    cudaStream_t graph_stream = NULL;
+    int graph_last_used_slot = 1;
+    int graph_consecutive_captures = 0;
+    bool graph_disabled = false;
+#endif
 };

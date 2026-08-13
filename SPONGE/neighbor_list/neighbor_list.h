@@ -1,4 +1,4 @@
-﻿#ifndef NEIGHBOR_LIST_H
+#ifndef NEIGHBOR_LIST_H
 #define NEIGHBOR_LIST_H
 #include "../common.h"
 #include "../control.h"
@@ -18,6 +18,19 @@ struct NEIGHBOR_LIST
     int last_update_error = UPDATE_OK;
     int last_error_atom = -1;
     int* d_update_error = NULL;
+
+    // 构建状态块：溢出标志与错误码合并在同一块连续 device 内存里，
+    // 一次 memset 复位、一次 DtoH 取回。下面四个指针是块内字段的别名，
+    // 不单独分配/释放。
+    enum UPDATE_STATUS_FIELD
+    {
+        UPDATE_STATUS_GRID_OVERFLOW = 0,
+        UPDATE_STATUS_GRID_GHOST_OVERFLOW = 1,
+        UPDATE_STATUS_LIST_OVERFLOW = 2,
+        UPDATE_STATUS_ERROR = 4,  // [4]=错误码，[5]=出错原子
+        UPDATE_STATUS_INTS = 8
+    };
+    int* d_update_status = NULL;
 
     // 是否需要构建半近邻表（默认需要）
     bool is_needed_half = true;

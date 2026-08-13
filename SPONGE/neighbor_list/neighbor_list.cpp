@@ -1253,16 +1253,8 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
     h_neighbor_grid_overflow = 0;
     h_neighbor_list_overflow = 0;
     h_neighbor_grid_ghost_overflow = 0;
-    if (!Device_Malloc_And_Copy_Safely((void**)&d_neighbor_grid_overflow,
-                                       &h_neighbor_grid_overflow,
-                                       sizeof(int)) ||
-        !Device_Malloc_And_Copy_Safely((void**)&d_neighbor_list_overflow,
-                                       &h_neighbor_list_overflow,
-                                       sizeof(int)) ||
-        !Device_Malloc_And_Copy_Safely((void**)&d_neighbor_grid_ghost_overflow,
-                                       &h_neighbor_grid_ghost_overflow,
-                                       sizeof(int)) ||
-        !Device_Malloc_Safely((void**)&d_update_error, 2 * sizeof(int)) ||
+    if (!Device_Malloc_Safely((void**)&d_update_status,
+                              UPDATE_STATUS_INTS * sizeof(int)) ||
         !Malloc_Safely((void**)&h_nl, group_bytes) ||
         !Device_Malloc_Safely((void**)&d_temp, neighbor_bytes))
     {
@@ -1271,7 +1263,13 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
                                        "NEIGHBOR_LIST::Initial");
         return;
     }
-    deviceMemset(d_update_error, 0, 2 * sizeof(int));
+    // 状态块内各字段的别名
+    d_neighbor_grid_overflow = d_update_status + UPDATE_STATUS_GRID_OVERFLOW;
+    d_neighbor_grid_ghost_overflow =
+        d_update_status + UPDATE_STATUS_GRID_GHOST_OVERFLOW;
+    d_neighbor_list_overflow = d_update_status + UPDATE_STATUS_LIST_OVERFLOW;
+    d_update_error = d_update_status + UPDATE_STATUS_ERROR;
+    deviceMemset(d_update_status, 0, UPDATE_STATUS_INTS * sizeof(int));
     for (int i = 0; i < atom_numbers; ++i)
     {
         h_nl[i].atom_numbers = 0;
@@ -1389,39 +1387,49 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
     // Overflow flags describe this build only.  Leaving them sticky makes a
     // later capacity check unable to distinguish a successful retry from the
     // truncated build that caused it.
-    deviceMemset(d_neighbor_grid_overflow, 0, sizeof(int));
-    deviceMemset(d_neighbor_grid_ghost_overflow, 0, sizeof(int));
-    deviceMemset(d_neighbor_list_overflow, 0, sizeof(int));
     h_neighbor_grid_overflow = 0;
     h_neighbor_grid_ghost_overflow = 0;
     h_neighbor_list_overflow = 0;
     last_update_error = UPDATE_OK;
     last_error_atom = -1;
-    deviceMemset(d_update_error, 0, 2 * sizeof(int));
     if (full_neighbor_list.is_initialized)
     {
         deviceMemset(full_neighbor_list.d_overflow, 0, sizeof(int));
     }
+
+    // 先在主机侧判定本步是否需要重建：强制/定间隔由参数与步数直接可知；
+    // 动态模式跑 Check kernel 并取回标志（非重建步唯一的同步点）。
+    // 只有重建步才清零状态块、启动构建 kernel 并取回构建状态。
+    bool need_rebuild = false;
     if (update == NEIGHBOR_LIST_UPDATE_PARAMETER::FORCED_UPDATE)
     {
-        deviceMemset(updator.d_need_update, -1, sizeof(int));
+        need_rebuild = true;
     }
     else if (updator.refresh_interval <= 0)
     {
         deviceMemset(updator.d_need_update, 0, sizeof(int));
         updator.Check(local_atom_numbers, skin, crd, cell, rcell);
-    }
-    else if (Next_Step_Is_Interval_Boundary(step,
-                                            updator.refresh_interval))
-    {
-        deviceMemset(updator.d_need_update, -1, sizeof(int));
+        int h_need_update = 0;
+        deviceMemcpy(&h_need_update, updator.d_need_update, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        need_rebuild = (h_need_update != 0);
     }
     else
     {
-        deviceMemset(updator.d_need_update, 0, sizeof(int));
+        need_rebuild = Next_Step_Is_Interval_Boundary(
+            step, updator.refresh_interval);
     }
-    if (this->is_needed_half && local_atom_numbers + ghost_numbers > 0)
+
+    if (need_rebuild && this->is_needed_half &&
+        local_atom_numbers + ghost_numbers > 0)
     {
+        deviceMemset(d_update_status, 0, UPDATE_STATUS_INTS * sizeof(int));
+        if (update == NEIGHBOR_LIST_UPDATE_PARAMETER::FORCED_UPDATE ||
+            updator.refresh_interval > 0)
+        {
+            deviceMemset(updator.d_need_update, -1, sizeof(int));
+        }
+        // 动态模式下 Check kernel 已把 d_need_update 置 1
         updator.Update(atom_local, local_atom_numbers, ghost_numbers,
                        updator.refresh_interval <= 0, crd, cell, rcell, &grids,
                        max_atom_in_grid_numbers, max_ghost_in_grid_numbers,
@@ -1429,27 +1437,24 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
                        d_neighbor_grid_overflow, d_neighbor_grid_ghost_overflow,
                        d_neighbor_list_overflow, d_update_error, this->d_nl,
                        excluded_list_start, excluded_list, excluded_numbers);
-    }
-
-    deviceMemcpy(&h_neighbor_grid_overflow, d_neighbor_grid_overflow,
-                 sizeof(int), deviceMemcpyDeviceToHost);
-    deviceMemcpy(&h_neighbor_grid_ghost_overflow,
-                 d_neighbor_grid_ghost_overflow, sizeof(int),
-                 deviceMemcpyDeviceToHost);
-    deviceMemcpy(&h_neighbor_list_overflow, d_neighbor_list_overflow,
-                 sizeof(int), deviceMemcpyDeviceToHost);
-    int update_error[2] = {UPDATE_OK, -1};
-    deviceMemcpy(update_error, d_update_error, sizeof(update_error),
-                 deviceMemcpyDeviceToHost);
-    last_update_error = update_error[0];
-    last_error_atom = update_error[1];
-    if (last_update_error != UPDATE_OK || h_neighbor_grid_overflow != 0 ||
-        h_neighbor_grid_ghost_overflow != 0 || h_neighbor_list_overflow != 0)
-    {
-        Invalidate_Half_Neighbor_List(this, local_atom_numbers);
-        full_neighbor_list.Invalidate_Active();
-        updator.time_recorder->Stop();
-        return false;
+        // 阻塞式取回全部构建状态
+        int status[UPDATE_STATUS_INTS] = {0};
+        deviceMemcpy(status, d_update_status, sizeof(status),
+                     deviceMemcpyDeviceToHost);
+        h_neighbor_grid_overflow = status[UPDATE_STATUS_GRID_OVERFLOW];
+        h_neighbor_grid_ghost_overflow =
+            status[UPDATE_STATUS_GRID_GHOST_OVERFLOW];
+        h_neighbor_list_overflow = status[UPDATE_STATUS_LIST_OVERFLOW];
+        last_update_error = status[UPDATE_STATUS_ERROR];
+        last_error_atom = status[UPDATE_STATUS_ERROR + 1];
+        if (last_update_error != UPDATE_OK || h_neighbor_grid_overflow != 0 ||
+            h_neighbor_grid_ghost_overflow != 0 || h_neighbor_list_overflow != 0)
+        {
+            Invalidate_Half_Neighbor_List(this, local_atom_numbers);
+            full_neighbor_list.Invalidate_Active();
+            updator.time_recorder->Stop();
+            return false;
+        }
     }
 
     if (this->is_needed_full && full_neighbor_list.is_initialized)
@@ -1667,15 +1672,13 @@ void NEIGHBOR_LIST::Clear()
     if (d_temp != NULL) Free_Single_Device_Pointer((void**)&d_temp);
     if (h_nl != NULL || d_nl != NULL)
         Free_Host_And_Device_Pointer((void**)&h_nl, (void**)&d_nl);
-    if (d_neighbor_grid_overflow != NULL)
-        Free_Host_And_Device_Pointer(NULL, (void**)&d_neighbor_grid_overflow);
-    if (d_neighbor_list_overflow != NULL)
-        Free_Host_And_Device_Pointer(NULL, (void**)&d_neighbor_list_overflow);
-    if (d_neighbor_grid_ghost_overflow != NULL)
-        Free_Host_And_Device_Pointer(NULL,
-                                     (void**)&d_neighbor_grid_ghost_overflow);
-    if (d_update_error != NULL)
-        Free_Single_Device_Pointer((void**)&d_update_error);
+    // 状态块单独释放；四个字段指针只是块内别名，置空即可
+    if (d_update_status != NULL)
+        Free_Single_Device_Pointer((void**)&d_update_status);
+    d_neighbor_grid_overflow = NULL;
+    d_neighbor_list_overflow = NULL;
+    d_neighbor_grid_ghost_overflow = NULL;
+    d_update_error = NULL;
     full_neighbor_list.Clear();
     grids.Clear();
     updator.Clear();

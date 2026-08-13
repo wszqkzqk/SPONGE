@@ -98,6 +98,9 @@ struct NEIGHBOR_LIST
         int *h_neighbor_grid_numbers = NULL, *d_neighbor_grid_numbers = NULL;
         // 每个格点的周围格点
         int *h_neighbor_grids = NULL, *d_neighbor_grids = NULL;
+        // 每个格点的邻居格原子数独占前缀和（每次重建时重算，
+        // 行长 MAX_GRID_NEIGHBORS+1，仅 GPU 路径使用）
+        int* d_grid_neighbor_prefix = NULL;
         // 每个格点内的原子数量
         int *h_grid_atom_numbers = NULL, *d_grid_atom_numbers = NULL;
         // 每个格点内的ghost数量

@@ -294,10 +294,14 @@ bool NEIGHBOR_LIST::GRIDS::Initial(CONTROLLER* controller,
     grid_numbers = static_cast<int>(grid_count);
 
     size_t neighbor_slots = 0, atom_slots = 0, ghost_slots = 0;
+    size_t prefix_slots = 0, prefix_bytes = 0;
     size_t grid_int_bytes = 0, neighbor_bytes = 0, atom_bytes = 0;
     size_t ghost_bytes = 0, atom_crd_bytes = 0, ghost_crd_bytes = 0;
     if (!Checked_Product(grid_count, (size_t)MAX_GRID_NEIGHBORS,
                          &neighbor_slots) ||
+        !Checked_Product(grid_count, (size_t)(MAX_GRID_NEIGHBORS + 1),
+                         &prefix_slots) ||
+        !Checked_Bytes(prefix_slots, sizeof(int), &prefix_bytes) ||
         !Checked_Product(grid_count, (size_t)max_atom_in_grid_numbers,
                          &atom_slots) ||
         !Checked_Product(grid_count, (size_t)max_ghost_in_grid_numbers,
@@ -348,7 +352,8 @@ bool NEIGHBOR_LIST::GRIDS::Initial(CONTROLLER* controller,
                                        atom_bytes) ||
         !Device_Malloc_Safely((void**)&d_grid_atom_crd, atom_crd_bytes) ||
         !Device_Malloc_And_Copy_Safely((void**)&d_grid_atom_numbers,
-                                       h_grid_atom_numbers, grid_int_bytes))
+                                       h_grid_atom_numbers, grid_int_bytes) ||
+        !Device_Malloc_Safely((void**)&d_grid_neighbor_prefix, prefix_bytes))
     {
         Clear();
         return false;
@@ -400,6 +405,8 @@ void NEIGHBOR_LIST::GRIDS::Clear()
                                      (void**)&d_grid_ghost_numbers);
     if (d_grid_ghost_crd != NULL)
         Free_Single_Device_Pointer((void**)&d_grid_ghost_crd);
+    if (d_grid_neighbor_prefix != NULL)
+        Free_Single_Device_Pointer((void**)&d_grid_neighbor_prefix);
     if (d_grid_atom_crd != NULL)
         Free_Single_Device_Pointer((void**)&d_grid_atom_crd);
     grid_numbers = 0;
@@ -633,14 +640,45 @@ static __global__ void Put_Atom_In_Grids(
 
 #ifdef USE_GPU
 
+// 为每个 grid_i 计算其邻居格原子数的独占前缀和（行长 MAX_GRID_NEIGHBORS+1）。
+// 邻居格拓扑在盒子不变时是静态的，但每格原子数每次重建都会变，
+// 因此前缀和在每次重建时由本 kernel 重算。早退条件与
+// Find_Neighbors_Gridly 一致：不重建或构建已失败时不做任何事。
+static __global__ void Build_Grid_Neighbor_Prefix(
+    const int* need, int grid_numbers, const int* grid_neighbor_numbers,
+    const int* grid_neighbors, const int* grid_atom_numbers,
+    int* grid_neighbor_prefix, const int* neighbor_grid_overflow,
+    const int* neighbor_grid_ghost_overflow, const int* update_error)
+{
+    if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
+        neighbor_grid_ghost_overflow[0] != 0 ||
+        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        return;
+    SIMPLE_DEVICE_FOR(grid_i, grid_numbers)
+    {
+        const int neighbor_count = grid_neighbor_numbers[grid_i];
+        const int* neighbor_row =
+            grid_neighbors + (size_t)grid_i * MAX_GRID_NEIGHBORS;
+        int* prefix_row =
+            grid_neighbor_prefix + (size_t)grid_i * (MAX_GRID_NEIGHBORS + 1);
+        int sum = 0;
+        prefix_row[0] = 0;
+        for (int k = 0; k < neighbor_count; ++k)
+        {
+            sum += grid_atom_numbers[neighbor_row[k]];
+            prefix_row[k + 1] = sum;
+        }
+    }
+}
+
 static __global__ void Find_Neighbors_Gridly(
     int* atom_local, int atom_numbers, const int* need, int grid_numbers,
     int* grid_neighbor_numbers, int* grid_neighbors, VECTOR* grid_crd,
     LTMatrix3 cell, LTMatrix3 rcell, int max_atom_numbers_in_grid,
     ATOM_GROUP* nl, float cutoff_skin_square, int* grid_atom_numbers,
     int* grid_atoms, int max_neighbor_numbers, int* neighbor_list_overflow,
-    VECTOR* grid_ghost_crd, int max_ghost_numbers_in_grid,
-    int* grid_ghost_numbers, int* grid_ghosts,
+    const int* grid_neighbor_prefix, VECTOR* grid_ghost_crd,
+    int max_ghost_numbers_in_grid, int* grid_ghost_numbers, int* grid_ghosts,
     const int* neighbor_grid_overflow, const int* neighbor_grid_ghost_overflow,
     const int* update_error)
 {
@@ -651,6 +689,8 @@ static __global__ void Find_Neighbors_Gridly(
     extern __shared__ unsigned char shared_mem[];
     VECTOR* sh_crd = reinterpret_cast<VECTOR*>(shared_mem);
     int* sh_atoms = reinterpret_cast<int*>(sh_crd + max_atom_numbers_in_grid);
+    int* sh_globals = sh_atoms + max_atom_numbers_in_grid;
+    int* sh_prefix = sh_globals + max_atom_numbers_in_grid;
 
     const int lane = threadIdx.x & (warpSize - 1);
     int warps_per_block = blockDim.x / warpSize;
@@ -681,99 +721,121 @@ static __global__ void Find_Neighbors_Gridly(
         VECTOR* grid_crd_i =
             grid_crd + (size_t)grid_i * max_atom_numbers_in_grid;
 
+        // 预载 grid_i 的原子 id、全局 id（旧实现内层循环对每个
+        // (j-chunk, i) 重复从全局内存 gather atom_local，这里顺便预载
+        // 到 shared）与坐标
         for (int idx = threadIdx.x; idx < atom_numbers_in_grid_i;
              idx += blockDim.x)
         {
-            sh_atoms[idx] = bucket_i[idx];
+            const int atom_i = bucket_i[idx];
+            sh_atoms[idx] = atom_i;
+            sh_globals[idx] = atom_local[atom_i];
             sh_crd[idx] = grid_crd_i[idx];
+        }
+
+        const int neighbor_count = grid_neighbor_numbers[grid_i];
+        const int* prefix_row =
+            grid_neighbor_prefix + (size_t)grid_i * (MAX_GRID_NEIGHBORS + 1);
+        for (int idx = threadIdx.x; idx <= neighbor_count; idx += blockDim.x)
+        {
+            sh_prefix[idx] = prefix_row[idx];
         }
         __syncthreads();
 
-        int neighbor_count = grid_neighbor_numbers[grid_i];
         if (neighbor_count == 0)
         {
             __syncthreads();
             continue;
         }
-        for (int jj = warp_id; jj < neighbor_count; jj += warps_per_block)
+
+        // 把该 grid_i 全部邻居格的原子看成展平的一维候选空间（总长
+        // sh_prefix[neighbor_count]）。warp 以 lane_stride 个连续展平 j
+        // 为一组认领，lane 用 shared 前缀和二分定位 (grid_j, 局部 j)，
+        // lane 利用率不再受单格平均原子数（~12 < 32）的限制。
+        const int total_j = sh_prefix[neighbor_count];
+        const int* neighbor_row =
+            grid_neighbors + (size_t)grid_i * MAX_GRID_NEIGHBORS;
+        for (int j_base = warp_id * lane_stride; j_base < total_j;
+             j_base += warps_per_block * lane_stride)
         {
-            int grid_j =
-                grid_neighbors[(size_t)grid_i * MAX_GRID_NEIGHBORS + jj];
-            int atom_numbers_in_grid_j = grid_atom_numbers[grid_j];
-            if (atom_numbers_in_grid_j == 0)
+            const int flat_j = j_base + lane_index;
+            const bool active = flat_j < total_j;
+            int atom_j = 0;
+            int global_j = 0;
+            VECTOR crd_j = {0, 0, 0};
+            if (active)
             {
-                continue;
+                // 二分：sh_prefix[1..neighbor_count] 中首个 > flat_j 的
+                // 位置减一，即最大的满足 sh_prefix[k] <= flat_j 的 k
+                // （空邻居格的前缀和与前一格相同，天然不会被命中）
+                int lo = 1;
+                int hi = neighbor_count;
+                while (lo < hi)
+                {
+                    const int mid = (lo + hi) >> 1;
+                    if (sh_prefix[mid] <= flat_j)
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+                const int k = lo - 1;
+                const int grid_j = neighbor_row[k];
+                const int local_j = flat_j - sh_prefix[k];
+                const size_t slot_j =
+                    (size_t)grid_j * max_atom_numbers_in_grid + local_j;
+                atom_j = grid_atoms[slot_j];
+                global_j = atom_local[atom_j];
+                crd_j = grid_crd[slot_j];
             }
 
-            int* bucket_j =
-                grid_atoms + (size_t)grid_j * max_atom_numbers_in_grid;
-            VECTOR* grid_crd_j =
-                grid_crd + (size_t)grid_j * max_atom_numbers_in_grid;
-
-            for (int j_base = 0; j_base < atom_numbers_in_grid_j;
-                 j_base += lane_stride)
+            for (int i = 0; i < atom_numbers_in_grid_i; ++i)
             {
-                int j = j_base + lane_index;
-                bool active = j < atom_numbers_in_grid_j;
-                int atom_j = 0;
-                int global_j = 0;
-                VECTOR crd_j = {0, 0, 0};
-                if (active)
+                int atom_i = sh_atoms[i];
+                int global_i = sh_globals[i];
+                bool is_neighbor = false;
+                if (active && global_j > global_i)
                 {
-                    atom_j = bucket_j[j];
-                    global_j = atom_local[atom_j];
-                    crd_j = grid_crd_j[j];
+                    VECTOR dr = Get_Periodic_Displacement(sh_crd[i], crd_j,
+                                                          cell, rcell);
+                    float dr2 = dr * dr;
+                    if (dr2 < cutoff_skin_square)
+                    {
+                        is_neighbor = true;
+                    }
                 }
 
-                for (int i = 0; i < atom_numbers_in_grid_i; ++i)
+                LaneMask mask = LaneGroup::And(
+                    LaneGroup::Ballot(is_neighbor), LaneMask(warp_mask));
+                if (LaneGroup::Any(mask))
                 {
-                    int atom_i = sh_atoms[i];
-                    int global_i = atom_local[atom_i];
-                    bool is_neighbor = false;
-                    if (active && global_j > global_i)
+                    int count = LaneGroup::Count(mask);
+                    int base_slot = 0;
+                    int leader_lane = LaneGroup::First_Lane(mask);
+                    if (lane == leader_lane)
                     {
-                        VECTOR dr = Get_Periodic_Displacement(sh_crd[i], crd_j,
-                                                              cell, rcell);
-                        float dr2 = dr * dr;
-                        if (dr2 < cutoff_skin_square)
+                        base_slot =
+                            atomicAdd(&nl[atom_i].atom_numbers, count);
+                        if (static_cast<int64_t>(base_slot) + count >
+                            max_neighbor_numbers)
                         {
-                            is_neighbor = true;
+                            Record_Required_Capacity(
+                                neighbor_list_overflow,
+                                Required_After_Reservation(base_slot,
+                                                           count));
                         }
                     }
+                    base_slot = deviceShfl(warp_mask, base_slot,
+                                           leader_lane, lane_stride);
 
-                    LaneMask mask = LaneGroup::And(
-                        LaneGroup::Ballot(is_neighbor), LaneMask(warp_mask));
-                    if (LaneGroup::Any(mask))
+                    if (is_neighbor)
                     {
-                        int count = LaneGroup::Count(mask);
-                        int base_slot = 0;
-                        int leader_lane = LaneGroup::First_Lane(mask);
-                        if (lane == leader_lane)
+                        int rank = LaneGroup::Count(LaneGroup::And(
+                            mask, LaneGroup::Lower_Lane_Mask()));
+                        if (base_slot < max_neighbor_numbers &&
+                            rank < max_neighbor_numbers - base_slot)
                         {
-                            base_slot =
-                                atomicAdd(&nl[atom_i].atom_numbers, count);
-                            if (static_cast<int64_t>(base_slot) + count >
-                                max_neighbor_numbers)
-                            {
-                                Record_Required_Capacity(
-                                    neighbor_list_overflow,
-                                    Required_After_Reservation(base_slot,
-                                                               count));
-                            }
-                        }
-                        base_slot = deviceShfl(warp_mask, base_slot,
-                                               leader_lane, lane_stride);
-
-                        if (is_neighbor)
-                        {
-                            int rank = LaneGroup::Count(LaneGroup::And(
-                                mask, LaneGroup::Lower_Lane_Mask()));
-                            if (base_slot < max_neighbor_numbers &&
-                                rank < max_neighbor_numbers - base_slot)
-                            {
-                                nl[atom_i].atom_serial[base_slot + rank] =
-                                    atom_j;
-                            }
+                            nl[atom_i].atom_serial[base_slot + rank] =
+                                atom_j;
                         }
                     }
                 }
@@ -1099,6 +1161,32 @@ void NEIGHBOR_LIST::UPDATOR::Update(
         grids->d_grid_ghosts, grids->d_grid_ghost_numbers,
         grids->d_grid_ghost_crd, max_ghost_in_grid_numbers,
         d_neighbor_grid_ghost_overflow, d_update_error);
+#ifdef USE_GPU
+    Launch_Device_Kernel(
+        Build_Grid_Neighbor_Prefix,
+        (grids->grid_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, d_need_update,
+        grids->grid_numbers, grids->d_neighbor_grid_numbers,
+        grids->d_neighbor_grids, grids->d_grid_atom_numbers,
+        grids->d_grid_neighbor_prefix, d_neighbor_grid_overflow,
+        d_neighbor_grid_ghost_overflow, d_update_error);
+    Launch_Device_Kernel(
+        Find_Neighbors_Gridly, grids->grid_numbers, 256,
+        (size_t)(max_atom_in_grid_numbers *
+                     (sizeof(VECTOR) + 2 * sizeof(int)) +
+                 (MAX_GRID_NEIGHBORS + 1) * sizeof(int)),
+        NULL, atom_local, local_atom_numbers, d_need_update,
+        grids->grid_numbers, grids->d_neighbor_grid_numbers,
+        grids->d_neighbor_grids, grids->d_grid_atom_crd, cell, rcell,
+        max_atom_in_grid_numbers, d_nl, grid_length * grid_length * 4.0f,
+        grids->d_grid_atom_numbers, grids->d_grid_atoms, max_neighbor_numbers,
+        d_neighbor_list_overflow, grids->d_grid_neighbor_prefix,
+        grids->d_grid_ghost_crd, max_ghost_in_grid_numbers,
+        grids->d_grid_ghost_numbers, grids->d_grid_ghosts,
+        d_neighbor_grid_overflow, d_neighbor_grid_ghost_overflow,
+        d_update_error);
+#else
     Launch_Device_Kernel(
         Find_Neighbors_Gridly, grids->grid_numbers,
         CONTROLLER::device_max_thread,
@@ -1112,6 +1200,7 @@ void NEIGHBOR_LIST::UPDATOR::Update(
         max_ghost_in_grid_numbers, grids->d_grid_ghost_numbers,
         grids->d_grid_ghosts, d_neighbor_grid_overflow,
         d_neighbor_grid_ghost_overflow, d_update_error);
+#endif
 
     if (local_atom_numbers > 0)
     {

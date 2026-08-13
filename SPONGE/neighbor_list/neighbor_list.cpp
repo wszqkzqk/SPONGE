@@ -4,8 +4,10 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <vector>
 
 #define MAX_GRID_NEIGHBORS 192
 
@@ -931,6 +933,665 @@ static __global__ void Find_Neighbors_Gridly(
     }
 }
 
+// ---- LJ cluster-pair tile 表构建（S2，设计文档 §1.3；暂无消费者）----
+
+// 单 block 扫描：为每格计算 local/ghost cluster 起始编号（独占前缀）与总数。
+// ghost 段统一编号接在 local 段之后。早退条件与 Find_Neighbors_Gridly 一致。
+static __global__ void Build_LJ_Cluster_Prefix(
+    const int* need, int grid_numbers, const int* grid_atom_numbers,
+    const int* grid_ghost_numbers, int* grid_cluster_base,
+    int* grid_ghost_cluster_base, int* cluster_numbers,
+    const int* neighbor_grid_overflow, const int* neighbor_grid_ghost_overflow,
+    const int* update_error)
+{
+    if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
+        neighbor_grid_ghost_overflow[0] != 0 ||
+        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        return;
+    extern __shared__ int sh_scan[];
+    __shared__ int sh_carry;
+    if (threadIdx.x == 0) sh_carry = 0;
+    __syncthreads();
+    for (int segment = 0; segment < 2; ++segment)
+    {
+        const int* counts = segment == 0 ? grid_atom_numbers : grid_ghost_numbers;
+        int* bases = segment == 0 ? grid_cluster_base : grid_ghost_cluster_base;
+        int segment_total = 0;
+        for (int base = 0; base < grid_numbers; base += blockDim.x)
+        {
+            const int g = base + threadIdx.x;
+            const int v = g < grid_numbers
+                              ? (counts[g] + LJ_TILE_CLUSTER_SIZE - 1) /
+                                    LJ_TILE_CLUSTER_SIZE
+                              : 0;
+            sh_scan[threadIdx.x] = v;
+            __syncthreads();
+            for (int offset = 1; offset < blockDim.x; offset <<= 1)
+            {
+                const int t =
+                    threadIdx.x >= offset ? sh_scan[threadIdx.x - offset] : 0;
+                __syncthreads();
+                sh_scan[threadIdx.x] += t;
+                __syncthreads();
+            }
+            if (g < grid_numbers)
+                bases[g] = sh_carry + sh_scan[threadIdx.x] - v;
+            __syncthreads();
+            if (threadIdx.x == 0) sh_carry += sh_scan[blockDim.x - 1];
+            __syncthreads();
+        }
+        segment_total = sh_carry;
+        if (threadIdx.x == 0)
+        {
+            cluster_numbers[segment] =
+                segment == 0 ? segment_total : segment_total - cluster_numbers[0];
+        }
+        __syncthreads();
+    }
+}
+
+// 把格桶顺序的原子按 8 个一组填进 cluster 表（local 段 + ghost 段），
+// 尾部 padding 写 -1，并写 ghost 标志。
+static __global__ void Fill_LJ_Cluster_Atoms(
+    const int* need, int grid_numbers, const int* grid_atom_numbers,
+    const int* grid_atoms, const int* grid_cluster_base,
+    int max_atom_in_grid, const int* grid_ghost_numbers, const int* grid_ghosts,
+    const int* grid_ghost_cluster_base, int max_ghost_in_grid,
+    int* cluster_atoms, int* cluster_flags, const int* neighbor_grid_overflow,
+    const int* neighbor_grid_ghost_overflow, const int* update_error)
+{
+    if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
+        neighbor_grid_ghost_overflow[0] != 0 ||
+        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        return;
+    SIMPLE_DEVICE_FOR(grid, grid_numbers)
+    {
+        const int count = grid_atom_numbers[grid];
+        const int base = grid_cluster_base[grid];
+        const int nc = (count + LJ_TILE_CLUSTER_SIZE - 1) / LJ_TILE_CLUSTER_SIZE;
+        const int* bucket = grid_atoms + (size_t)grid * max_atom_in_grid;
+        for (int k = 0; k < nc * LJ_TILE_CLUSTER_SIZE; ++k)
+        {
+            cluster_atoms[base * LJ_TILE_CLUSTER_SIZE + k] =
+                k < count ? bucket[k] : -1;
+        }
+        for (int c = 0; c < nc; ++c) cluster_flags[base + c] = 0;
+
+        const int ghost_count = grid_ghost_numbers[grid];
+        const int ghost_base = grid_ghost_cluster_base[grid];
+        const int gnc =
+            (ghost_count + LJ_TILE_CLUSTER_SIZE - 1) / LJ_TILE_CLUSTER_SIZE;
+        const int* ghost_bucket = grid_ghosts + (size_t)grid * max_ghost_in_grid;
+        for (int k = 0; k < gnc * LJ_TILE_CLUSTER_SIZE; ++k)
+        {
+            cluster_atoms[ghost_base * LJ_TILE_CLUSTER_SIZE + k] =
+                k < ghost_count ? ghost_bucket[k] : -1;
+        }
+        for (int c = 0; c < gnc; ++c) cluster_flags[ghost_base + c] = 1;
+    }
+}
+
+// 排除表查询：调用方预载 (list_start, n, min, max)，先 min/max 剪枝再
+// 二分。语义与 Delete_Excluded_Atoms_Serial_In_Neighbor_List 的单向
+// 检查逐语句对应（排除表每原子段升序）。
+static __device__ __forceinline__ bool LJ_Tile_Excluded_Range_Contains(
+    LJ_EXCL_RANGE range, int global_other, const int* excluded_list)
+{
+    if (range.n <= 0 || global_other < range.min_atom ||
+        global_other > range.max_atom)
+        return false;
+    int lo = range.list_start;
+    int hi = range.list_start + range.n;
+    while (lo < hi)
+    {
+        const int mid = (lo + hi) >> 1;
+        if (excluded_list[mid] < global_other)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < range.list_start + range.n &&
+           excluded_list[lo] == global_other;
+}
+
+// 从排除表数组预载一个 global 原子的排除范围（无排除时返回 n=0）
+static __device__ __forceinline__ LJ_EXCL_RANGE LJ_Tile_Load_Excluded_Range(
+    int global_atom, const int* excluded_list_start, const int* excluded_list,
+    const int* excluded_numbers)
+{
+    LJ_EXCL_RANGE range = {0, 0, 0, -1};
+    if (excluded_numbers == NULL || excluded_list == NULL) return range;
+    const int n = excluded_numbers[global_atom];
+    if (n > 0)
+    {
+        const int start = excluded_list_start[global_atom];
+        range.list_start = start;
+        range.n = n;
+        range.min_atom = excluded_list[start];
+        range.max_atom = excluded_list[start + n - 1];
+    }
+    return range;
+}
+
+// 一次性预计算全部 global 原子的排除范围缓存（排除表运行期静态）
+static __global__ void Build_LJ_Excluded_Range(
+    int atom_numbers, const int* excluded_list_start,
+    const int* excluded_list, const int* excluded_numbers,
+    LJ_EXCL_RANGE* excl_range)
+{
+    SIMPLE_DEVICE_FOR(g, atom_numbers)
+    {
+        excl_range[g] = LJ_Tile_Load_Excluded_Range(g, excluded_list_start,
+                                                    excluded_list,
+                                                    excluded_numbers);
+    }
+}
+
+// 对格对 (grid_i, grid_j) 展开 8x8 tile：
+// - local×local 段只保留 grid_j >= grid_i（格对去重）；同格内 cluster 对
+//   只保留 ci <= cj；自对 tile 靠 global_j > global_i 出下半三角。
+//   注意 ci != cj 时无序对 {x,y} 在整个 tile 表中只出现一次（格对去重
+//   保证），因此不再需要 pair 级方向判据——与半表"每对只出现一次"等价。
+// - local×ghost 段不判方向、不做格对去重（ghost 只在它所在的格桶里出现
+//   一次，天然无重复），与 Find_Neighbors_Gridly ghost 段一致。
+// - 排除剔除：local×local 查 global 较小者（半表行主）的排除表；
+//   local×ghost 正向查 i 的排除表、反向查 j 的排除表（镜像逻辑）。
+//   排除检查按需做——只对距离存活的 pair 触发 gather（min/max 剪枝 +
+//   罕发二分），不占用预载与 j-cluster 载入的关键路径。
+// 任务 = (邻居格, j-cluster)，按 shared 前缀和展平后由 warp 认领，下一
+// 任务的 j 数据软件预取（与当前任务评估重叠）；warp 内 lane 分摊 64 个
+// pair（lane 的 j_local = lane&7 恒定，j 端数据 lanes 0-7 载入后 shuffle
+// 广播），两轮 32-lane ballot 聚成 64 位掩码，非零才认领槽位写出
+//（块级 shared 缓冲聚合，每 grid_i 一次全局 atomicAdd）；溢出走
+// Record_Required_Capacity。
+// 块级 tile 发射缓冲容量（1024×16B=16KB shared；典型 grid_i 产出
+// ~300-500 tile，溢出时回退到逐 tile 直接全局认领，正确性不受影响）
+#define LJ_TILE_BLOCK_BUFFER 1024
+
+template <int ABLATE>
+static __global__ void Build_LJ_Tile_List(
+    const int* need, int grid_numbers, const int* grid_neighbor_numbers,
+    const int* grid_neighbors, const VECTOR* grid_crd, LTMatrix3 cell,
+    LTMatrix3 rcell, int max_atom_in_grid, const int* grid_atom_numbers,
+    const int* grid_atoms, const int* grid_cluster_base,
+    const VECTOR* grid_ghost_crd, int max_ghost_in_grid,
+    const int* grid_ghost_numbers, const int* grid_ghosts,
+    const int* grid_ghost_cluster_base, const int* atom_local,
+    float cutoff_skin_square, const int* excluded_list,
+    const LJ_EXCL_RANGE* excl_range, LJ_TILE* tiles, int tile_capacity,
+    int* tile_count, int* tile_overflow,
+    const int* neighbor_grid_overflow, const int* neighbor_grid_ghost_overflow,
+    const int* update_error)
+{
+    if (need[0] == 0 || neighbor_grid_overflow[0] != 0 ||
+        neighbor_grid_ghost_overflow[0] != 0 ||
+        update_error[0] != NEIGHBOR_LIST::UPDATE_OK)
+        return;
+    extern __shared__ unsigned char shared_mem[];
+    float4* sh_crd = reinterpret_cast<float4*>(shared_mem);
+    // i 端排除范围 (list_start, n, min, max)，格级预载避免逐对依赖 gather
+    LJ_EXCL_RANGE* sh_excl =
+        reinterpret_cast<LJ_EXCL_RANGE*>(sh_crd + max_atom_in_grid);
+    int* sh_globals = reinterpret_cast<int*>(sh_excl + max_atom_in_grid);
+    // 邻居格任务数（j-cluster 对数）扫描缓冲，inclusive 前缀和
+    int* sh_scan = reinterpret_cast<int*>(sh_globals + max_atom_in_grid);
+    // 块级 tile 发射缓冲：块内先攒进 shared（shared 原子加），每个 grid_i
+    // 结束只做一次全局 atomicAdd 认领整段槽位再协作写出——逐 tile 全局
+    // 原子加在同一计数器上串行，实测是构建 kernel 的主要开销
+    LJ_TILE* sh_tiles =
+        reinterpret_cast<LJ_TILE*>(sh_scan + blockDim.x);
+    __shared__ int sh_tile_fill;
+    __shared__ int sh_tile_base;
+
+    const int lane = threadIdx.x & (warpSize - 1);
+    int warps_per_block = blockDim.x / warpSize;
+    if (warps_per_block == 0)
+    {
+        warps_per_block = 1;
+    }
+    const int warp_id = threadIdx.x / warpSize;
+
+    device_mask_t warp_mask = FULL_MASK;
+    if (blockDim.x < warpSize)
+    {
+        warp_mask = deviceLowerLaneMask(blockDim.x);
+    }
+
+    for (int grid_i = blockIdx.x; grid_i < grid_numbers; grid_i += gridDim.x)
+    {
+        const int count_i = grid_atom_numbers[grid_i];
+        if (count_i == 0)
+        {
+            __syncthreads();
+            continue;
+        }
+        if (threadIdx.x == 0) sh_tile_fill = 0;
+        // 预载 i 端 global id、坐标（float4 对齐，单发 16B shared 读）与
+        // 排除范围
+        for (int idx = threadIdx.x; idx < count_i; idx += blockDim.x)
+        {
+            const int atom_i =
+                grid_atoms[(size_t)grid_i * max_atom_in_grid + idx];
+            const int global_i = atom_local[atom_i];
+            sh_globals[idx] = global_i;
+            const VECTOR c = grid_crd[(size_t)grid_i * max_atom_in_grid + idx];
+            sh_crd[idx] = make_float4(c.x, c.y, c.z, 0.0f);
+            sh_excl[idx] =
+                ABLATE & 1 ? LJ_EXCL_RANGE{0, 0, 0, -1} : excl_range[global_i];
+        }
+
+        const int neighbor_count = grid_neighbor_numbers[grid_i];
+        const int* neighbor_row =
+            grid_neighbors + (size_t)grid_i * MAX_GRID_NEIGHBORS;
+        const int nci =
+            (count_i + LJ_TILE_CLUSTER_SIZE - 1) / LJ_TILE_CLUSTER_SIZE;
+        const int base_ci = grid_cluster_base[grid_i];
+
+        // local / ghost 两段合并成一次扫描：任务 = (邻居格, j-cluster 对)，
+        // 每个任务覆盖相邻两个 j-cluster，i 端 shared 读与任务管理开销
+        // 减半，且每个 warp 同时评估 4 条独立距离链（2 cluster × 2 半区）
+        // 提高 ILP。local 段只收 grid_j >= grid_i（格对去重）；ghost 段
+        // 全收（ghost 只在它所在的格桶里出现一次，天然无重复）
+        {
+            int v = 0;
+            if (threadIdx.x < (unsigned int)neighbor_count)
+            {
+                const int grid_j = neighbor_row[threadIdx.x];
+                if (grid_j >= grid_i)
+                    v += ((grid_atom_numbers[grid_j] +
+                           LJ_TILE_CLUSTER_SIZE - 1) /
+                              LJ_TILE_CLUSTER_SIZE +
+                          1) >>
+                         1;
+                v += ((grid_ghost_numbers[grid_j] + LJ_TILE_CLUSTER_SIZE - 1) /
+                          LJ_TILE_CLUSTER_SIZE +
+                      1) >>
+                     1;
+            }
+            sh_scan[threadIdx.x] = v;
+        }
+        __syncthreads();
+        for (int offset = 1; offset < blockDim.x; offset <<= 1)
+        {
+            const int t = threadIdx.x >= (unsigned int)offset
+                              ? sh_scan[threadIdx.x - offset]
+                              : 0;
+            __syncthreads();
+            sh_scan[threadIdx.x] += t;
+            __syncthreads();
+        }
+        const int total_tasks =
+            neighbor_count > 0 ? sh_scan[neighbor_count - 1] : 0;
+
+            // 任务循环（带下一任务 j-cluster 数据的软件预取：进入迭代时
+            // 当前任务的 j 数据已在寄存器，评估当前任务前先发射下一任务的
+            // 载入，隐藏依赖 gather 的延迟）
+            auto load_task = [&](int t, int& out_grid_j, int& out_segment,
+                                 int& out_cj, int& out_base_cj, int& out_rem_a,
+                                 int& out_rem_b, int& out_j0_global,
+                                 float& out_j0x, float& out_j0y,
+                                 float& out_j0z, LJ_EXCL_RANGE& out_j0_range,
+                                 int& out_j1_global, float& out_j1x,
+                                 float& out_j1y, float& out_j1z,
+                                 LJ_EXCL_RANGE& out_j1_range)
+            {
+                // 二分：首个 sh_scan[jj] > t 的邻居格
+                int blo = 0;
+                int bhi = neighbor_count - 1;
+                while (blo < bhi)
+                {
+                    const int mid = (blo + bhi) >> 1;
+                    if (sh_scan[mid] <= t)
+                        blo = mid + 1;
+                    else
+                        bhi = mid;
+                }
+                out_grid_j = neighbor_row[blo];
+                const int t_in = t - (blo == 0 ? 0 : sh_scan[blo - 1]);
+                const int ncj_local =
+                    (grid_atom_numbers[out_grid_j] + LJ_TILE_CLUSTER_SIZE - 1) /
+                    LJ_TILE_CLUSTER_SIZE;
+                const int local_tasks =
+                    out_grid_j >= grid_i ? (ncj_local + 1) >> 1 : 0;
+                const int* seg_atoms;
+                const VECTOR* seg_crd;
+                int seg_max, seg_count;
+                if (t_in < local_tasks)
+                {
+                    out_segment = 0;
+                    out_cj = t_in << 1;
+                    seg_atoms = grid_atoms;
+                    seg_crd = grid_crd;
+                    seg_max = max_atom_in_grid;
+                    seg_count = grid_atom_numbers[out_grid_j];
+                    out_base_cj = grid_cluster_base[out_grid_j];
+                }
+                else
+                {
+                    out_segment = 1;
+                    out_cj = (t_in - local_tasks) << 1;
+                    seg_atoms = grid_ghosts;
+                    seg_crd = grid_ghost_crd;
+                    seg_max = max_ghost_in_grid;
+                    seg_count = grid_ghost_numbers[out_grid_j];
+                    out_base_cj = grid_ghost_cluster_base[out_grid_j];
+                }
+                out_rem_a = seg_count - (out_cj << 3);
+                out_rem_b = out_rem_a - LJ_TILE_CLUSTER_SIZE;
+                out_j0_global = -1;
+                out_j1_global = -1;
+                out_j0x = 0.0f;
+                out_j0y = 0.0f;
+                out_j0z = 0.0f;
+                out_j1x = 0.0f;
+                out_j1y = 0.0f;
+                out_j1z = 0.0f;
+                out_j0_range = LJ_EXCL_RANGE{0, 0, 0, -1};
+                out_j1_range = LJ_EXCL_RANGE{0, 0, 0, -1};
+                if (!(ABLATE & 16) && lane < LJ_TILE_CLUSTER_SIZE)
+                {
+                    const size_t slot = (size_t)out_grid_j * seg_max +
+                                        (size_t)(out_cj << 3) + lane;
+                    if (lane < out_rem_a)
+                    {
+                        out_j0_global = atom_local[seg_atoms[slot]];
+                        const VECTOR c = seg_crd[slot];
+                        out_j0x = c.x;
+                        out_j0y = c.y;
+                        out_j0z = c.z;
+                        if (!(ABLATE & 1))
+                            out_j0_range = excl_range[out_j0_global];
+                    }
+                    if (lane < out_rem_b)
+                    {
+                        out_j1_global =
+                            atom_local[seg_atoms[slot + LJ_TILE_CLUSTER_SIZE]];
+                        const VECTOR c = seg_crd[slot + LJ_TILE_CLUSTER_SIZE];
+                        out_j1x = c.x;
+                        out_j1y = c.y;
+                        out_j1z = c.z;
+                        if (!(ABLATE & 1))
+                            out_j1_range = excl_range[out_j1_global];
+                    }
+                }
+            };
+            for (int task = warp_id; !(ABLATE & 4) && task < total_tasks;
+                 task += warps_per_block)
+            {
+                int cur_grid_j = -1, cur_segment = 0, cur_cj = 0,
+                    cur_base_cj = 0, cur_rem_a = 0, cur_rem_b = 0;
+                int cur_j0_global = -1, cur_j1_global = -1;
+                float cur_j0x = 0.0f, cur_j0y = 0.0f, cur_j0z = 0.0f;
+                float cur_j1x = 0.0f, cur_j1y = 0.0f, cur_j1z = 0.0f;
+                LJ_EXCL_RANGE cur_j0_range = {0, 0, 0, -1};
+                LJ_EXCL_RANGE cur_j1_range = {0, 0, 0, -1};
+                load_task(task, cur_grid_j, cur_segment, cur_cj, cur_base_cj,
+                          cur_rem_a, cur_rem_b, cur_j0_global, cur_j0x,
+                          cur_j0y, cur_j0z, cur_j0_range, cur_j1_global,
+                          cur_j1x, cur_j1y, cur_j1z, cur_j1_range);
+
+                // lane 的 j_local = lane&7 在两个 j-cluster 间复用
+                const int jl = lane & (LJ_TILE_CLUSTER_SIZE - 1);
+                const int my_j0_global =
+                    deviceShfl(FULL_MASK, cur_j0_global, jl, 32);
+                const float my_j0x = deviceShfl(FULL_MASK, cur_j0x, jl, 32);
+                const float my_j0y = deviceShfl(FULL_MASK, cur_j0y, jl, 32);
+                const float my_j0z = deviceShfl(FULL_MASK, cur_j0z, jl, 32);
+                const int my_j1_global =
+                    deviceShfl(FULL_MASK, cur_j1_global, jl, 32);
+                const float my_j1x = deviceShfl(FULL_MASK, cur_j1x, jl, 32);
+                const float my_j1y = deviceShfl(FULL_MASK, cur_j1y, jl, 32);
+                const float my_j1z = deviceShfl(FULL_MASK, cur_j1z, jl, 32);
+                const LJ_EXCL_RANGE my_j0_range = {
+                    deviceShfl(FULL_MASK, cur_j0_range.list_start, jl, 32),
+                    deviceShfl(FULL_MASK, cur_j0_range.n, jl, 32),
+                    deviceShfl(FULL_MASK, cur_j0_range.min_atom, jl, 32),
+                    deviceShfl(FULL_MASK, cur_j0_range.max_atom, jl, 32)};
+                const LJ_EXCL_RANGE my_j1_range = {
+                    deviceShfl(FULL_MASK, cur_j1_range.list_start, jl, 32),
+                    deviceShfl(FULL_MASK, cur_j1_range.n, jl, 32),
+                    deviceShfl(FULL_MASK, cur_j1_range.min_atom, jl, 32),
+                    deviceShfl(FULL_MASK, cur_j1_range.max_atom, jl, 32)};
+                const int base_cj = cur_base_cj;
+                const bool jv_a = jl < cur_rem_a;
+                const bool jv_b = jl < cur_rem_b;
+
+                if (ABLATE & 8)
+                {
+                    // 消融：只跑任务管理 + j 载入；假使用防死代码消除
+                    if (lane == 0 && my_j0x == 1.0e30f &&
+                        my_j0_global == 0x7fffffff)
+                        tiles[0].mask = 0;
+                }
+                else
+                {
+                    // local 段同格去重：cluster A 要求 ci <= cj、cluster B
+                    //（cj+1）要求 ci <= cj+1；ci_end 取两者上界，A 越界在
+                    // 评估时清掉；自对 tile 靠 global 判据出下半三角。
+                    // ghost 段不判方向、不判大小
+                    const bool same_grid =
+                        cur_segment == 0 && cur_grid_j == grid_i;
+                    const int ci_end =
+                        same_grid ? min(cur_cj + 1, nci - 1) : nci - 1;
+                    for (int ci = 0; ci <= ci_end; ++ci)
+                    {
+                        const int rem_i = count_i - (ci << 3);
+                        const bool self_a = same_grid && ci == cur_cj;
+                        const bool self_b = same_grid && ci == cur_cj + 1;
+                        unsigned long long mask_a = 0, mask_b = 0;
+                        for (int half = 0; half < 2; ++half)
+                        {
+                            // bit = i_local*8 + j_local；i_local = lane>>3
+                            //（+4 第二轮），j_local = lane&7
+                            const int il = (lane >> 3) + (half << 2);
+                            const int ia = (ci << 3) + il;
+                            bool pass_a = false, pass_b = false;
+                            if (il < rem_i)
+                            {
+                                const float4 c4 = sh_crd[ia];
+                                const VECTOR crd_i = {c4.x, c4.y, c4.z};
+                                if (ABLATE & 2)
+                                {
+                                    pass_a = jv_a;
+                                    pass_b = jv_b;
+                                }
+                                else
+                                {
+                                    if (jv_a)
+                                    {
+                                        const VECTOR crd_j = {my_j0x, my_j0y,
+                                                              my_j0z};
+                                        VECTOR dr =
+                                            Get_Periodic_Displacement(
+                                                crd_i, crd_j, cell, rcell);
+                                        pass_a =
+                                            dr * dr < cutoff_skin_square;
+                                    }
+                                    if (jv_b)
+                                    {
+                                        const VECTOR crd_j = {my_j1x, my_j1y,
+                                                              my_j1z};
+                                        VECTOR dr =
+                                            Get_Periodic_Displacement(
+                                                crd_i, crd_j, cell, rcell);
+                                        pass_b =
+                                            dr * dr < cutoff_skin_square;
+                                    }
+                                }
+                                if (same_grid)
+                                {
+                                    if (ci > cur_cj)
+                                        pass_a = false;
+                                    else if (self_a && pass_a)
+                                        pass_a =
+                                            my_j0_global > sh_globals[ia];
+                                    if (self_b && pass_b)
+                                        pass_b =
+                                            my_j1_global > sh_globals[ia];
+                                }
+                                // 排除检查：i 端范围在格级预载（shared），
+                                // j 端范围随任务预取；逐对只做 min/max
+                                // 剪枝 + 罕发二分，无依赖 gather
+                                if (!(ABLATE & 1) && (pass_a || pass_b))
+                                {
+                                    const int global_i = sh_globals[ia];
+                                    if (cur_segment == 0)
+                                    {
+                                        // local×local：查 global 较小者
+                                        //（半表行主）的排除表
+                                        if (pass_a)
+                                        {
+                                            pass_a =
+                                                global_i < my_j0_global
+                                                    ? !LJ_Tile_Excluded_Range_Contains(
+                                                          sh_excl[ia],
+                                                          my_j0_global,
+                                                          excluded_list)
+                                                    : !LJ_Tile_Excluded_Range_Contains(
+                                                          my_j0_range,
+                                                          global_i,
+                                                          excluded_list);
+                                        }
+                                        if (pass_b)
+                                        {
+                                            pass_b =
+                                                global_i < my_j1_global
+                                                    ? !LJ_Tile_Excluded_Range_Contains(
+                                                          sh_excl[ia],
+                                                          my_j1_global,
+                                                          excluded_list)
+                                                    : !LJ_Tile_Excluded_Range_Contains(
+                                                          my_j1_range,
+                                                          global_i,
+                                                          excluded_list);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // local×ghost：正向查 i、反向查 j
+                                        if (pass_a)
+                                            pass_a =
+                                                !LJ_Tile_Excluded_Range_Contains(
+                                                    sh_excl[ia], my_j0_global,
+                                                    excluded_list) &&
+                                                !LJ_Tile_Excluded_Range_Contains(
+                                                    my_j0_range, global_i,
+                                                    excluded_list);
+                                        if (pass_b)
+                                            pass_b =
+                                                !LJ_Tile_Excluded_Range_Contains(
+                                                    sh_excl[ia], my_j1_global,
+                                                    excluded_list) &&
+                                                !LJ_Tile_Excluded_Range_Contains(
+                                                    my_j1_range, global_i,
+                                                    excluded_list);
+                                    }
+                                }
+                            }
+                            const unsigned int ballot_a =
+                                LaneGroup::And(LaneGroup::Ballot(pass_a),
+                                               LaneMask(warp_mask))
+                                    .bits;
+                            const unsigned int ballot_b =
+                                LaneGroup::And(LaneGroup::Ballot(pass_b),
+                                               LaneMask(warp_mask))
+                                    .bits;
+                            if (half == 0)
+                            {
+                                mask_a = ballot_a;
+                                mask_b = ballot_b;
+                            }
+                            else
+                            {
+                                mask_a |= (unsigned long long)ballot_a << 32;
+                                mask_b |= (unsigned long long)ballot_b << 32;
+                            }
+                        }
+                        if (mask_a != 0 && lane == 0)
+                        {
+                            const int pos = atomicAdd(&sh_tile_fill, 1);
+                            if (pos < LJ_TILE_BLOCK_BUFFER)
+                            {
+                                sh_tiles[pos].cluster_i = base_ci + ci;
+                                sh_tiles[pos].cluster_j = base_cj + cur_cj;
+                                sh_tiles[pos].mask = mask_a;
+                            }
+                            else
+                            {
+                                // 缓冲溢出（罕见）：回退逐 tile 直接全局认领
+                                const int slot = atomicAdd(tile_count, 1);
+                                if (slot < tile_capacity)
+                                {
+                                    tiles[slot].cluster_i = base_ci + ci;
+                                    tiles[slot].cluster_j = base_cj + cur_cj;
+                                    tiles[slot].mask = mask_a;
+                                }
+                                else
+                                {
+                                    Record_Required_Capacity(
+                                        tile_overflow,
+                                        Required_After_Reservation(slot, 1));
+                                }
+                            }
+                        }
+                        if (mask_b != 0 && lane == 0)
+                        {
+                            const int pos = atomicAdd(&sh_tile_fill, 1);
+                            if (pos < LJ_TILE_BLOCK_BUFFER)
+                            {
+                                sh_tiles[pos].cluster_i = base_ci + ci;
+                                sh_tiles[pos].cluster_j = base_cj + cur_cj + 1;
+                                sh_tiles[pos].mask = mask_b;
+                            }
+                            else
+                            {
+                                const int slot = atomicAdd(tile_count, 1);
+                                if (slot < tile_capacity)
+                                {
+                                    tiles[slot].cluster_i = base_ci + ci;
+                                    tiles[slot].cluster_j =
+                                        base_cj + cur_cj + 1;
+                                    tiles[slot].mask = mask_b;
+                                }
+                                else
+                                {
+                                    Record_Required_Capacity(
+                                        tile_overflow,
+                                        Required_After_Reservation(slot, 1));
+                                }
+                            }
+                        }
+                    }
+                }  // !(ABLATE & 8)
+            }
+            __syncthreads();  // 重写 sh_scan / 读 sh_tile_fill 前等所有 warp
+
+        // 冲刷块级缓冲：一次全局 atomicAdd 认领整段槽位，协作写出
+        const int buffered =
+            sh_tile_fill < LJ_TILE_BLOCK_BUFFER ? sh_tile_fill
+                                                : LJ_TILE_BLOCK_BUFFER;
+        if (buffered > 0)
+        {
+            if (threadIdx.x == 0)
+                sh_tile_base = atomicAdd(tile_count, buffered);
+            __syncthreads();
+            const int base = sh_tile_base;
+            for (int k = threadIdx.x; k < buffered; k += blockDim.x)
+            {
+                if (base + k < tile_capacity) tiles[base + k] = sh_tiles[k];
+            }
+            if (base + buffered > tile_capacity && threadIdx.x == 0)
+            {
+                Record_Required_Capacity(
+                    tile_overflow,
+                    Required_After_Reservation(base, buffered));
+            }
+        }
+
+        __syncthreads();
+    }
+}
+
 #else
 static __global__ void Find_Neighbors_Gridly(
     int* atom_local, int atom_numbers, const int* need, int grid_numbers,
@@ -1130,6 +1791,259 @@ static __global__ void Delete_Excluded_Atoms_Serial_In_Neighbor_List(
     }
 }
 
+#ifdef USE_GPU
+// S2 调试开关（诊断路径，默认关闭，对数值零影响）：
+// SPONGE_LJ_TILE_DEBUG=1 打印 tile 构建各阶段耗时与规模；
+// SPONGE_LJ_TILE_VALIDATE=1 在每次成功重建后把 tile 表展开的 (global_i,
+// global_j) 无序对集合与半表 d_nl 展开的对集合做逐对集合相等比较。
+static bool LJ_Tile_Debug_Enabled()
+{
+    static int enabled = -1;
+    if (enabled < 0)
+    {
+        const char* v = std::getenv("SPONGE_LJ_TILE_DEBUG");
+        enabled = v != NULL && v[0] != '\0' && v[0] != '0' ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static bool LJ_Tile_Validate_Enabled()
+{
+    static int enabled = -1;
+    if (enabled < 0)
+    {
+        const char* v = std::getenv("SPONGE_LJ_TILE_VALIDATE");
+        enabled = v != NULL && v[0] != '\0' && v[0] != '0' ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+// SPONGE_LJ_TILE_ABLATE：消融测时（仅诊断，结果不正确）：
+// bit0 跳过排除检查，bit1 跳过距离测试，bit2 跳过整个任务循环，
+// bit3 跳过 tile 评估（只跑任务管理+j 载入），bit4 跳过 j 数据载入
+static int LJ_Tile_Ablate_Mode()
+{
+    static int mode = -1;
+    if (mode < 0)
+    {
+        const char* v = std::getenv("SPONGE_LJ_TILE_ABLATE");
+        mode = v != NULL ? atoi(v) : 0;
+    }
+    return mode;
+}
+
+static __global__ void Count_Half_List_Pair_Total(const ATOM_GROUP* nl, int n,
+                                                  unsigned long long* total)
+{
+    SIMPLE_DEVICE_FOR(i, n)
+    {
+        atomicAdd(total, (unsigned long long)nl[i].atom_numbers);
+    }
+}
+
+static __global__ void Expand_Half_List_Pair_Keys(
+    const int* atom_local, const ATOM_GROUP* nl, int n,
+    unsigned long long* keys, unsigned long long* counter)
+{
+    SIMPLE_DEVICE_FOR(i, n)
+    {
+        const unsigned int global_i = (unsigned int)atom_local[i];
+        const int count = nl[i].atom_numbers;
+        const int* serial = nl[i].atom_serial;
+        for (int k = 0; k < count; ++k)
+        {
+            const unsigned int global_j = (unsigned int)atom_local[serial[k]];
+            const unsigned int lo = global_i < global_j ? global_i : global_j;
+            const unsigned int hi = global_i < global_j ? global_j : global_i;
+            keys[atomicAdd(counter, 1ULL)] =
+                ((unsigned long long)lo << 32) | hi;
+        }
+    }
+}
+
+static __global__ void Count_LJ_Tile_Pair_Total(const LJ_TILE* tiles, int n,
+                                                unsigned long long* total)
+{
+    SIMPLE_DEVICE_FOR(t, n)
+    {
+        atomicAdd(total, (unsigned long long)__popcll(tiles[t].mask));
+    }
+}
+
+static __global__ void Expand_LJ_Tile_Pair_Keys(
+    const LJ_TILE* tiles, int n, const int* cluster_atoms,
+    const int* atom_local, unsigned long long* keys,
+    unsigned long long* counter, int* bad_padding)
+{
+    SIMPLE_DEVICE_FOR(t, n)
+    {
+        const LJ_TILE tile = tiles[t];
+        int atoms_i[LJ_TILE_CLUSTER_SIZE], atoms_j[LJ_TILE_CLUSTER_SIZE];
+        for (int k = 0; k < LJ_TILE_CLUSTER_SIZE; ++k)
+        {
+            atoms_i[k] = cluster_atoms[tile.cluster_i * LJ_TILE_CLUSTER_SIZE + k];
+            atoms_j[k] = cluster_atoms[tile.cluster_j * LJ_TILE_CLUSTER_SIZE + k];
+        }
+        unsigned long long m = tile.mask;
+        while (m != 0)
+        {
+            const int b = __ffsll(m) - 1;
+            m &= m - 1;
+            const int atom_i = atoms_i[b >> 3];
+            const int atom_j = atoms_j[b & 7];
+            if (atom_i < 0 || atom_j < 0)
+            {
+                // 掩码引用了 padding 位：构建 bug，计入错误
+                atomicAdd(bad_padding, 1);
+                continue;
+            }
+            const unsigned int global_i = (unsigned int)atom_local[atom_i];
+            const unsigned int global_j = (unsigned int)atom_local[atom_j];
+            const unsigned int lo = global_i < global_j ? global_i : global_j;
+            const unsigned int hi = global_i < global_j ? global_j : global_i;
+            keys[atomicAdd(counter, 1ULL)] =
+                ((unsigned long long)lo << 32) | hi;
+        }
+    }
+}
+
+// tile 展开对集 vs 半表展开对集的逐对集合相等校验（诊断，仅
+// SPONGE_LJ_TILE_VALIDATE=1 时触发；主机端排序后比对）。
+static void Validate_LJ_Tile_Pair_Set(NEIGHBOR_LIST* list, int* atom_local,
+                                      int local_atom_numbers)
+{
+    unsigned long long* d_total = NULL;
+    unsigned long long* d_counter = NULL;
+    int* d_bad_padding = NULL;
+    unsigned long long* d_keys_half = NULL;
+    unsigned long long* d_keys_tile = NULL;
+    unsigned long long h_half_total = 0, h_tile_total = 0;
+    int h_bad_padding = 0;
+    const int threads = CONTROLLER::device_max_thread;
+    if (!Device_Malloc_Safely((void**)&d_total, sizeof(unsigned long long)) ||
+        !Device_Malloc_Safely((void**)&d_counter, sizeof(unsigned long long)) ||
+        !Device_Malloc_Safely((void**)&d_bad_padding, sizeof(int)))
+    {
+        fprintf(stderr, "[lj-tile-validate] device alloc failed, skipped\n");
+        goto cleanup;
+    }
+
+    // 第一段：半表展开
+    deviceMemset(d_total, 0, sizeof(unsigned long long));
+    Launch_Device_Kernel(Count_Half_List_Pair_Total,
+                         (local_atom_numbers + threads - 1) / threads, threads,
+                         0, NULL, list->d_nl, local_atom_numbers, d_total);
+    deviceMemcpy(&h_half_total, d_total, sizeof(unsigned long long),
+                 deviceMemcpyDeviceToHost);
+    if (h_half_total > 0 &&
+        !Device_Malloc_Safely((void**)&d_keys_half,
+                              h_half_total * sizeof(unsigned long long)))
+    {
+        fprintf(stderr, "[lj-tile-validate] half key alloc failed\n");
+        goto cleanup;
+    }
+    deviceMemset(d_counter, 0, sizeof(unsigned long long));
+    Launch_Device_Kernel(Expand_Half_List_Pair_Keys,
+                         (local_atom_numbers + threads - 1) / threads, threads,
+                         0, NULL, atom_local, list->d_nl, local_atom_numbers,
+                         d_keys_half, d_counter);
+
+    // 第二段：tile 表展开
+    deviceMemset(d_total, 0, sizeof(unsigned long long));
+    Launch_Device_Kernel(Count_LJ_Tile_Pair_Total,
+                         (list->h_lj_tile_numbers + threads - 1) / threads,
+                         threads, 0, NULL, list->d_lj_tiles,
+                         list->h_lj_tile_numbers, d_total);
+    deviceMemcpy(&h_tile_total, d_total, sizeof(unsigned long long),
+                 deviceMemcpyDeviceToHost);
+    if (h_tile_total > 0 &&
+        !Device_Malloc_Safely((void**)&d_keys_tile,
+                              h_tile_total * sizeof(unsigned long long)))
+    {
+        fprintf(stderr, "[lj-tile-validate] tile key alloc failed\n");
+        goto cleanup;
+    }
+    deviceMemset(d_counter, 0, sizeof(unsigned long long));
+    deviceMemset(d_bad_padding, 0, sizeof(int));
+    Launch_Device_Kernel(Expand_LJ_Tile_Pair_Keys,
+                         (list->h_lj_tile_numbers + threads - 1) / threads,
+                         threads, 0, NULL, list->d_lj_tiles,
+                         list->h_lj_tile_numbers, list->d_lj_cluster_atoms,
+                         atom_local, d_keys_tile, d_counter, d_bad_padding);
+    deviceMemcpy(&h_bad_padding, d_bad_padding, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+
+    {
+        std::vector<unsigned long long> h_half(h_half_total),
+            h_tile(h_tile_total);
+        if (h_half_total > 0)
+            deviceMemcpy(h_half.data(), d_keys_half,
+                         h_half_total * sizeof(unsigned long long),
+                         deviceMemcpyDeviceToHost);
+        if (h_tile_total > 0)
+            deviceMemcpy(h_tile.data(), d_keys_tile,
+                         h_tile_total * sizeof(unsigned long long),
+                         deviceMemcpyDeviceToHost);
+        std::sort(h_half.begin(), h_half.end());
+        std::sort(h_tile.begin(), h_tile.end());
+
+        size_t only_half = 0, only_tile = 0, common = 0;
+        size_t a = 0, b = 0;
+        while (a < h_half.size() || b < h_tile.size())
+        {
+            if (a < h_half.size() &&
+                (b == h_tile.size() || h_half[a] < h_tile[b]))
+            {
+                if (only_half < 5)
+                    fprintf(stderr,
+                            "[lj-tile-validate] only in half-list: "
+                            "(%u, %u)\n",
+                            (unsigned int)(h_half[a] >> 32),
+                            (unsigned int)(h_half[a] & 0xffffffffu));
+                ++only_half;
+                ++a;
+            }
+            else if (b < h_tile.size() &&
+                     (a == h_half.size() || h_tile[b] < h_half[a]))
+            {
+                if (only_tile < 5)
+                    fprintf(stderr,
+                            "[lj-tile-validate] only in tile-list: "
+                            "(%u, %u)\n",
+                            (unsigned int)(h_tile[b] >> 32),
+                            (unsigned int)(h_tile[b] & 0xffffffffu));
+                ++only_tile;
+                ++b;
+            }
+            else
+            {
+                ++common;
+                ++a;
+                ++b;
+            }
+        }
+        fprintf(stderr,
+                "[lj-tile-validate] tiles=%d, half-list pairs=%llu, "
+                "tile pairs=%llu, common=%zu, only_half=%zu, only_tile=%zu, "
+                "bad_padding=%d\n",
+                list->h_lj_tile_numbers, h_half_total, h_tile_total, common,
+                only_half, only_tile, h_bad_padding);
+        if (only_half == 0 && only_tile == 0 && h_bad_padding == 0)
+            fprintf(stderr, "[lj-tile-validate] PAIR SETS EQUAL\n");
+        else
+            fprintf(stderr, "[lj-tile-validate] PAIR SETS DIFFER\n");
+    }
+
+cleanup:
+    if (d_total != NULL) Free_Single_Device_Pointer((void**)&d_total);
+    if (d_counter != NULL) Free_Single_Device_Pointer((void**)&d_counter);
+    if (d_bad_padding != NULL)
+        Free_Single_Device_Pointer((void**)&d_bad_padding);
+    if (d_keys_half != NULL) Free_Single_Device_Pointer((void**)&d_keys_half);
+    if (d_keys_tile != NULL) Free_Single_Device_Pointer((void**)&d_keys_tile);
+}
+#endif  // USE_GPU
+
 void NEIGHBOR_LIST::UPDATOR::Update(
     int* atom_local, int local_atom_numbers, int ghost_numbers, int need_copy,
     VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell, NEIGHBOR_LIST::GRIDS* grids,
@@ -1137,7 +2051,7 @@ void NEIGHBOR_LIST::UPDATOR::Update(
     int max_neighbor_numbers, float grid_length, int* d_neighbor_grid_overflow,
     int* d_neighbor_grid_ghost_overflow, int* d_neighbor_list_overflow,
     int* d_update_error, ATOM_GROUP* d_nl, int* excluded_list_start,
-    int* excluded_list, int* excluded_numbers)
+    int* excluded_list, int* excluded_numbers, NEIGHBOR_LIST* owner)
 {
     int total_atom_numbers = local_atom_numbers + ghost_numbers;
     if (total_atom_numbers <= 0) return;
@@ -1186,6 +2100,102 @@ void NEIGHBOR_LIST::UPDATOR::Update(
         grids->d_grid_ghost_numbers, grids->d_grid_ghosts,
         d_neighbor_grid_overflow, d_neighbor_grid_ghost_overflow,
         d_update_error);
+
+    // S2：cluster-pair tile 表构建（暂无消费者，与半表并存）。
+    // owner 为空（不应发生）或 tile 表未分配（CPU 路径）时跳过。
+    if (owner != NULL && owner->d_lj_tiles != NULL)
+    {
+        // 排除范围缓存：运行期静态，首次重建时预计算（排除表为 NULL 时
+        // 得到全零范围，kernel 无需再判空）
+        if (!owner->lj_excl_range_built)
+        {
+            Launch_Device_Kernel(
+                Build_LJ_Excluded_Range,
+                (owner->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, owner->atom_numbers,
+                excluded_list_start, excluded_list, excluded_numbers,
+                owner->d_lj_excl_range);
+            owner->lj_excl_range_built = 1;
+        }
+        const bool tile_debug = LJ_Tile_Debug_Enabled();
+        deviceEvent_t tile_events[4] = {nullptr, nullptr, nullptr, nullptr};
+        if (tile_debug)
+        {
+            for (int e = 0; e < 4; ++e) deviceEventCreate(&tile_events[e]);
+            deviceEventRecord(tile_events[0], 0);
+        }
+        Launch_Device_Kernel(
+            Build_LJ_Cluster_Prefix, 1, CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread * sizeof(int), NULL, d_need_update,
+            grids->grid_numbers, grids->d_grid_atom_numbers,
+            grids->d_grid_ghost_numbers, owner->d_grid_cluster_base,
+            owner->d_grid_ghost_cluster_base, owner->d_lj_cluster_numbers,
+            d_neighbor_grid_overflow, d_neighbor_grid_ghost_overflow,
+            d_update_error);
+        if (tile_debug) deviceEventRecord(tile_events[1], 0);
+        Launch_Device_Kernel(
+            Fill_LJ_Cluster_Atoms,
+            (grids->grid_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, d_need_update,
+            grids->grid_numbers, grids->d_grid_atom_numbers,
+            grids->d_grid_atoms, owner->d_grid_cluster_base,
+            max_atom_in_grid_numbers, grids->d_grid_ghost_numbers,
+            grids->d_grid_ghosts, owner->d_grid_ghost_cluster_base,
+            max_ghost_in_grid_numbers, owner->d_lj_cluster_atoms,
+            owner->d_lj_cluster_flags, d_neighbor_grid_overflow,
+            d_neighbor_grid_ghost_overflow, d_update_error);
+        if (tile_debug) deviceEventRecord(tile_events[2], 0);
+// 消融测时模板分发（仅诊断；生产路径 ABLATE=0，分支编译期消除）
+#define SPONGE_LAUNCH_LJ_TILE_LIST(ABLATE_MODE)                             \
+    Launch_Device_Kernel(                                                   \
+        Build_LJ_Tile_List<ABLATE_MODE>, grids->grid_numbers, 256,          \
+        (size_t)(max_atom_in_grid_numbers *                                 \
+                     (sizeof(float4) + sizeof(LJ_EXCL_RANGE) + sizeof(int)) +        \
+                 256 * sizeof(int) + LJ_TILE_BLOCK_BUFFER * sizeof(LJ_TILE)), \
+        NULL, d_need_update, grids->grid_numbers,                           \
+        grids->d_neighbor_grid_numbers, grids->d_neighbor_grids,            \
+        grids->d_grid_atom_crd, cell, rcell, max_atom_in_grid_numbers,      \
+        grids->d_grid_atom_numbers, grids->d_grid_atoms,                    \
+        owner->d_grid_cluster_base, grids->d_grid_ghost_crd,                \
+        max_ghost_in_grid_numbers, grids->d_grid_ghost_numbers,             \
+        grids->d_grid_ghosts, owner->d_grid_ghost_cluster_base, atom_local, \
+        grid_length * grid_length * 4.0f, excluded_list,                  \
+        owner->d_lj_excl_range, owner->d_lj_tiles,                        \
+        owner->lj_tile_capacity, owner->d_lj_tile_count,                    \
+        owner->d_neighbor_tile_overflow, d_neighbor_grid_overflow,          \
+        d_neighbor_grid_ghost_overflow, d_update_error)
+        switch (LJ_Tile_Ablate_Mode())
+        {
+            case 1: SPONGE_LAUNCH_LJ_TILE_LIST(1); break;
+            case 2: SPONGE_LAUNCH_LJ_TILE_LIST(2); break;
+            case 3: SPONGE_LAUNCH_LJ_TILE_LIST(3); break;
+            case 4: SPONGE_LAUNCH_LJ_TILE_LIST(4); break;
+            case 8: SPONGE_LAUNCH_LJ_TILE_LIST(8); break;
+            case 24: SPONGE_LAUNCH_LJ_TILE_LIST(24); break;
+            default: SPONGE_LAUNCH_LJ_TILE_LIST(0); break;
+        }
+#undef SPONGE_LAUNCH_LJ_TILE_LIST
+        if (tile_debug)
+        {
+            deviceEventRecord(tile_events[3], 0);
+            deviceEventSynchronize(tile_events[3]);
+            float ms[3] = {0, 0, 0};
+            for (int e = 0; e < 3; ++e)
+                deviceEventElapsedTime(&ms[e], tile_events[e],
+                                       tile_events[e + 1]);
+            int h_clusters[2] = {0, 0};
+            deviceMemcpy(h_clusters, owner->d_lj_cluster_numbers,
+                         sizeof(h_clusters), deviceMemcpyDeviceToHost);
+            fprintf(stderr,
+                    "[lj-tile] rebuild: cluster_prefix=%.3f ms, "
+                    "cluster_fill=%.3f ms, tile_build=%.3f ms, "
+                    "clusters=%d+%d\n",
+                    ms[0], ms[1], ms[2], h_clusters[0], h_clusters[1]);
+            for (int e = 0; e < 4; ++e) deviceEventDestroy(tile_events[e]);
+        }
+    }
 #else
     Launch_Device_Kernel(
         Find_Neighbors_Gridly, grids->grid_numbers,
@@ -1376,6 +2386,73 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
         return;
     }
 
+#ifdef USE_GPU
+    // S2：LJ cluster-pair tile 表存储（暂无消费者）。cluster 槽数上界由
+    // 格数 × 每格容量决定，构建时不会溢出；tile 表容量按原子数预估，
+    // 不够用 Record_Required_Capacity + 溢出恢复扩容重建兜底。
+    {
+        const int clusters_per_grid =
+            (max_atom_in_grid_numbers + LJ_TILE_CLUSTER_SIZE - 1) /
+                LJ_TILE_CLUSTER_SIZE +
+            (max_ghost_in_grid_numbers + LJ_TILE_CLUSTER_SIZE - 1) /
+                LJ_TILE_CLUSTER_SIZE;
+        size_t cluster_slots = 0, cluster_atom_slots = 0, tile_slots = 0;
+        size_t base_bytes = 0, cluster_atom_bytes = 0, flag_bytes = 0;
+        size_t tile_bytes = 0;
+        // 初始容量按实测 ~17 tile/原子（skin=4.0, 55.6 万原子 ~940 万
+        // tile）估到 20 tile/原子，溢出恢复兜底
+        int64_t default_tiles = static_cast<int64_t>(atom_numbers) * 20;
+        if (default_tiles > std::numeric_limits<int>::max())
+            default_tiles = std::numeric_limits<int>::max();
+        lj_tile_capacity = lj_tile_capacity_hint > default_tiles
+                               ? lj_tile_capacity_hint
+                               : static_cast<int>(default_tiles);
+        if (!Checked_Product((size_t)grids.grid_numbers,
+                             (size_t)clusters_per_grid, &cluster_slots) ||
+            cluster_slots > (size_t)std::numeric_limits<int>::max() ||
+            !Checked_Product(cluster_slots, (size_t)LJ_TILE_CLUSTER_SIZE,
+                             &cluster_atom_slots) ||
+            !Checked_Bytes((size_t)grids.grid_numbers, sizeof(int),
+                           &base_bytes) ||
+            !Checked_Bytes(cluster_atom_slots, sizeof(int),
+                           &cluster_atom_bytes) ||
+            !Checked_Bytes(cluster_slots, sizeof(int), &flag_bytes) ||
+            !Checked_Bytes((size_t)lj_tile_capacity, sizeof(LJ_TILE),
+                           &tile_bytes))
+        {
+            Clear();
+            controller->Throw_SPONGE_Error(
+                spongeErrorOverflow, "NEIGHBOR_LIST::Initial",
+                "Reason:\n\tLJ tile-list allocation size overflow\n");
+            return;
+        }
+        lj_cluster_capacity = static_cast<int>(cluster_slots);
+        if (!Device_Malloc_Safely((void**)&d_grid_cluster_base, base_bytes) ||
+            !Device_Malloc_Safely((void**)&d_grid_ghost_cluster_base,
+                                  base_bytes) ||
+            !Device_Malloc_Safely((void**)&d_lj_cluster_numbers,
+                                  2 * sizeof(int)) ||
+            !Device_Malloc_Safely((void**)&d_lj_cluster_atoms,
+                                  cluster_atom_bytes) ||
+            !Device_Malloc_Safely((void**)&d_lj_cluster_flags, flag_bytes) ||
+            !Device_Malloc_Safely((void**)&d_lj_excl_range,
+                                  (size_t)atom_numbers * sizeof(LJ_EXCL_RANGE)) ||
+            !Device_Malloc_Safely((void**)&d_lj_tiles, tile_bytes))
+        {
+            Clear();
+            controller->Throw_SPONGE_Error(spongeErrorMallocFailed,
+                                           "NEIGHBOR_LIST::Initial");
+            return;
+        }
+        d_neighbor_tile_overflow = d_update_status + UPDATE_STATUS_TILE_OVERFLOW;
+        d_lj_tile_count = d_update_status + UPDATE_STATUS_TILE_COUNT;
+        controller->printf(
+            "    LJ tile list: cluster capacity %d, tile capacity %d "
+            "(%zu MB)\n",
+            lj_cluster_capacity, lj_tile_capacity, tile_bytes >> 20);
+    }
+#endif
+
     if (grids.Nx <= 2 || grids.Ny <= 2 || grids.Nz <= 2)
     {
         controller->Throw_SPONGE_Error(spongeErrorMallocFailed,
@@ -1479,6 +2556,7 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
     h_neighbor_grid_overflow = 0;
     h_neighbor_grid_ghost_overflow = 0;
     h_neighbor_list_overflow = 0;
+    h_neighbor_tile_overflow = 0;
     last_update_error = UPDATE_OK;
     last_error_atom = -1;
     if (full_neighbor_list.is_initialized)
@@ -1525,7 +2603,8 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
                        max_neighbor_numbers, 0.5f * (cutoff + skin),
                        d_neighbor_grid_overflow, d_neighbor_grid_ghost_overflow,
                        d_neighbor_list_overflow, d_update_error, this->d_nl,
-                       excluded_list_start, excluded_list, excluded_numbers);
+                       excluded_list_start, excluded_list, excluded_numbers,
+                       this);
         // 阻塞式取回全部构建状态
         int status[UPDATE_STATUS_INTS] = {0};
         deviceMemcpy(status, d_update_status, sizeof(status),
@@ -1534,16 +2613,31 @@ bool NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
         h_neighbor_grid_ghost_overflow =
             status[UPDATE_STATUS_GRID_GHOST_OVERFLOW];
         h_neighbor_list_overflow = status[UPDATE_STATUS_LIST_OVERFLOW];
+        h_neighbor_tile_overflow = status[UPDATE_STATUS_TILE_OVERFLOW];
+        h_lj_tile_numbers = status[UPDATE_STATUS_TILE_COUNT];
         last_update_error = status[UPDATE_STATUS_ERROR];
         last_error_atom = status[UPDATE_STATUS_ERROR + 1];
         if (last_update_error != UPDATE_OK || h_neighbor_grid_overflow != 0 ||
-            h_neighbor_grid_ghost_overflow != 0 || h_neighbor_list_overflow != 0)
+            h_neighbor_grid_ghost_overflow != 0 ||
+            h_neighbor_list_overflow != 0 || h_neighbor_tile_overflow != 0)
         {
             Invalidate_Half_Neighbor_List(this, local_atom_numbers);
             full_neighbor_list.Invalidate_Active();
             updator.time_recorder->Stop();
             return false;
         }
+#ifdef USE_GPU
+        // S2 诊断路径（默认关闭）：tile 规模打印与对集校验
+        if (d_lj_tiles != NULL && LJ_Tile_Debug_Enabled())
+        {
+            fprintf(stderr, "[lj-tile] rebuild done: tiles=%d (capacity %d)\n",
+                    h_lj_tile_numbers, lj_tile_capacity);
+        }
+        if (d_lj_tiles != NULL && LJ_Tile_Validate_Enabled())
+        {
+            Validate_LJ_Tile_Pair_Set(this, atom_local, local_atom_numbers);
+        }
+#endif
     }
 
     if (this->is_needed_full && full_neighbor_list.is_initialized)
@@ -1646,9 +2740,12 @@ bool NEIGHBOR_LIST::Update_With_Overflow_Recovery(
             h_neighbor_grid_ghost_overflow > max_ghost_in_grid_numbers;
         const bool half_capacity_failure =
             h_neighbor_list_overflow > max_neighbor_numbers;
+        const bool tile_capacity_failure =
+            d_lj_tiles != NULL && h_neighbor_tile_overflow > lj_tile_capacity;
         const bool capacity_failure =
             grid_atom_capacity_failure || grid_ghost_capacity_failure ||
-            half_capacity_failure || full_capacity_failure;
+            half_capacity_failure || full_capacity_failure ||
+            tile_capacity_failure;
 
         if (!capacity_failure)
         {
@@ -1735,14 +2832,22 @@ bool NEIGHBOR_LIST::Update_With_Overflow_Recovery(
             std::to_string(grown_grid_ghosts);
         controller->commands["neighbor_list_max_neighbor_numbers"] =
             std::to_string(grown_neighbors);
+        // tile 表容量不走 mdin 命令，直接抬高跨 Clear/Initial 保留的提示
+        //（加 25% 余量避免紧贴最小需求反复触发重建）
+        if (tile_capacity_failure)
+        {
+            lj_tile_capacity_hint =
+                h_neighbor_tile_overflow + h_neighbor_tile_overflow / 4;
+        }
         controller->printf(
             "Neighbor-list capacity was insufficient for the current state; "
             "rebuilding exactly with grid atoms=%d, grid ghosts=%d, "
             "neighbors=%d (grid_atoms=%d, grid_ghosts=%d, half=%d, "
-            "full=%d).\n",
+            "full=%d, tiles=%d).\n",
             grown_grid_atoms, grown_grid_ghosts, grown_neighbors,
             h_neighbor_grid_overflow, h_neighbor_grid_ghost_overflow,
-            h_neighbor_list_overflow, required_full_neighbors);
+            h_neighbor_list_overflow, required_full_neighbors,
+            h_neighbor_tile_overflow);
 
         const int configured_atom_capacity = atom_numbers;
         const float configured_cutoff = cutoff;
@@ -1768,6 +2873,28 @@ void NEIGHBOR_LIST::Clear()
     d_neighbor_list_overflow = NULL;
     d_neighbor_grid_ghost_overflow = NULL;
     d_update_error = NULL;
+    // S2 tile 表存储释放；lj_tile_capacity_hint 刻意保留，供溢出恢复后的
+    // Initial 按提示扩容
+    if (d_grid_cluster_base != NULL)
+        Free_Single_Device_Pointer((void**)&d_grid_cluster_base);
+    if (d_grid_ghost_cluster_base != NULL)
+        Free_Single_Device_Pointer((void**)&d_grid_ghost_cluster_base);
+    if (d_lj_cluster_numbers != NULL)
+        Free_Single_Device_Pointer((void**)&d_lj_cluster_numbers);
+    if (d_lj_cluster_atoms != NULL)
+        Free_Single_Device_Pointer((void**)&d_lj_cluster_atoms);
+    if (d_lj_cluster_flags != NULL)
+        Free_Single_Device_Pointer((void**)&d_lj_cluster_flags);
+    if (d_lj_tiles != NULL) Free_Single_Device_Pointer((void**)&d_lj_tiles);
+    if (d_lj_excl_range != NULL)
+        Free_Single_Device_Pointer((void**)&d_lj_excl_range);
+    lj_excl_range_built = 0;
+    lj_cluster_capacity = 0;
+    lj_tile_capacity = 0;
+    h_lj_tile_numbers = 0;
+    h_neighbor_tile_overflow = 0;
+    d_neighbor_tile_overflow = NULL;
+    d_lj_tile_count = NULL;
     full_neighbor_list.Clear();
     grids.Clear();
     updator.Clear();

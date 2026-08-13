@@ -4,6 +4,25 @@
 #include "../control.h"
 #include "full_neighbor_list.h"
 
+// LJ cluster-pair tile 表（设计文档 _local/LJ_TILING_DESIGN.md §1）。
+// cluster = 格桶顺序的 8 原子一组（编译期常量，4 留作调参对照）。
+#define LJ_TILE_CLUSTER_SIZE 8
+struct LJ_TILE
+{
+    int cluster_i;             // 非 ghost cluster（local 段编号）
+    int cluster_j;             // 可为 ghost cluster（统一编号：local 段在前）
+    unsigned long long mask;   // 8x8，bit = i_local*8 + j_local
+};
+
+// 每 global 原子的排除范围缓存条目（list_start, n, min, max）
+struct LJ_EXCL_RANGE
+{
+    int list_start;
+    int n;
+    int min_atom;
+    int max_atom;
+};
+
 struct NEIGHBOR_LIST
 {
     enum UPDATE_ERROR
@@ -27,7 +46,9 @@ struct NEIGHBOR_LIST
         UPDATE_STATUS_GRID_OVERFLOW = 0,
         UPDATE_STATUS_GRID_GHOST_OVERFLOW = 1,
         UPDATE_STATUS_LIST_OVERFLOW = 2,
+        UPDATE_STATUS_TILE_OVERFLOW = 3,
         UPDATE_STATUS_ERROR = 4,  // [4]=错误码，[5]=出错原子
+        UPDATE_STATUS_TILE_COUNT = 6,  // [6]=本次重建的 tile 数
         UPDATE_STATUS_INTS = 8
     };
     int* d_update_status = NULL;
@@ -88,6 +109,30 @@ struct NEIGHBOR_LIST
     int h_neighbor_grid_ghost_overflow = 0,
         *d_neighbor_grid_ghost_overflow = NULL;
 
+    // ---- LJ cluster-pair tile 表（S2，仅 USE_GPU 路径分配/构建，暂无消费者）----
+    // cluster = 格桶顺序的 8 原子一组；local 段与 ghost 段统一编号
+    //（ghost 段接在 local 段之后），与 d_lj_crd_q 的 local+ghost 布局一致
+    int* d_grid_cluster_base = NULL;        // 每格 local cluster 起始编号（独占前缀）
+    int* d_grid_ghost_cluster_base = NULL;  // 每格 ghost cluster 起始编号（含 local 段偏移）
+    int* d_lj_cluster_numbers = NULL;       // [0]=local cluster 总数，[1]=ghost cluster 总数
+    // 每 cluster 8 个统一坐标索引（crd/d_lj_crd_q 的下标），尾部 padding 为 -1
+    int* d_lj_cluster_atoms = NULL;
+    int* d_lj_cluster_flags = NULL;  // bit0 = 是否 ghost cluster
+    int lj_cluster_capacity = 0;
+    LJ_TILE* d_lj_tiles = NULL;
+    int lj_tile_capacity = 0;
+    // 每 global 原子的排除范围 (list_start, n, min, max) 缓存：排除表在
+    // 运行期是静态的，首次重建时一次性预计算，把 tile 构建里的排除查询
+    // 从 3-4 级依赖 gather 降为单次 16B 读
+    LJ_EXCL_RANGE* d_lj_excl_range = NULL;
+    int lj_excl_range_built = 0;
+    // 溢出恢复时跨 Clear/Initial 保留的 tile 容量提示（Clear 不复位）
+    int lj_tile_capacity_hint = 0;
+    int h_lj_tile_numbers = 0;  // 上次成功重建的 tile 数（host 侧回读）
+    // tile 表容量溢出（0=本次构建装得下；否则为被拒绝构建所需的最小容量）
+    int h_neighbor_tile_overflow = 0, *d_neighbor_tile_overflow = NULL;
+    int* d_lj_tile_count = NULL;  // 状态块槽位 6 的别名：构建期 atomicAdd 计数
+
     struct GRIDS
     {
         // 总的格点数
@@ -143,7 +188,8 @@ struct NEIGHBOR_LIST
                     int* d_neighbor_grid_ghost_overflow,
                     int* d_neighbor_list_overflow, int* d_update_error,
                     ATOM_GROUP* d_nl, int* excluded_list_start = NULL,
-                    int* excluded_list = NULL, int* excluded_numbers = NULL);
+                    int* excluded_list = NULL, int* excluded_numbers = NULL,
+                    NEIGHBOR_LIST* owner = NULL);
         void Clear();
     } updator;
 

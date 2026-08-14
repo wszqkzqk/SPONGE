@@ -1137,9 +1137,19 @@ static __global__ void Build_LJ_Tile_List(
     int* sh_scan = reinterpret_cast<int*>(sh_globals + max_atom_in_grid);
     // 块级 tile 发射缓冲：块内先攒进 shared（shared 原子加），每个 grid_i
     // 结束只做一次全局 atomicAdd 认领整段槽位再协作写出——逐 tile 全局
-    // 原子加在同一计数器上串行，实测是构建 kernel 的主要开销
+    // 原子加在同一计数器上串行，实测是构建 kernel 的主要开销。
+    // sh_tiles 基址必须 16B 对齐：LJ_TILE 的 8B 掩码/向量存储要求基址至少
+    // 8B 对齐，而 36*max_atom_in_grid + 4*blockDim 在 max_atom_in_grid 为
+    // 奇数时（溢出恢复按精确需求扩容，如 150->161）仅 4B 对齐，触发
+    // misaligned shared write（生产事故根因，compute-sanitizer 定位）
+    const int sh_tiles_byte_offset =
+        ((max_atom_in_grid * (int)(sizeof(float4) + sizeof(LJ_EXCL_RANGE) +
+                                   sizeof(int)) +
+           (int)blockDim.x * (int)sizeof(int)) +
+         15) &
+        ~15;
     LJ_TILE* sh_tiles =
-        reinterpret_cast<LJ_TILE*>(sh_scan + blockDim.x);
+        reinterpret_cast<LJ_TILE*>(shared_mem + sh_tiles_byte_offset);
     __shared__ int sh_tile_fill;
     __shared__ int sh_tile_base;
 
@@ -2234,9 +2244,13 @@ void NEIGHBOR_LIST::UPDATOR::Update(
 #define SPONGE_LAUNCH_LJ_TILE_LIST(ABLATE_MODE)                             \
     Launch_Device_Kernel(                                                   \
         Build_LJ_Tile_List<ABLATE_MODE>, grids->grid_numbers, 256,          \
-        (size_t)(max_atom_in_grid_numbers *                                 \
-                     (sizeof(float4) + sizeof(LJ_EXCL_RANGE) + sizeof(int)) +        \
-                 256 * sizeof(int) + LJ_TILE_BLOCK_BUFFER * sizeof(LJ_TILE)), \
+        (size_t)(((max_atom_in_grid_numbers *                               \
+                       (sizeof(float4) + sizeof(LJ_EXCL_RANGE) +            \
+                        sizeof(int)) +                                      \
+                   256 * sizeof(int)) +                                     \
+                  15) &                                                     \
+                 ~(size_t)15) +                                             \
+            (size_t)LJ_TILE_BLOCK_BUFFER * sizeof(LJ_TILE),                 \
         NULL, d_need_update, grids->grid_numbers,                           \
         grids->d_neighbor_grid_numbers, grids->d_neighbor_grids,            \
         grids->d_grid_atom_crd, cell, rcell, max_atom_in_grid_numbers,      \

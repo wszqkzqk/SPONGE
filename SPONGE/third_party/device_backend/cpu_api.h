@@ -54,6 +54,8 @@ void deviceMemcpyAsync(void* to, const void* from, size_t size,
                        deviceMemcpyKind kind, deviceStream_t stream);
 // 注意，size必须是sizeof(int)的整倍数
 void deviceMemset(void* to, int val, size_t size);
+// CPU 后端没有流概念，带流参数的变体忽略 stream 并回退到同步实现
+#define deviceMemsetAsync(PTR, VAL, SIZE, STREAM) deviceMemset(PTR, VAL, SIZE)
 void deviceFree(void* ptr);
 
 #define Launch_Device_Kernel(kernel, grid, block, sm_memory, stream, ...) \

@@ -1171,6 +1171,20 @@ void Particle_Mesh::Initial(CONTROLLER* controller, int atom_numbers,
             "Reason:\n\tError occurs when create fft plan of PME");
     }
 
+#ifdef USE_CUDA
+    // 单进程路径启用倒易链双流重叠：FFT plan 绑定到独立的非阻塞流，
+    // 多进程（PM/PP 分离）路径不绑流，FFT 仍随默认流串行执行
+    if (controller->MPI_size == 1)
+    {
+        deviceStreamCreateWithFlags(&pme_stream, deviceStreamNonBlocking);
+        deviceEventCreateWithFlags(&pme_event_start, deviceEventDisableTiming);
+        deviceEventCreateWithFlags(&pme_event_done, deviceEventDisableTiming);
+        SPONGE_FFT_WRAPPER::Set_FFT_Stream(PME_plan_r2c, pme_stream);
+        SPONGE_FFT_WRAPPER::Set_FFT_Stream(PME_plan_c2r, pme_stream);
+        pme_overlap_enabled = true;
+    }
+#endif
+
     Device_Malloc_And_Copy_Safely((void**)&d_reciprocal_ene, &reciprocal_ene,
                                   sizeof(float));
     Device_Malloc_And_Copy_Safely((void**)&d_self_ene, &self_ene,
@@ -1414,6 +1428,18 @@ void Particle_Mesh::Clear()
 
         SPONGE_FFT_WRAPPER::Destroy_FFT_Plan(&PME_plan_r2c);
         SPONGE_FFT_WRAPPER::Destroy_FFT_Plan(&PME_plan_c2r);
+
+#ifdef USE_CUDA
+        if (pme_overlap_enabled)
+        {
+            deviceEventDestroy(pme_event_start);
+            deviceEventDestroy(pme_event_done);
+            deviceStreamDestroy(pme_stream);
+            pme_overlap_enabled = false;
+        }
+#endif
+        pme_async_chain_active = false;
+        pme_async_scheduled = false;
 
         Free_Host_And_Device_Pointer(NULL, (void**)&d_reciprocal_ene);
         Free_Host_And_Device_Pointer(NULL, (void**)&d_self_ene);
@@ -1807,6 +1833,91 @@ static __global__ void PME_Sum_Virial(const int nfft,
     Warp_Sum_To(virial, vir, warpSize);
 }
 
+void Particle_Mesh::PME_Reciprocal_Chain(const VECTOR* crd,
+                                         const LTMatrix3 cell,
+                                         const LTMatrix3 rcell,
+                                         const float* charge, int need_virial,
+                                         LTMatrix3* d_virial,
+                                         deviceStream_t stream)
+{
+    // 计算插值索引
+    deviceMemsetAsync(PME_Q, 0, sizeof(float) * PME_Nall, stream);
+    Launch_Device_Kernel(
+        PME_Atom_Near,
+        (atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, stream, crd, PME_atom_near, PME_Nin,
+        cell, rcell, atom_numbers, fftx, ffty, fftz, PME_uxyz, PME_frxyz,
+        force_backup);
+
+    dim3 blockSize = {CONTROLLER::device_max_thread / 64, 64};
+
+    // 电荷Bspline插值
+    Launch_Device_Kernel(PME_Q_Spread,
+                         (atom_numbers + blockSize.x - 1) / blockSize.x,
+                         blockSize, 0, stream, PME_atom_near, charge,
+                         PME_frxyz, PME_Q, atom_numbers, PME_Nall);
+
+    // do FFT
+    SPONGE_FFT_WRAPPER::R2C(PME_plan_r2c, PME_Q, PME_FQ);
+
+    // 修正Bspline插值
+    blockSize = {CONTROLLER::device_warp,
+                 CONTROLLER::device_max_thread / CONTROLLER::device_warp};
+    if (need_virial)
+        Launch_Device_Kernel(
+            PME_Sum_Virial,
+            (PME_Nfft + 4 * CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            blockSize, 0, stream, PME_Nfft, PME_Virial_BC, PME_FQ, d_virial,
+            fftz);
+
+    Launch_Device_Kernel(PME_BCFQ,
+                         (PME_Nfft + CONTROLLER::device_max_thread - 1) /
+                             CONTROLLER::device_max_thread,
+                         CONTROLLER::device_max_thread, 0, stream, PME_FQ,
+                         PME_BC, PME_Nfft);
+
+    // do inverse FFT
+    SPONGE_FFT_WRAPPER::C2R(PME_plan_c2r, PME_FQ, PME_FBCFQ);
+
+    // 计算势能和力
+    blockSize = {8, CONTROLLER::device_max_thread / 8};
+    // kernel 内 atom 索引为 blockDim.y * blockIdx.x + threadIdx.y，
+    // grid 按 blockSize.y 划分
+    Launch_Device_Kernel(PME_Final,
+                         (atom_numbers + blockSize.y - 1) / blockSize.y,
+                         blockSize, 0, stream, PME_atom_near, charge,
+                         PME_FBCFQ, force_backup, PME_frxyz, rcell, fftx, ffty,
+                         fftz, atom_numbers, PME_Nall);
+}
+
+void Particle_Mesh::PME_Reciprocal_Energy_Tail(const float* charge,
+                                               float* d_potential)
+{
+    Launch_Device_Kernel(PME_Energy_Product, 1, CONTROLLER::device_max_thread,
+                         0, NULL, PME_Nall, PME_Q, PME_FBCFQ,
+                         d_reciprocal_ene);
+    Scale_List(d_reciprocal_ene, 0.5f, 1);
+
+    Launch_Device_Kernel(charge_square_kernel,
+                         (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                             CONTROLLER::device_max_thread,
+                         CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
+                         charge, charge_square);
+    Sum_Of_List(charge_square, d_self_ene, atom_numbers);
+
+    Scale_List(d_self_ene, -beta / sqrt(PI), 1);
+
+    Sum_Of_List(charge, charge_sum, atom_numbers);
+
+    Launch_Device_Kernel(device_add, 1, 1, 0, NULL, d_self_ene,
+                         neutralizing_factor, charge_sum);
+
+    Launch_Device_Kernel(PME_Add_Energy_To_Potential, 1, 1, 0, NULL,
+                         d_potential, d_self_ene, d_reciprocal_ene);
+}
+
 void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
     const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
     const float* charge, VECTOR* force, int need_virial, int need_energy,
@@ -1826,59 +1937,8 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
         // mesh would compare two different states in an MC acceptance test.
         if (scheduled_force_update || need_energy || need_virial || exact_state)
         {
-            // 计算插值索引
-            deviceMemset(PME_Q, 0, sizeof(float) * PME_Nall);
-            Launch_Device_Kernel(
-                PME_Atom_Near,
-                (atom_numbers + CONTROLLER::device_max_thread - 1) /
-                    CONTROLLER::device_max_thread,
-                CONTROLLER::device_max_thread, 0, NULL, crd, PME_atom_near,
-                PME_Nin, cell, rcell, atom_numbers, fftx, ffty, fftz, PME_uxyz,
-                PME_frxyz, force_backup);
-
-            dim3 blockSize = {CONTROLLER::device_max_thread / 64, 64};
-
-            // 电荷Bspline插值
-            Launch_Device_Kernel(PME_Q_Spread,
-                                 (atom_numbers + blockSize.x - 1) / blockSize.x,
-                                 blockSize, 0, NULL, PME_atom_near, charge,
-                                 PME_frxyz, PME_Q, atom_numbers, PME_Nall);
-
-            // do FFT
-            SPONGE_FFT_WRAPPER::R2C(PME_plan_r2c, PME_Q, PME_FQ);
-
-            // 修正Bspline插值
-            blockSize = {
-                CONTROLLER::device_warp,
-                CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-            if (need_virial)
-                Launch_Device_Kernel(
-                    PME_Sum_Virial,
-                    (PME_Nfft + 4 * CONTROLLER::device_max_thread - 1) /
-                        CONTROLLER::device_max_thread,
-                    blockSize, 0, NULL, PME_Nfft, PME_Virial_BC, PME_FQ,
-                    d_virial, fftz);
-
-            Launch_Device_Kernel(
-                PME_BCFQ,
-                (PME_Nfft + CONTROLLER::device_max_thread - 1) /
-                    CONTROLLER::device_max_thread,
-                CONTROLLER::device_max_thread, 0, NULL, PME_FQ, PME_BC,
-                PME_Nfft);
-
-            // do inverse FFT
-            SPONGE_FFT_WRAPPER::C2R(PME_plan_c2r, PME_FQ, PME_FBCFQ);
-
-            // 计算势能和力
-            blockSize = {8, CONTROLLER::device_max_thread / 8};
-            // kernel 内 atom 索引为 blockDim.y * blockIdx.x + threadIdx.y，
-            // grid 按 blockSize.y 划分
-            Launch_Device_Kernel(PME_Final,
-                                 (atom_numbers + blockSize.y - 1) / blockSize.y,
-                                 blockSize, 0, NULL, PME_atom_near, charge,
-                                 PME_FBCFQ, force_backup, PME_frxyz, rcell,
-                                 fftx, ffty, fftz, atom_numbers, PME_Nall);
-
+            PME_Reciprocal_Chain(crd, cell, rcell, charge, need_virial,
+                                 d_virial, NULL);
             if (scheduled_force_update)
             {
                 Launch_Device_Kernel(
@@ -1891,29 +1951,79 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
         }
         if (need_energy)
         {
-            Launch_Device_Kernel(PME_Energy_Product, 1,
-                                 CONTROLLER::device_max_thread, 0, NULL,
-                                 PME_Nall, PME_Q, PME_FBCFQ, d_reciprocal_ene);
-            Scale_List(d_reciprocal_ene, 0.5f, 1);
+            PME_Reciprocal_Energy_Tail(charge, d_potential);
+        }
+    }
+}
 
+void Particle_Mesh::PME_Reciprocal_Force_Async_Start(
+    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const float* charge, int need_virial, int need_energy, LTMatrix3* d_virial,
+    int step, bool exact_state)
+{
+    pme_async_chain_active = false;
+    pme_async_scheduled = false;
+    if (!is_initialized || !calculate_reciprocal_part) return;
+    const bool scheduled_force_update = step % update_interval == 0;
+    // 触发条件与串行版本完全一致：MTS 调度步，或需要能量/维里/精确态时
+    if (!(scheduled_force_update || need_energy || need_virial || exact_state))
+        return;
+    deviceStream_t stream = NULL;
+#ifdef USE_CUDA
+    if (pme_overlap_enabled)
+    {
+        // 在 legacy 默认流上记录 crd 定型事件，pme_stream 等它，保证倒易链
+        // 读到的是当期坐标（含此前的 ghost 更新、邻居表更新等全部默认流工作）
+        deviceEventRecord(pme_event_start, NULL);
+        deviceStreamWaitEvent(pme_stream, pme_event_start, 0);
+        stream = pme_stream;
+    }
+#endif
+    PME_Reciprocal_Chain(crd, cell, rcell, charge, need_virial, d_virial,
+                         stream);
+#ifdef USE_CUDA
+    if (pme_overlap_enabled)
+    {
+        deviceEventRecord(pme_event_done, pme_stream);
+    }
+#endif
+    pme_async_chain_active = true;
+    pme_async_scheduled = scheduled_force_update;
+}
+
+void Particle_Mesh::PME_Reciprocal_Force_Async_Join(const float* charge,
+                                                    VECTOR* force,
+                                                    int need_energy,
+                                                    float* d_potential)
+{
+    if (!is_initialized || !calculate_reciprocal_part) return;
+    if (pme_async_chain_active)
+    {
+#ifdef USE_CUDA
+        if (pme_overlap_enabled)
+        {
+            // 默认流等待 pme_stream 上的倒易链结束，之后 device_add_force
+            // 与能量尾部在默认流上按原串行顺序执行，保证逐位一致
+            deviceStreamWaitEvent(NULL, pme_event_done, 0);
+        }
+#endif
+        if (pme_async_scheduled)
+        {
             Launch_Device_Kernel(
-                charge_square_kernel,
+                device_add_force,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
-                CONTROLLER::device_max_thread, 0, NULL, atom_numbers, charge,
-                charge_square);
-            Sum_Of_List(charge_square, d_self_ene, atom_numbers);
-
-            Scale_List(d_self_ene, -beta / sqrt(PI), 1);
-
-            Sum_Of_List(charge, charge_sum, atom_numbers);
-
-            Launch_Device_Kernel(device_add, 1, 1, 0, NULL, d_self_ene,
-                                 neutralizing_factor, charge_sum);
-
-            Launch_Device_Kernel(PME_Add_Energy_To_Potential, 1, 1, 0, NULL,
-                                 d_potential, d_self_ene, d_reciprocal_ene);
+                CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
+                update_interval, force, force_backup);
         }
+        pme_async_chain_active = false;
+        pme_async_scheduled = false;
+    }
+    if (need_energy)
+    {
+        deviceMemset(d_reciprocal_ene, 0, sizeof(float));
+        deviceMemset(d_self_ene, 0, sizeof(float));
+        PME_Reciprocal_Energy_Tail(charge, d_potential);
     }
 }
 

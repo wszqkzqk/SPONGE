@@ -53,6 +53,8 @@ static __device__ __forceinline__ double atomicAdd(double* address, double val)
 #define deviceMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
 #define deviceMemcpyDefault cudaMemcpyDefault
 #define deviceMemset(PTR, VAL, SIZE) cudaMemsetAsync(PTR, VAL, SIZE, NULL)
+#define deviceMemsetAsync(PTR, VAL, SIZE, STREAM) \
+    cudaMemsetAsync(PTR, VAL, SIZE, STREAM)
 #define deviceFree cudaFree
 #define deviceMalloc cudaMalloc
 
@@ -66,11 +68,16 @@ static __device__ __forceinline__ double atomicAdd(double* address, double val)
 
 #define deviceStream_t cudaStream_t
 #define deviceStreamCreate cudaStreamCreate
+#define deviceStreamCreateWithFlags cudaStreamCreateWithFlags
+#define deviceStreamNonBlocking cudaStreamNonBlocking
 #define deviceStreamDestroy cudaStreamDestroy
 #define deviceStreamSynchronize cudaStreamSynchronize
+#define deviceStreamWaitEvent cudaStreamWaitEvent
 
 #define deviceEvent_t cudaEvent_t
 #define deviceEventCreate cudaEventCreate
+#define deviceEventCreateWithFlags cudaEventCreateWithFlags
+#define deviceEventDisableTiming cudaEventDisableTiming
 #define deviceEventDestroy cudaEventDestroy
 #define deviceEventRecord cudaEventRecord
 #define deviceEventSynchronize cudaEventSynchronize
@@ -201,6 +208,7 @@ static inline deviceModuleResult_t deviceModuleLaunchKernel(
 #define deviceFFTPlanMany cufftPlanMany
 #define deviceFFTExecR2C cufftExecR2C
 #define deviceFFTExecC2R cufftExecC2R
+#define deviceFFTSetStream cufftSetStream
 #define deviceFFTDestroy cufftDestroy
 
 #endif  // FFT_BACKEND_H

@@ -31,6 +31,8 @@
 #define deviceMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define deviceMemcpyDefault hipMemcpyDefault
 #define deviceMemset(PTR, VAL, SIZE) hipMemsetAsync(PTR, VAL, SIZE, nullptr)
+#define deviceMemsetAsync(PTR, VAL, SIZE, STREAM) \
+    hipMemsetAsync(PTR, VAL, SIZE, STREAM)
 #define deviceFree hipFree
 
 #define deviceError_t hipError_t

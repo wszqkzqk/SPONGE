@@ -134,6 +134,18 @@ struct Particle_Mesh
     void Create_Stream();
     void Destroy_Stream();
 
+    // PME 倒易链双流重叠（仅 CUDA 单进程路径启用；HIP/CPU/MPI 回退串行，
+    // 行为与之前完全一致）。pme_stream 以 NonBlocking 创建，通过事件与
+    // legacy 默认流显式同步，从而与直接空间 kernel 重叠执行。
+    bool pme_overlap_enabled = false;
+    bool pme_async_chain_active = false;   // Start 已启动倒易链，待 Join
+    bool pme_async_scheduled = false;      // 本次链对应的步是 MTS 调度步
+    deviceStream_t pme_stream = NULL;
+#ifdef USE_CUDA
+    deviceEvent_t pme_event_start = nullptr;  // 默认流上 crd 定型点
+    deviceEvent_t pme_event_done = nullptr;   // pme_stream 上链结束点
+#endif
+
     // 从局部编号到全局编号的映射
     int* atom_id_l_g = NULL;
     int* atom_id_g_l = NULL;
@@ -182,6 +194,30 @@ struct Particle_Mesh
         const float* charge, VECTOR* force, int need_virial, int need_energy,
         LTMatrix3* d_virial, float* d_potential, int step,
         bool exact_state = false);
+
+    // 倒易链 Start/Join 拆分（单进程重叠路径）。Start 在 crd 定型后尽早
+    // 调用：在 pme_stream 上异步执行 memset PME_Q → PME_Atom_Near →
+    // PME_Q_Spread → R2C → [PME_Sum_Virial] → PME_BCFQ → C2R → PME_Final；
+    // Join 在原调用点等待链结束，然后在默认流上按原顺序执行
+    // device_add_force 和 need_energy 尾部，保证逐位一致。
+    // 未启用重叠（HIP/CPU/MPI）时两者退化为在默认流上顺序执行同样内容。
+    void PME_Reciprocal_Force_Async_Start(
+        const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float* charge, int need_virial, int need_energy,
+        LTMatrix3* d_virial, int step, bool exact_state);
+    void PME_Reciprocal_Force_Async_Join(const float* charge, VECTOR* force,
+                                         int need_energy, float* d_potential);
+
+private:
+    // 倒易链本体（不含 device_add_force 与能量尾部），在指定流上执行
+    void PME_Reciprocal_Chain(const VECTOR* crd, const LTMatrix3 cell,
+                              const LTMatrix3 rcell, const float* charge,
+                              int need_virial, LTMatrix3* d_virial,
+                              deviceStream_t stream);
+    // need_energy 尾部：倒易能量、self 能量累加进 d_potential
+    void PME_Reciprocal_Energy_Tail(const float* charge, float* d_potential);
+
+public:
 
     void Update_Box(LTMatrix3 cell, LTMatrix3 rcell, LTMatrix3 g, float dt);
     void Step_Print(CONTROLLER* controller);

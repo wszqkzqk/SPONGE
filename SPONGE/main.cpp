@@ -542,6 +542,19 @@ void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
                 pm.d_direct_atom_energy);
         }
 
+        // 单进程路径：LJ 直接空间 kernel 占满整机，实测与之重叠会因
+        // SM/缓存争用把它拖慢得更多；把 PME 倒易链投在这里（LJ 之后、
+        // 成键 kernel 之前），让它与下方的小 grid 成键 kernel 重叠。
+        // force_backup 的累加与能量尾部仍由后面的 Join 在原调用点按原
+        // 顺序完成
+        if (CONTROLLER::MPI_size == 1 && !use_reaxff_eeq)
+        {
+            pm.PME_Reciprocal_Force_Async_Start(
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.d_charge,
+                md_info.need_pressure, md_info.need_potential, dd.d_virial,
+                md_info.sys.steps, evaluation.exact_state);
+        }
+
         lj.Long_Range_Correction(
             md_info.need_pressure, dd.d_virial, md_info.need_potential,
             dd.d_energy,
@@ -629,11 +642,9 @@ void Main_Calculate_Force(const FORCE_EVALUATION_CONTEXT& evaluation)
                                         md_info.pbc.rcell);
             if (!use_reaxff_eeq)
             {
-                pm.PME_Reciprocal_Force_With_Energy_And_Virial(
-                    dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.d_charge,
-                    dd.frc, md_info.need_pressure, md_info.need_potential,
-                    dd.d_virial, dd.d_energy, md_info.sys.steps,
-                    evaluation.exact_state);
+                pm.PME_Reciprocal_Force_Async_Join(dd.d_charge, dd.frc,
+                                                   md_info.need_potential,
+                                                   dd.d_energy);
             }
 
             if (md_info.output.Check_Mdout_Step())

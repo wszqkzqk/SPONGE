@@ -108,6 +108,18 @@ struct SPONGE_FFT_WRAPPER
 #endif
     }
 
+    static void Set_FFT_Stream(FFT_HANDLE handle, deviceStream_t stream)
+    {
+        // 仅 CUDA 后端支持把 cuFFT plan 绑定到非默认流；HIP/CPU 后端留空，
+        // FFT 仍在原来的执行位置同步执行，行为与之前一致
+#ifdef USE_CUDA
+        deviceFFTSetStream(handle, stream);
+#else
+        (void)handle;
+        (void)stream;
+#endif
+    }
+
     static void Destroy_FFT_Plan(FFT_HANDLE* handle)
     {
 #ifdef USE_GPU

@@ -488,7 +488,10 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
 
     mdinfo = this->Get_Output_File(false, MDINFO_COMMAND, ".info",
                                    MDINFO_DEFAULT_FILENAME);
-    setvbuf(mdinfo, NULL, _IONBF, 0);
+    if (mdinfo != NULL)
+    {
+        setvbuf(mdinfo, NULL, _IONBF, 0);
+    }
     mdout = this->Get_Output_File(false, MDOUT_COMMAND, ".out",
                                   MDOUT_DEFAULT_FILENAME);
     printf("%s\n", SPONGE_ASCII_ART);
@@ -505,39 +508,46 @@ void CONTROLLER::Commands_From_In_File(int argc, char** argv,
     printf("SPONGE Path:\n    %s\n\n", Get_SPONGE_Directory().c_str());
     printf("Start Wall Time:\n    %s\n", Get_Wall_Time().c_str());
     printf("MD TASK NAME:\n    %s\n\n", commands["md_name"].c_str());
-    int scanf_ret = fprintf(mdinfo, "Terminal Commands:\n    ");
-    for (int i = 0; i < argc; i++)
+    int scanf_ret = 0;
+    if (mdinfo != NULL)
     {
-        scanf_ret = fprintf(mdinfo, "%s ", argv[i]);
-    }
-    scanf_ret = fprintf(mdinfo, "\n\n");
-    if (command_only)
-    {
-        scanf_ret = fprintf(
-            mdinfo,
-            "Mdin File:\n    command_only mode: no mdin file is loaded.\n\n");
-    }
-    else if (mdin_format == MdinInputFormat::Toml)
-    {
-        scanf_ret = fprintf(mdinfo, "Mdin File:\n");
-        std::istringstream content_stream(toml_content);
-        std::string content_line;
-        while (std::getline(content_stream, content_line))
+        scanf_ret = fprintf(mdinfo, "Terminal Commands:\n    ");
+        for (int i = 0; i < argc; i++)
         {
-            scanf_ret = fprintf(mdinfo, "    %s\n", content_line.c_str());
+            scanf_ret = fprintf(mdinfo, "%s ", argv[i]);
         }
         scanf_ret = fprintf(mdinfo, "\n\n");
-    }
-    else if (In_File != NULL)
-    {
-        scanf_ret = fprintf(mdinfo, "Mdin File:\n");
-        fseek(In_File, 0, SEEK_SET);
-        char temp[CHAR_LENGTH_MAX];
-        while (fgets(temp, CHAR_LENGTH_MAX, In_File) != NULL)
+        if (command_only)
         {
-            scanf_ret = fprintf(mdinfo, "    %s", temp);
+            scanf_ret = fprintf(mdinfo,
+                                "Mdin File:\n    command_only mode: no mdin "
+                                "file is loaded.\n\n");
         }
-        scanf_ret = fprintf(mdinfo, "\n\n");
+        else if (mdin_format == MdinInputFormat::Toml)
+        {
+            scanf_ret = fprintf(mdinfo, "Mdin File:\n");
+            std::istringstream content_stream(toml_content);
+            std::string content_line;
+            while (std::getline(content_stream, content_line))
+            {
+                scanf_ret = fprintf(mdinfo, "    %s\n", content_line.c_str());
+            }
+            scanf_ret = fprintf(mdinfo, "\n\n");
+        }
+        else if (In_File != NULL)
+        {
+            scanf_ret = fprintf(mdinfo, "Mdin File:\n");
+            fseek(In_File, 0, SEEK_SET);
+            char temp[CHAR_LENGTH_MAX];
+            while (fgets(temp, CHAR_LENGTH_MAX, In_File) != NULL)
+            {
+                scanf_ret = fprintf(mdinfo, "    %s", temp);
+            }
+            scanf_ret = fprintf(mdinfo, "\n\n");
+        }
+    }
+    if (In_File != NULL)
+    {
         fclose(In_File);
     }
 }

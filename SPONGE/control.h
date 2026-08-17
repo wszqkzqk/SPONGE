@@ -187,10 +187,20 @@ struct CONTROLLER
 
 // 一些常用的控制函数
 #include "utils/control/error.hpp"
+#include "utils/control/h5_output_contract.hpp"
+#include "utils/control/legacy_output_flush.hpp"
 #include "utils/control/malloc_and_file.hpp"
 #include "utils/control/os.hpp"
 #include "utils/control/print.hpp"
 #include "utils/control/warning.hpp"
+#include "utils/h5md/completion_tracker.hpp"
+#include "utils/h5md/h5md_writer.hpp"
+#include "utils/h5md/module_h5_mappings.hpp"
+#include "utils/h5md/observable_h5_writer.hpp"
+#include "utils/h5md/output_plan.hpp"
+#include "utils/h5md/restart_h5_writer.hpp"
+#include "utils/h5md/trajectory_h5_writer.hpp"
+#include "utils/h5md/vds_trajectory_h5_writer.hpp"
 
 // 读入复杂参数
 #include "utils/control/configuration_reader.hpp"

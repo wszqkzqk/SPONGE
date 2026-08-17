@@ -40,6 +40,9 @@ struct LISTED_FORCE
     int local_atom_numbers = 0;
     int use_domain_decomposition = 0;
     int last_atom_numbers = 0;
+    bool has_native_parameters = false;
+    int native_item_count = 0;
+    std::vector<float> native_parameter_values;
     void Initialize_Parameters(CONTROLLER* controller,
                                std::string parameter_string);
     void Compile(CONTROLLER* controller);

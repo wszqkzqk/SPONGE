@@ -95,6 +95,8 @@ typedef void* HMODULE;
 #endif
 #undef FFT_BACKEND_H
 
+#include "utils/random/portable_philox.hpp"
+
 // lane-group 抽象
 #include "third_party/lane_group/backend.h"
 

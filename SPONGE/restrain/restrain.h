@@ -1,8 +1,16 @@
 ﻿#pragma once
+#include <string>
+#include <vector>
+
 #include "../Domain_decomposition/Domain_decomposition.h"
 #include "../MD_core/MD_core.h"
 #include "../common.h"
 #include "../control.h"
+
+namespace Xponge
+{
+struct PositionalRestraint;
+}
 
 struct RESTRAIN_INFORMATION
 {
@@ -43,15 +51,24 @@ struct RESTRAIN_INFORMATION
 
     int refcoord_scaling = REFCOORD_SCALING_NO;
     bool calc_virial = true;
+    std::string h5_restraint_name = "default";
 
     // Restrain初始化(总原子数，GPU上所有原子的坐标，控制，模块名)
     void Initial(CONTROLLER* control, const int atom_numbers, const VECTOR* crd,
+                 const char* module_name = NULL);
+    void Initial(CONTROLLER* control, const int atom_numbers, const VECTOR* crd,
+                 const Xponge::PositionalRestraint& native_restraint,
                  const char* module_name = NULL);
 
     void Update_Refcoord_Scaling(MD_INFORMATION* md_info, const LTMatrix3 g,
                                  float dt, int* atom_local,
                                  int local_atom_numbers, char* atom_local_label,
                                  int* atom_local_id);
+
+    bool Export_H5_Reference_Coordinates(std::vector<float>* coordinates,
+                                         std::string* error) const;
+    bool Apply_H5_Reference_Coordinates(const std::vector<float>& coordinates,
+                                        std::string* error);
 
     void Init_Com_Cache_If_Needed(const int atom_numbers,
                                   const MD_INFORMATION& md_info);

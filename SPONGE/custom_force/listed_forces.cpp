@@ -1,5 +1,11 @@
 ﻿#include "listed_forces.h"
 
+#include <cmath>
+#include <filesystem>
+#include <limits>
+
+#include "../utils/h5md/topology_custom_force_h5_materializer.hpp"
+
 static constexpr int LISTED_FORCE_MAX_ATOMS = 6;
 
 static __global__ void listed_force_get_local_device(
@@ -118,6 +124,60 @@ static LISTED_FORCE* Read_One_Force(CONTROLLER* controller, std::string section,
     return force;
 }
 
+static LISTED_FORCE* Read_One_Native_Force(
+    CONTROLLER* controller,
+    const SpongeH5MD::NativeListedForceDefinition& definition)
+{
+    LISTED_FORCE* force = new LISTED_FORCE;
+    strcpy(force->module_name, definition.name.c_str());
+    controller->printf("    reading the native H5 listed force named %s\n",
+                       force->module_name);
+    force->source_code = definition.potential;
+    std::string parameters;
+    for (std::size_t index = 0; index < definition.parameter_names.size();
+         ++index)
+    {
+        if (index != 0) parameters += ", ";
+        parameters += definition.parameter_types[index] + " " +
+                      definition.parameter_names[index];
+    }
+    force->Initialize_Parameters(controller, parameters);
+    force->connected_atoms = definition.connected_atoms;
+    force->constrain_distance = definition.constrain_distance;
+    force->has_native_parameters = true;
+    force->native_item_count = definition.item_count;
+    force->native_parameter_values = definition.parameter_values;
+    force->Compile(controller);
+    controller->printf("    end reading the native H5 listed force named %s\n",
+                       force->module_name);
+    return force;
+}
+
+static bool Legacy_Listed_Inputs_Are_Available(CONTROLLER* controller,
+                                               const char* module_name)
+{
+    if (!controller->Command_Exist(module_name, "in_file")) return false;
+    const char* descriptor_path = controller->Command(module_name, "in_file");
+    if (!std::filesystem::is_regular_file(descriptor_path)) return false;
+
+    Configuration_Reader cfg;
+    cfg.Open(descriptor_path);
+    cfg.Close();
+    // An existing but malformed explicit descriptor remains authoritative so
+    // its original validation error is not hidden by a bundled fallback.
+    if (!cfg.error_reason.empty()) return true;
+    for (const std::string& section : cfg.sections)
+    {
+        if (!controller->Command_Exist(section.c_str(), "in_file") ||
+            !std::filesystem::is_regular_file(
+                controller->Command(section.c_str(), "in_file")))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void LISTED_FORCES::Initial(CONTROLLER* controller, CONECT* connectivity,
                             PAIR_DISTANCE* con_dis, const char* module_name)
 {
@@ -129,7 +189,23 @@ void LISTED_FORCES::Initial(CONTROLLER* controller, CONECT* connectivity,
     {
         strcpy(this->module_name, module_name);
     }
-    if (controller->Command_Exist(this->module_name, "in_file"))
+    bool native_h5_available = false;
+    if (controller->Command_Exist("input_h5_topology_path"))
+    {
+        SpongeH5MD::TopologyCustomForceH5Materializer probe;
+        if (!probe.Open(controller->Command("input_h5_topology_path")))
+        {
+            controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                           "LISTED_FORCES::Initial",
+                                           probe.Last_Error().c_str());
+        }
+        native_h5_available = probe.Has_Listed() || probe.Has_Bond_Soft();
+    }
+    const bool use_native_h5 =
+        native_h5_available &&
+        !Legacy_Listed_Inputs_Are_Available(controller, this->module_name);
+    if (!use_native_h5 &&
+        controller->Command_Exist(this->module_name, "in_file"))
     {
         controller->printf("START INITIALIZING LISTED FORCES:\n");
         Configuration_Reader cfg;
@@ -155,6 +231,62 @@ void LISTED_FORCES::Initial(CONTROLLER* controller, CONECT* connectivity,
             controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
                                            "LISTED_FORCES::Initial",
                                            error_reason.c_str());
+        }
+    }
+    else if (use_native_h5)
+    {
+        SpongeH5MD::TopologyCustomForceH5Materializer reader;
+        if (!reader.Open(controller->Command("input_h5_topology_path")))
+        {
+            controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                           "LISTED_FORCES::Initial",
+                                           reader.Last_Error().c_str());
+        }
+        if (reader.Has_Listed() || reader.Has_Bond_Soft())
+        {
+            controller->printf(
+                "START INITIALIZING LISTED FORCES FROM NATIVE H5:\n");
+        }
+        if (reader.Has_Listed())
+        {
+            std::vector<SpongeH5MD::NativeListedForceDefinition> definitions;
+            if (!reader.Read_Listed(&definitions))
+            {
+                controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                               "LISTED_FORCES::Initial",
+                                               reader.Last_Error().c_str());
+            }
+            for (const auto& definition : definitions)
+            {
+                forces.push_back(Read_One_Native_Force(controller, definition));
+            }
+        }
+        if (reader.Has_Bond_Soft())
+        {
+            if (!controller->Command_Exist("lambda_bond"))
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorMissingCommand, "LISTED_FORCES::Initial",
+                    "Reason:\n\tlambda_bond is required when bundled "
+                    "bond_soft data is present\n");
+            }
+            controller->Check_Float("lambda_bond", "LISTED_FORCES::Initial");
+            const float lambda_bond = atof(controller->Command("lambda_bond"));
+            float alpha = 0.0f;
+            if (controller->Command_Exist("soft_bond_alpha"))
+            {
+                controller->Check_Float("soft_bond_alpha",
+                                        "LISTED_FORCES::Initial");
+                alpha = atof(controller->Command("soft_bond_alpha"));
+            }
+            SpongeH5MD::NativeListedForceDefinition definition;
+            if (!reader.Read_Bond_Soft(lambda_bond, alpha, &definition))
+            {
+                controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                               "LISTED_FORCES::Initial",
+                                               reader.Last_Error().c_str());
+            }
+            forces.push_back(Read_One_Native_Force(controller, definition));
         }
     }
     if (forces.size() != 0)
@@ -546,8 +678,9 @@ VECTOR* crd, VECTOR box_length, VECTOR *frc, float *atom_ene, LTMatrix3 *atom_vi
 void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
                            PAIR_DISTANCE* con_dis)
 {
-    FILE* fp;
-    if (!controller->Command_Exist(this->module_name, "in_file"))
+    FILE* fp = NULL;
+    if (!has_native_parameters &&
+        !controller->Command_Exist(this->module_name, "in_file"))
     {
         std::string error_reason = std::string("Reason:\n\tlisted force '") +
                                    this->module_name + "' is defined, but " +
@@ -558,9 +691,25 @@ void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
                                        error_reason.c_str());
     }
     controller->printf("    Initializing %s\n", this->module_name);
-    Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
-                     "r");
-    if (fscanf(fp, "%d", &item_numbers) != 1)
+    if (has_native_parameters)
+    {
+        item_numbers = native_item_count;
+        if (item_numbers < 0 ||
+            native_parameter_values.size() !=
+                static_cast<std::size_t>(item_numbers) * parameter_name.size())
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorBadFileFormat, "LISTED_FORCE::Initial",
+                "Reason:\n\tnative listed parameter matrix has invalid "
+                "dimensions\n");
+        }
+    }
+    else
+    {
+        Open_File_Safely(&fp, controller->Command(this->module_name, "in_file"),
+                         "r");
+    }
+    if (!has_native_parameters && fscanf(fp, "%d", &item_numbers) != 1)
     {
         std::string error_reason = std::string(
                                        "Reason:\n\tFail to read the number of "
@@ -610,8 +759,33 @@ void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
     {
         for (int j = 0; j < parameter_name.size(); j++)
         {
-            int scanf_ret = 0;
-            if (parameter_type[j] == "int")
+            int scanf_ret = 1;
+            if (has_native_parameters)
+            {
+                const float value =
+                    native_parameter_values[static_cast<std::size_t>(i) *
+                                                parameter_name.size() +
+                                            j];
+                if (!std::isfinite(value)) scanf_ret = 0;
+                if (parameter_type[j] == "int")
+                {
+                    if (std::trunc(value) != value ||
+                        value < std::numeric_limits<int>::min() ||
+                        value > std::numeric_limits<int>::max())
+                    {
+                        scanf_ret = 0;
+                    }
+                    else
+                    {
+                        ((int*)cpu_parameters[j])[i] = static_cast<int>(value);
+                    }
+                }
+                else
+                {
+                    ((float*)cpu_parameters[j])[i] = value;
+                }
+            }
+            else if (parameter_type[j] == "int")
             {
                 scanf_ret = fscanf(fp, "%d", ((int*)cpu_parameters[j]) + i);
             }
@@ -619,7 +793,7 @@ void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
             {
                 scanf_ret = fscanf(fp, "%f", ((float*)cpu_parameters[j]) + i);
             }
-            if (scanf_ret == 0)
+            if (scanf_ret != 1)
             {
                 std::string error_reason =
                     std::string(
@@ -632,7 +806,7 @@ void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
             }
         }
     }
-    fclose(fp);
+    if (fp != NULL) fclose(fp);
     int connected_a = -1, connected_b = -1, constran_id = -1;
     for (int j = 0; j < parameter_name.size(); j++)
     {

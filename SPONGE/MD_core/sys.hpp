@@ -607,6 +607,14 @@ void MD_INFORMATION::system_information::Initial(CONTROLLER* controller,
                 "MD_INFORMATION::system_information::Initial");
             step_limit = atoi(controller[0].Command("rerun_frame_limit"));
         }
+        if (step_limit <= 0)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::system_information::Initial",
+                "Reason:\n\trerun frame limit must be greater than 0\n");
+        }
+        step_limit -= 1;
     }
     for (int i = 0; i < md_info->atom_numbers; i++)
     {

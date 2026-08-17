@@ -1,0 +1,20 @@
+mode = "rerun"
+step_limit = 100
+rerun_frame_limit = 100
+rerun_start = 0
+rerun_strip = 1
+rerun_need_box_update = 0
+
+[input.h5.topology]
+path = "topologies/protein.topology.spgt.h5"
+
+[input.h5.protocol]
+path = "protocols/analysis.protocol.spgp.h5"
+
+[input.h5.trajectory]
+path = "runs/prod.spg.h5md"
+particle_stream = "all"
+
+[write.interval]
+information = 1
+mdout = 1

@@ -74,7 +74,9 @@ struct REAXFF_EEQ
                            VECTOR* frc = NULL, int need_virial = 0,
                            LTMatrix3* atom_virial = NULL);
     void Step_Print(CONTROLLER* controller);
-    void Print_Charges(const float* d_charge);
+    void Capture_Charges(const float* d_charge,
+                         std::vector<float>* elementary_charges,
+                         bool write_legacy_file);
 };
 
 #endif

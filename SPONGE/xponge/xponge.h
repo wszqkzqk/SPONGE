@@ -3,6 +3,7 @@
 #include "../control.h"
 #include "./ir/forcefield.h"
 #include "./ir/md_core.h"
+#include "./ir/protocol.h"
 
 namespace Xponge
 {
@@ -24,6 +25,7 @@ struct System
     ClassicalForceField classical_force_field;
     GeneralizedBorn generalized_born;
     VirtualAtoms virtual_atoms;
+    PositionalRestraint positional_restraint;
     InputSource source = InputSource::kUnknown;
     double start_time = 0.0;
 

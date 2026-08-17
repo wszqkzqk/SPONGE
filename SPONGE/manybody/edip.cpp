@@ -1,5 +1,7 @@
 ﻿#include "edip.h"
 
+#include "../utils/h5md/topology_manybody_h5_materializer.hpp"
+
 void EDIP_INFORMATION::Initial(CONTROLLER* controller, const char* module_name,
                                bool* need_full_nl_flag)
 {
@@ -10,6 +12,74 @@ void EDIP_INFORMATION::Initial(CONTROLLER* controller, const char* module_name,
     else
     {
         strcpy(this->module_name, module_name);
+    }
+    if (!controller->Command_Exist(this->module_name, "in_file") &&
+        controller->Command_Exist("input_h5_topology_path"))
+    {
+        SpongeH5MD::TopologyManybodyH5Materializer reader;
+        if (!reader.Open(controller->Command("input_h5_topology_path")))
+        {
+            controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                           "EDIP_INFORMATION::Initial",
+                                           reader.Last_Error().c_str());
+        }
+        if (reader.Has_EDIP())
+        {
+            SpongeH5MD::NativeEDIPDefinition definition;
+            if (!reader.Read_EDIP(&definition))
+            {
+                controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                               "EDIP_INFORMATION::Initial",
+                                               reader.Last_Error().c_str());
+            }
+
+            controller->printf(
+                "START INITIALIZING EDIP FORCE FROM NATIVE H5\n");
+            atom_numbers = static_cast<int>(definition.atom_type.size());
+            atom_type_numbers = definition.atom_type_count;
+            pair_type_numbers = atom_type_numbers * atom_type_numbers;
+            triple_type_numbers =
+                atom_type_numbers * atom_type_numbers * atom_type_numbers;
+            Malloc_Safely((void**)&h_energy_atom,
+                          sizeof(float) * (atom_numbers + 1));
+            Device_Malloc_And_Copy_Safely((void**)&d_energy_sum, h_energy_atom,
+                                          sizeof(float) * (atom_numbers + 1));
+            d_energy_atom = d_energy_sum + 1;
+            Device_Malloc_Safely((void**)&z, sizeof(float) * atom_numbers * 2);
+            dE_dz = z + atom_numbers;
+            const std::size_t parameter_count =
+                static_cast<std::size_t>(pair_type_numbers) * 8 +
+                static_cast<std::size_t>(triple_type_numbers) * 9;
+            Malloc_Safely((void**)&h_parameters,
+                          sizeof(float) * parameter_count);
+            Malloc_Safely((void**)&h_atom_type, sizeof(int) * atom_numbers);
+            std::copy(definition.pair_parameters.begin(),
+                      definition.pair_parameters.end(), h_parameters);
+            std::copy(definition.triple_parameters.begin(),
+                      definition.triple_parameters.end(),
+                      h_parameters + pair_type_numbers * 8);
+            std::copy(definition.atom_type.begin(), definition.atom_type.end(),
+                      h_atom_type);
+            Device_Malloc_And_Copy_Safely((void**)&d_parameters, h_parameters,
+                                          sizeof(float) * parameter_count);
+            Device_Malloc_And_Copy_Safely((void**)&d_atom_type, h_atom_type,
+                                          sizeof(int) * atom_numbers);
+            if (need_full_nl_flag != NULL)
+            {
+                *need_full_nl_flag = true;
+                controller->printf(
+                    "EDIP requires full neighbor list for three-body "
+                    "calculations.\n");
+            }
+            is_initialized = true;
+            if (!is_controller_printf_initialized)
+            {
+                controller->Step_Print_Initial(this->module_name, "%14.7e");
+                is_controller_printf_initialized = true;
+            }
+            controller->printf("END INITIALIZING EDIP FORCE\n\n");
+            return;
+        }
     }
     if (!controller->Command_Exist(this->module_name, "in_file"))
     {
@@ -180,7 +250,7 @@ void EDIP_INFORMATION::Initial(CONTROLLER* controller, const char* module_name,
     is_initialized = true;
     if (!is_controller_printf_initialized)
     {
-        controller->Step_Print_Initial(this->module_name, "%.2f");
+        controller->Step_Print_Initial(this->module_name, "%14.7e");
         is_controller_printf_initialized = true;
     }
     controller->printf("END INITIALIZING EDIP FORCE\n\n");

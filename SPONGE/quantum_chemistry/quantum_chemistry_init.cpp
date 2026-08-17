@@ -1,8 +1,109 @@
-﻿#include "basis/basis.h"
+﻿#include <filesystem>
+#include <fstream>
+#include <highfive/highfive.hpp>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "basis/basis.h"
 #include "ecp/ecp_library.h"
 #include "guess/minao.h"
 #include "guess/sap.h"
 #include "quantum_chemistry.h"
+
+void QUANTUM_CHEMISTRY::Load_H5_QC_Type_Input(CONTROLLER* controller,
+                                              int atom_numbers)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    constexpr const char* root = "/qc/type";
+    if (controller->Command_Exist("qc_type_in_file") ||
+        !controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        if (!file.exist(root))
+        {
+            return;
+        }
+
+        int count = 0;
+        int charge = 0;
+        int multiplicity = 0;
+        file.getDataSet(std::string(root) + "/count").read(count);
+        file.getDataSet(std::string(root) + "/charge").read(charge);
+        file.getDataSet(std::string(root) + "/multiplicity").read(multiplicity);
+        if (count <= 0 || count > atom_numbers)
+        {
+            throw std::runtime_error(
+                "/qc/type/count must be positive and no larger than the "
+                "runtime atom count");
+        }
+        if (multiplicity <= 0)
+        {
+            throw std::runtime_error("/qc/type/multiplicity must be positive");
+        }
+
+        HighFive::DataSet atom_index_dataset =
+            file.getDataSet(std::string(root) + "/atom_index");
+        HighFive::DataSet symbol_dataset =
+            file.getDataSet(std::string(root) + "/symbol");
+        const auto atom_index_dimensions =
+            atom_index_dataset.getSpace().getDimensions();
+        const auto symbol_dimensions =
+            symbol_dataset.getSpace().getDimensions();
+        if (atom_index_dimensions.size() != 1 ||
+            symbol_dimensions.size() != 1 ||
+            atom_index_dimensions[0] != static_cast<std::size_t>(count) ||
+            symbol_dimensions[0] != static_cast<std::size_t>(count))
+        {
+            throw std::runtime_error(
+                "/qc/type/atom_index and /qc/type/symbol must both have "
+                "shape [count]");
+        }
+        std::vector<int> atom_index;
+        std::vector<std::string> symbols;
+        atom_index_dataset.read(atom_index);
+        symbol_dataset.read(symbols);
+        std::set<int> unique_atom_indices;
+        for (int i = 0; i < count; ++i)
+        {
+            if (atom_index[i] < 0 || atom_index[i] >= atom_numbers ||
+                !unique_atom_indices.insert(atom_index[i]).second)
+            {
+                throw std::runtime_error(
+                    "/qc/type/atom_index contains an out-of-range or duplicate "
+                    "index");
+            }
+            if (symbols[i].empty() ||
+                symbols[i].find_first_of(" \t\r\n") != std::string::npos)
+            {
+                throw std::runtime_error(
+                    "/qc/type/symbol contains an empty or whitespace symbol");
+            }
+        }
+
+        native_qc_charge = charge;
+        native_qc_multiplicity = multiplicity;
+        native_qc_atom_index = std::move(atom_index);
+        native_qc_symbol = std::move(symbols);
+        has_native_qc_type = true;
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string("Reason:\n\tfailed to read typed QC type from ") +
+            root + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat, "Load_H5_QC_Type_Input", message.c_str());
+    }
+}
 
 static void Init_ERI_Workspace_Params(QUANTUM_CHEMISTRY* qc,
                                       CONTROLLER* controller, int max_l)
@@ -154,12 +255,15 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
                                           const char*& qc_type_file,
                                           std::string& basis_set_name)
 {
-    if (!controller->Command_Exist("qc_type_in_file"))
+    if (controller->Command_Exist("qc_type_in_file"))
+    {
+        qc_type_file = controller->Command("qc_type_in_file");
+    }
+    else if (!has_native_qc_type)
     {
         is_initialized = 0;
         return false;
     }
-    qc_type_file = controller->Command("qc_type_in_file");
 
     std::string model_chemistry = "HF/6-31g";
     if (controller->Command_Exist("qc_model_chemistry"))
@@ -408,6 +512,7 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     if (controller->Command_Exist("qc_scf_output"))
     {
         const char* fname = controller->Command("qc_scf_output");
+        strcpy(scf_output_file_name, fname);
         Open_File_Safely(&scf_output_file, fname, "w");
     }
 
@@ -576,6 +681,15 @@ void QUANTUM_CHEMISTRY::Initial_Molecule(CONTROLLER* controller,
     mol.is_spherical = basis->spherical ? 1 : 0;
 
     std::vector<std::string> atom_symbols;
+    if (qc_type_file == NULL)
+    {
+        mol.natm = static_cast<int>(native_qc_atom_index.size());
+        mol.charge = native_qc_charge;
+        mol.multiplicity = native_qc_multiplicity;
+        atom_local = native_qc_atom_index;
+        atom_symbols = native_qc_symbol;
+    }
+    else
     {
         std::ifstream ifs(qc_type_file);
         if (!ifs.is_open())
@@ -944,6 +1058,7 @@ void QUANTUM_CHEMISTRY::Initial(CONTROLLER* controller, const int atom_numbers,
     }
     if (is_initialized) return;
 
+    Load_H5_QC_Type_Input(controller, atom_numbers);
     const char* qc_type_file = NULL;
     std::string basis_set_name;
     const bool need_qc = Parsing_Arguments(controller, atom_numbers,

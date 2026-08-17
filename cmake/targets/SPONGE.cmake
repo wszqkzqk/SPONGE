@@ -101,11 +101,14 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/valence_angle.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/torsion.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/hydrogen_bond.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/native_init.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp)
 
 set(SOURCES ${SPONGE_SOURCES})
 
 find_package(tomlplusplus CONFIG REQUIRED)
+find_package(HighFive CONFIG REQUIRED)
+find_package(HDF5 REQUIRED COMPONENTS C)
 add_library(
   sponge_toml STATIC
   ${PROJECT_ROOT_DIR}/SPONGE/third_party/toml/toml.cpp
@@ -120,4 +123,18 @@ target_link_libraries(sponge_toml PUBLIC tomlplusplus::tomlplusplus)
 
 add_executable(${CURRENT_TARGET} ${SOURCES})
 target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_toml)
+if(TARGET HighFive::HighFive)
+  target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive::HighFive)
+elseif(TARGET HighFive)
+  target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive)
+else()
+  message(
+    FATAL_ERROR "HighFive target was not provided by find_package(HighFive)")
+endif()
+if(TARGET HDF5::HDF5)
+  target_link_libraries(${CURRENT_TARGET} PRIVATE HDF5::HDF5)
+else()
+  target_include_directories(${CURRENT_TARGET} PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(${CURRENT_TARGET} PRIVATE ${HDF5_LIBRARIES})
+endif()
 install(TARGETS ${CURRENT_TARGET} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

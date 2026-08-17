@@ -35,6 +35,9 @@ struct PAIRWISE_FORCE
     float h_energy = 0.0f;
     int local_atom_numbers = 0;
     int total_local_numbers = 0;
+    bool has_native_parameters = false;
+    std::vector<float> native_parameter_values;
+    std::vector<int> native_atom_types;
 
     void Initial(CONTROLLER* controller, const char* module_name = NULL);
     void Read_Configuration(CONTROLLER* controller);

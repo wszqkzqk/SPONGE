@@ -1,0 +1,44 @@
+mode = "npt"
+step_limit = 2500000
+dt = 0.002
+target_temperature = 300.0
+target_pressure = 1.0
+
+[input.h5.topology]
+path = "topologies/protein.topology.spgt.h5"
+
+[input.h5.protocol]
+path = "protocols/metadyn.protocol.spgp.h5"
+
+[input.h5.restart]
+path = "runs/prod_0007.restart.spgr.h5"
+load = "structural"
+
+[thermostat]
+mode = "middle_langevin"
+seed = 123456
+tau = 1.0
+
+[barostat]
+mode = "monte_carlo_barostat"
+
+[barostat.monte_carlo]
+update_interval = 100
+
+[output.h5.trajectory]
+path = "prod.spg.h5md"
+vds = true
+chunk_size = 20
+repair_policy = "strict"
+
+[output.h5.restart]
+path = "prod.spgr.h5"
+
+[output.h5.observable]
+path = "prod.obs.spg.h5md"
+
+[write.interval]
+trajectory = 5000
+information = 500
+mdout = 500
+restart = 500000

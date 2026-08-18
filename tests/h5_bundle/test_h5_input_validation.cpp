@@ -229,14 +229,11 @@ static void Test_Protocol_Reader_Loads_Typed_Virtual_Atoms()
     const auto protocol_path = dir / "protocol.spgp.h5";
     {
         HighFive::File file(protocol_path.string(), HighFive::File::Overwrite);
-        Write_Scalar(file, "/cv/virtual_atom/center/type",
-                     std::string("center"));
-        Write_Int64_Vector(file, "/cv/virtual_atom/center/atom_indices",
-                           {0, 1});
-        Write_Float_Vector(file, "/cv/virtual_atom/center/weight",
-                           {0.25f, 0.75f});
+        Write_Scalar(file, "/cv/virtual_atom/dt/type", std::string("center"));
+        Write_Int64_Vector(file, "/cv/virtual_atom/dt/atom_indices", {0, 1});
+        Write_Float_Vector(file, "/cv/virtual_atom/dt/weight", {0.25f, 0.75f});
         Write_Scalar(file, "/cv/distance/type", std::string("distance"));
-        Write_String_Vector(file, "/cv/distance/atom_refs", {"center", "2"});
+        Write_String_Vector(file, "/cv/distance/atom_refs", {"dt", "2"});
     }
     {
         ProtocolCVH5Reader reader;
@@ -244,7 +241,7 @@ static void Test_Protocol_Reader_Loads_Typed_Virtual_Atoms()
         std::vector<ProtocolVirtualAtomDefinition> virtual_atoms;
         REQUIRE_TRUE(reader.Read_Virtual_Atoms(3, &virtual_atoms));
         REQUIRE_EQ(virtual_atoms.size(), static_cast<std::size_t>(1));
-        REQUIRE_EQ(virtual_atoms[0].name, std::string("center"));
+        REQUIRE_EQ(virtual_atoms[0].name, std::string("dt"));
         REQUIRE_EQ(virtual_atoms[0].atom_indices, std::vector<int>({0, 1}));
         REQUIRE_EQ(virtual_atoms[0].weight, std::vector<float>({0.25f, 0.75f}));
         std::vector<ProtocolCVDefinition> definitions;
@@ -253,7 +250,7 @@ static void Test_Protocol_Reader_Loads_Typed_Virtual_Atoms()
         REQUIRE_TRUE(std::find(definitions[0].runtime_parameters.begin(),
                                definitions[0].runtime_parameters.end(),
                                std::make_pair(std::string("atom"),
-                                              std::string("center 2"))) !=
+                                              std::string("dt 2"))) !=
                      definitions[0].runtime_parameters.end());
     }
     std::filesystem::remove_all(dir);

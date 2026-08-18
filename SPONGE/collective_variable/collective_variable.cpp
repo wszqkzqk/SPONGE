@@ -896,6 +896,13 @@ for CV '%CV_NAME%' should be %N%, but only %SIZE% found",
                 "%f%%s% (from default value)",
                 {{"f", std::to_string(default_value)}, {"s", unit_string}});
         }
+        else if (strcmp(parameter_name, "atom") == 0 &&
+                 cv_vatom_name.count(parameters[i]))
+        {
+            t[i] = cv_vatom_name[parameters[i]] + atom_numbers;
+            hint = string_format("%f%%s% (from cv virtual atom)",
+                                 {{"f", parameters[i]}, {"s", unit_string}});
+        }
         else if (controller->Command_Exist(parameters[i].c_str()))
         {
             controller->Check_Int(
@@ -906,12 +913,6 @@ for CV '%CV_NAME%' should be %N%, but only %SIZE% found",
                                  {{"f", std::to_string(t[i])},
                                   {"s", unit_string},
                                   {"C", parameters[i]}});
-        }
-        else if (cv_vatom_name.count(parameters[i]))
-        {
-            t[i] = cv_vatom_name[parameters[i]] + atom_numbers;
-            hint = string_format("%f%%s% (from cv virtual atom)",
-                                 {{"f", parameters[i]}, {"s", unit_string}});
         }
         else if (!is_str_int(parameters[i].c_str()))
         {

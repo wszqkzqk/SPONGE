@@ -1,5 +1,5 @@
 find_package(HighFive CONFIG REQUIRED)
-find_package(HDF5 REQUIRED COMPONENTS C)
+find_package(HDF5 1.10.7 REQUIRED COMPONENTS C)
 find_package(
   Python3
   COMPONENTS Interpreter

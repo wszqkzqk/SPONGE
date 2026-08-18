@@ -16,6 +16,13 @@
 #include "utils/h5md/atomic_file_publish.hpp"
 #include "utils/h5md/h5md_writer.hpp"
 
+#if H5_VERSION_GE(1, 10, 7) && \
+    !(H5_VERS_MAJOR == 1 && H5_VERS_MINOR == 12 && H5_VERS_RELEASE == 0)
+#define SPONGE_H5_HAS_FILE_LOCKING_API 1
+#else
+#define SPONGE_H5_HAS_FILE_LOCKING_API 0
+#endif
+
 namespace SpongeH5MD
 {
 inline bool HDF5_File_Locking_Is_Forced_On_By_Environment()
@@ -70,15 +77,23 @@ class HighFiveBackend : public WriterBackend
                 std::filesystem::create_directories(parent);
             }
             bool use_custom_access_props = options.swmr_compatible;
-#if defined(_WIN32) && H5_VERSION_GE(1, 10, 7)
+#if defined(_WIN32) && SPONGE_H5_HAS_FILE_LOCKING_API
             use_custom_access_props =
                 use_custom_access_props || options.atomic_snapshot;
+#elif defined(_WIN32)
+            if (options.atomic_snapshot)
+            {
+                return Fail(
+                    "Windows atomic snapshots require HDF5 "
+                    "1.10.7-1.10.x or 1.12.1+; HDF5 1.12.0 lacks "
+                    "H5Pset_file_locking");
+            }
 #endif
             if (use_custom_access_props)
             {
                 HighFive::FileAccessProps access_props =
                     HighFive::FileAccessProps::Empty();
-#if defined(_WIN32) && H5_VERSION_GE(1, 10, 7)
+#if defined(_WIN32) && SPONGE_H5_HAS_FILE_LOCKING_API
                 if (options.atomic_snapshot &&
                     HDF5_File_Locking_Is_Forced_On_By_Environment())
                 {

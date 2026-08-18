@@ -200,11 +200,12 @@ inline ManifestValidationReport Validate_Complete_Manifest(
             report.error_message = "manifest frame ranges are not contiguous";
             return report;
         }
-        if (entry.frame_count <= 0)
+        if (Manifest_Entry_Has_Negative_Stream_Count(entry) ||
+            !Manifest_Entry_Has_Stream_Frames(entry))
         {
             report.valid = false;
             report.error_message =
-                "manifest shard frame_count must be positive";
+                "manifest shard must contain at least one stream frame";
             return report;
         }
         expected_frame_start += entry.frame_count;

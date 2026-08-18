@@ -1829,6 +1829,66 @@ static void Test_Vds_Finalize_Without_Frames_With_Real_Backend()
     std::filesystem::remove_all(dir);
 }
 
+static void Test_Vds_Finalize_With_Only_Observables_With_Real_Backend()
+{
+    const auto dir = Unique_Temp_Path("vds_observable_only");
+    std::filesystem::create_directories(dir);
+    const auto wrapper_path = dir / "observable_only.spg.h5md";
+    const auto shard_root = dir / "observable_only.spg.shards";
+
+    {
+        HighFiveBackendFactory factory;
+        VdsTrajectoryH5Writer writer(&factory);
+        SpongeH5OutputPlan::ResolvedOutputPlan plan;
+        plan.trajectory.enabled = true;
+        plan.trajectory.path = wrapper_path.string();
+        plan.trajectory.vds = true;
+        plan.trajectory.chunk_size = 1000;
+        plan.trajectory.derived_shard_root = shard_root.string();
+
+        REQUIRE_TRUE(writer.Open(plan, "test"));
+        REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
+        REQUIRE_TRUE(
+            writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
+        REQUIRE_TRUE(writer.Append_Observable_Frame(
+            10, 0.1, {{"temperature", 299.0}}));
+        REQUIRE_TRUE(writer.Append_Observable_Frame(
+            20, 0.2, {{"temperature", 300.0}}));
+        REQUIRE_TRUE(writer.Finalize());
+        REQUIRE_EQ(writer.Total_Trajectory_Frame_Count(),
+                   static_cast<std::size_t>(0));
+        REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
+                   static_cast<std::size_t>(2));
+        REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(1));
+        REQUIRE_EQ(writer.Manifest()[0].frame_count, static_cast<int64_t>(0));
+        REQUIRE_EQ(writer.Manifest()[0].observable_frame_count,
+                   static_cast<int64_t>(2));
+    }
+
+    {
+        HighFive::File file(wrapper_path.string(), HighFive::File::ReadOnly);
+        REQUIRE_TRUE(!file.exist(path::particles_all_step));
+        REQUIRE_TRUE(!file.exist(path::position_value));
+        REQUIRE_TRUE(file.exist(path::observables_all_step));
+        REQUIRE_TRUE(file.exist(Observable_Value_Path("temperature")));
+        REQUIRE_EQ(Read_Int64_Vector(file, path::observables_all_step),
+                   std::vector<int64_t>({10, 20}));
+        REQUIRE_EQ(Read_Float64_Vector(file,
+                                      Observable_Value_Path("temperature")),
+                   std::vector<double>({299.0, 300.0}));
+        REQUIRE_EQ(Read_Int64_Vector(file,
+                                    path::shard_manifest_frame_count)[0],
+                   static_cast<int64_t>(0));
+        REQUIRE_EQ(Read_Int64_Vector(
+                       file, path::shard_manifest_observables_count)[0],
+                   static_cast<int64_t>(2));
+    }
+
+    REQUIRE_TRUE(std::filesystem::exists(
+        shard_root / "segment_000000.spg.h5md"));
+    std::filesystem::remove_all(dir);
+}
+
 static void Test_Vds_Complete_Prefix_Repair_With_Real_Backend()
 {
     const auto dir = Unique_Temp_Path("vds_complete_prefix_repair");
@@ -2499,6 +2559,7 @@ int main()
             Test_Observable_Writer_Missing_Value_With_Real_Backend();
             Test_Module_Metad_And_Reaxff_With_Real_Backend();
             Test_Vds_Finalize_Without_Frames_With_Real_Backend();
+            Test_Vds_Finalize_With_Only_Observables_With_Real_Backend();
             Test_Vds_Complete_Prefix_Repair_With_Real_Backend();
             Test_Vds_Trajectory_Writer_With_Real_Backend();
         });

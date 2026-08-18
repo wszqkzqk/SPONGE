@@ -1,8 +1,8 @@
 ﻿#pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -37,6 +37,24 @@ struct VdsShardManifestEntry
     double time_end = 0.0;
     std::string status = "open";
 };
+
+inline bool Manifest_Entry_Has_Stream_Frames(
+    const VdsShardManifestEntry& entry)
+{
+    return entry.frame_count > 0 || entry.observable_frame_count > 0 ||
+           entry.nhc_frame_count > 0 || entry.sits_nk_frame_count > 0 ||
+           entry.metadynamics_scalar_frame_count > 0 ||
+           entry.qc_frame_count > 0 || entry.reaxff_frame_count > 0;
+}
+
+inline bool Manifest_Entry_Has_Negative_Stream_Count(
+    const VdsShardManifestEntry& entry)
+{
+    return entry.frame_count < 0 || entry.observable_frame_count < 0 ||
+           entry.nhc_frame_count < 0 || entry.sits_nk_frame_count < 0 ||
+           entry.metadynamics_scalar_frame_count < 0 ||
+           entry.qc_frame_count < 0 || entry.reaxff_frame_count < 0;
+}
 
 class VdsTrajectoryH5Writer
 {
@@ -247,15 +265,7 @@ class VdsTrajectoryH5Writer
         if (current_shard_writer_ == nullptr ||
             current_shard_frame_count_ >= chunk_size_)
         {
-            const int64_t shard_step =
-                pending_observable_frames_.empty()
-                    ? step
-                    : pending_observable_frames_.front().step;
-            const double shard_time =
-                pending_observable_frames_.empty()
-                    ? time
-                    : pending_observable_frames_.front().time;
-            if (!Rotate_To_New_Shard(shard_step, shard_time))
+            if (!Rotate_To_New_Shard(step, time))
             {
                 return false;
             }
@@ -268,11 +278,13 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.frame_count += 1;
-        current_manifest_entry_.step_end = step;
-        current_manifest_entry_.time_end = time;
+        current_manifest_entry_.step_end =
+            std::max(current_manifest_entry_.step_end, step);
+        current_manifest_entry_.time_end =
+            std::max(current_manifest_entry_.time_end, time);
         current_shard_frame_count_ += 1;
         total_trajectory_frame_count_ += 1;
-        return Flush_Pending_Observable_Frames();
+        return true;
     }
 
     bool Append_Observable_Frame(
@@ -291,9 +303,7 @@ class VdsTrajectoryH5Writer
         }
         if (current_shard_writer_ == nullptr)
         {
-            pending_observable_frames_.push_back(
-                {step, time, values_by_hdf5_name});
-            return true;
+            if (!Rotate_To_New_Shard(step, time)) return false;
         }
         if (!current_shard_writer_->Append_Observable_Frame(
                 step, time, values_by_hdf5_name))
@@ -302,6 +312,10 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.observable_frame_count += 1;
+        current_manifest_entry_.step_end =
+            std::max(current_manifest_entry_.step_end, step);
+        current_manifest_entry_.time_end =
+            std::max(current_manifest_entry_.time_end, time);
         total_observable_frame_count_ += 1;
         return true;
     }
@@ -546,17 +560,6 @@ class VdsTrajectoryH5Writer
     {
         repair_applied_ = false;
         repaired_shard_count_ = 0;
-        if (!pending_observable_frames_.empty())
-        {
-            last_error_ =
-                "cannot finalize VDS observables before the first trajectory "
-                "frame";
-            if (wrapper_writer_ != nullptr)
-            {
-                wrapper_writer_->Mark_Failed(last_error_);
-            }
-            return false;
-        }
         if (!Complete_Current_Shard(allow_repair))
         {
             if (wrapper_writer_ != nullptr)
@@ -602,31 +605,6 @@ class VdsTrajectoryH5Writer
     std::string Last_Error() const { return last_error_; }
 
    private:
-    struct PendingObservableFrame
-    {
-        int64_t step = 0;
-        double time = 0.0;
-        std::map<std::string, double> values_by_hdf5_name;
-    };
-
-    bool Flush_Pending_Observable_Frames()
-    {
-        while (!pending_observable_frames_.empty())
-        {
-            const auto& frame = pending_observable_frames_.front();
-            if (!current_shard_writer_->Append_Observable_Frame(
-                    frame.step, frame.time, frame.values_by_hdf5_name))
-            {
-                last_error_ = current_shard_writer_->Last_Error();
-                return false;
-            }
-            current_manifest_entry_.observable_frame_count += 1;
-            total_observable_frame_count_ += 1;
-            pending_observable_frames_.pop_front();
-        }
-        return true;
-    }
-
     bool Rotate_To_New_Shard(const int64_t step, const double time)
     {
         const std::size_t manifest_size_before = manifest_.size();
@@ -742,7 +720,7 @@ class VdsTrajectoryH5Writer
         {
             return true;
         }
-        if (current_manifest_entry_.frame_count > 0)
+        if (Manifest_Entry_Has_Stream_Frames(current_manifest_entry_))
         {
             current_manifest_entry_.status = "complete";
             if (!current_shard_writer_->Finalize())
@@ -819,13 +797,15 @@ class VdsTrajectoryH5Writer
                 last_error_ = "manifest frame ranges are not contiguous";
                 return false;
             }
-            if (entry.frame_count <= 0)
+            if (Manifest_Entry_Has_Negative_Stream_Count(entry) ||
+                !Manifest_Entry_Has_Stream_Frames(entry))
             {
                 if (allow_repair)
                 {
                     return Repair_Manifest_To_Prefix(valid_prefix_count);
                 }
-                last_error_ = "manifest shard frame_count must be positive";
+                last_error_ =
+                    "manifest shard must contain at least one stream frame";
                 return false;
             }
             expected_frame_start += entry.frame_count;
@@ -1090,6 +1070,7 @@ class VdsTrajectoryH5Writer
         sources.reserve(manifest_.size());
         for (const auto& entry : manifest_)
         {
+            if (entry.frame_count <= 0) continue;
             VirtualDatasetSource source;
             source.file_path = Vds_Source_Path(entry.path);
             source.dataset_path = dataset_path;
@@ -1114,7 +1095,7 @@ class VdsTrajectoryH5Writer
             last_error_ = "VDS wrapper is not open";
             return false;
         }
-        if (!particle_layout_defined_ || manifest_.empty())
+        if (!particle_layout_defined_ || total_trajectory_frame_count_ == 0)
         {
             return true;
         }
@@ -1940,8 +1921,6 @@ class VdsTrajectoryH5Writer
     std::vector<std::string> reaxff_terms_;
     std::vector<std::string> observable_hdf5_names_;
     std::vector<std::string> observable_original_names_;
-    std::deque<PendingObservableFrame> pending_observable_frames_;
-
     VdsShardManifestEntry current_manifest_entry_;
     std::vector<VdsShardManifestEntry> manifest_;
     int current_shard_frame_count_ = 0;

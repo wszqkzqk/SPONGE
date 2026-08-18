@@ -809,7 +809,7 @@ static void Test_Vds_Preserves_Observables_Before_First_Particle_Frame()
     REQUIRE_TRUE(writer.Append_Observable_Frame(
         1, 0.01, {{"temperature", 300.0}}));
     REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
-               static_cast<std::size_t>(0));
+               static_cast<std::size_t>(2));
 
     float position[3] = {1.0f, 0.0f, 0.0f};
     float box[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
@@ -827,7 +827,7 @@ static void Test_Vds_Preserves_Observables_Before_First_Particle_Frame()
                static_cast<int64_t>(2));
 }
 
-static void Test_Vds_Rejects_Unanchored_Observables_At_Finalize()
+static void Test_Vds_Finalizes_Observable_Only_Shard()
 {
     MockBackendFactory factory;
     VdsTrajectoryH5Writer writer(&factory);
@@ -839,11 +839,22 @@ static void Test_Vds_Rejects_Unanchored_Observables_At_Finalize()
     REQUIRE_TRUE(writer.Append_Observable_Frame(
         0, 0.0, {{"temperature", 299.0}}));
 
-    REQUIRE_TRUE(!writer.Finalize());
-    REQUIRE_EQ(writer.Last_Error(),
-               std::string("cannot finalize VDS observables before the first "
-                           "trajectory frame"));
-    REQUIRE_EQ(factory.logs[0]->status, FileStatus::failed);
+    REQUIRE_TRUE(writer.Finalize());
+    REQUIRE_EQ(writer.Total_Trajectory_Frame_Count(),
+               static_cast<std::size_t>(0));
+    REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
+               static_cast<std::size_t>(1));
+    REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(1));
+    REQUIRE_EQ(writer.Manifest()[0].frame_count, static_cast<int64_t>(0));
+    REQUIRE_EQ(writer.Manifest()[0].observable_frame_count,
+               static_cast<int64_t>(1));
+    REQUIRE_EQ(factory.logs[1]->append_counts.at(path::observables_all_step),
+               static_cast<int64_t>(1));
+    REQUIRE_EQ(factory.logs[0]->virtual_datasets.at(path::observables_all_step)
+                   .size(),
+               static_cast<std::size_t>(1));
+    REQUIRE_TRUE(factory.logs[0]->virtual_datasets.count(
+                     path::particles_all_step) == 0);
 }
 
 static void Test_Vds_Open_Precondition_Errors()
@@ -1109,7 +1120,7 @@ int main()
             Test_Vds_Wrapper_Finalize_Failure_Marks_Wrapper_Failed();
             Test_Vds_Precondition_Errors();
             Test_Vds_Preserves_Observables_Before_First_Particle_Frame();
-            Test_Vds_Rejects_Unanchored_Observables_At_Finalize();
+            Test_Vds_Finalizes_Observable_Only_Shard();
             Test_Vds_Open_Precondition_Errors();
             Test_Vds_Finalize_Without_Frames();
             Test_Complete_Prefix_Repair_Finalize();

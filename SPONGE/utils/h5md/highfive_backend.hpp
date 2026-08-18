@@ -2,6 +2,7 @@
 
 #include <hdf5.h>
 
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +18,19 @@
 
 namespace SpongeH5MD
 {
+inline bool HDF5_File_Locking_Is_Forced_On_By_Environment()
+{
+    const char* value = std::getenv("HDF5_USE_FILE_LOCKING");
+    if (value == nullptr) return false;
+    std::string normalized(value);
+    for (char& character : normalized)
+    {
+        character = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(character)));
+    }
+    return normalized == "TRUE" || normalized == "1";
+}
+
 class HighFiveBackend : public WriterBackend
 {
    public:
@@ -48,6 +62,14 @@ class HighFiveBackend : public WriterBackend
                 HighFive::FileAccessProps access_props =
                     HighFive::FileAccessProps::Empty();
 #if defined(_WIN32) && H5_VERSION_GE(1, 10, 7)
+                if (options.atomic_snapshot &&
+                    HDF5_File_Locking_Is_Forced_On_By_Environment())
+                {
+                    return Fail(
+                        "HDF5_USE_FILE_LOCKING forces file locking on, which "
+                        "prevents Windows atomic snapshot publication; unset "
+                        "it or set it to FALSE");
+                }
                 if (options.atomic_snapshot &&
                     H5Pset_file_locking(access_props.getId(), false, true) < 0)
                 {
@@ -157,6 +179,7 @@ class HighFiveBackend : public WriterBackend
     {
         if (!Ensure_File() || !Flush()) return false;
         const std::string temporary_path = destination_path + ".tmp";
+        const std::string pending_path = destination_path + ".pending";
         std::string error;
         if (!Remove_File_If_Exists(temporary_path, &error))
         {
@@ -183,9 +206,23 @@ class HighFiveBackend : public WriterBackend
                 }
                 return true;
             }
+            if (destination_busy)
+            {
+                std::string pending_error;
+                if (Atomic_Replace_File(temporary_path, pending_path,
+                                        &pending_error))
+                {
+                    return Fail(error + "; latest snapshot retained at " +
+                                pending_path);
+                }
+                return Fail(error + "; additionally failed to retain latest "
+                                    "snapshot at " +
+                            pending_path + ": " + pending_error);
+            }
             Remove_File_If_Exists(temporary_path);
             return Fail(error);
         }
+        Remove_File_If_Exists(pending_path);
         return true;
     }
 

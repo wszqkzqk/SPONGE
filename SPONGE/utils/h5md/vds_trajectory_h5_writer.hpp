@@ -278,10 +278,8 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.frame_count += 1;
-        current_manifest_entry_.step_end =
-            std::max(current_manifest_entry_.step_end, step);
-        current_manifest_entry_.time_end =
-            std::max(current_manifest_entry_.time_end, time);
+        current_manifest_entry_.step_end = step;
+        current_manifest_entry_.time_end = time;
         current_shard_frame_count_ += 1;
         total_trajectory_frame_count_ += 1;
         return true;
@@ -312,10 +310,13 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.observable_frame_count += 1;
-        current_manifest_entry_.step_end =
-            std::max(current_manifest_entry_.step_end, step);
-        current_manifest_entry_.time_end =
-            std::max(current_manifest_entry_.time_end, time);
+        if (current_manifest_entry_.frame_count == 0)
+        {
+            current_manifest_entry_.step_end =
+                std::max(current_manifest_entry_.step_end, step);
+            current_manifest_entry_.time_end =
+                std::max(current_manifest_entry_.time_end, time);
+        }
         total_observable_frame_count_ += 1;
         return true;
     }
@@ -896,15 +897,14 @@ class VdsTrajectoryH5Writer
         {
             return true;
         }
-        if (!manifest_.empty())
+        for (const auto& entry : manifest_)
         {
-            const auto& last_entry = manifest_.back();
-            for (const auto& entry : manifest_)
+            frame_count += entry.frame_count;
+            if (entry.frame_count > 0)
             {
-                frame_count += entry.frame_count;
+                last_step = entry.step_end;
+                last_time = entry.time_end;
             }
-            last_step = last_entry.step_end;
-            last_time = last_entry.time_end;
         }
         if (!wrapper_writer_->Write_Output_Completion(frame_count, last_step,
                                                       last_time))

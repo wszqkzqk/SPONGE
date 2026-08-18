@@ -814,17 +814,20 @@ static void Test_Vds_Preserves_Observables_Before_First_Particle_Frame()
     float position[3] = {1.0f, 0.0f, 0.0f};
     float box[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     REQUIRE_TRUE(writer.Append_Particle_Frame(1, 0.01, position, box));
+    REQUIRE_TRUE(writer.Append_Observable_Frame(
+        2, 0.02, {{"temperature", 301.0}}));
     REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
-               static_cast<std::size_t>(2));
+               static_cast<std::size_t>(3));
     REQUIRE_TRUE(writer.Finalize());
 
     REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(1));
     REQUIRE_EQ(writer.Manifest()[0].frame_count, static_cast<int64_t>(1));
     REQUIRE_EQ(writer.Manifest()[0].observable_frame_count,
-               static_cast<int64_t>(2));
+               static_cast<int64_t>(3));
     REQUIRE_EQ(writer.Manifest()[0].step_start, static_cast<int64_t>(0));
+    REQUIRE_EQ(writer.Manifest()[0].step_end, static_cast<int64_t>(1));
     REQUIRE_EQ(factory.logs[1]->append_counts.at(path::observables_all_step),
-               static_cast<int64_t>(2));
+               static_cast<int64_t>(3));
 }
 
 static void Test_Vds_Finalizes_Observable_Only_Shard()

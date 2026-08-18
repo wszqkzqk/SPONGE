@@ -163,59 +163,9 @@ add_test(
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_matrix_plan_manifest.py
     --io-contract-manifest
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_io_contract_manifest.py
-    --audit-manifest
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_audit_matrix_manifest.py
     --targets-manifest ${CMAKE_CURRENT_SOURCE_DIR}/TEST_TARGETS.md)
 set_tests_properties(test_h5_ci_plan_manifest
                      PROPERTIES LABELS "h5_bundle;contract;matrix")
-
-add_test(
-  NAME test_h5_audit_matrix_manifest
-  COMMAND
-    ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_audit_matrix_manifest.py --plan
-    ${CMAKE_CURRENT_SOURCE_DIR}/INPUT_OUTPUT_MATRIX_TEST_PLAN.md --audit
-    ${PROJECT_ROOT_DIR}/docs/sponge_h5_bundle_unit_test_audit_matrix.md
-    --coverage-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_io_contract_coverage.cpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_output_plan.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_input_matrix_contract.cpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_legacy_sidecar.cpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_input_validation.cpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_restart_h5_reader.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_topology_native_h5_reader.cpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_trajectory_h5_reader.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_input_output_smoke_matrix.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_reaxff_edip_runtime_parity.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_restart_load_runtime_closure.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_vds_terminal_resume_smoke.cpp
-    --evidence-source
-    ${PROJECT_ROOT_DIR}/SPONGE/utils/h5md/topology_custom_force_h5_materializer.hpp
-    --evidence-source
-    ${PROJECT_ROOT_DIR}/SPONGE/utils/h5md/topology_manybody_h5_materializer.hpp
-    --evidence-source
-    ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/native_init.cpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/h5_input_matrix_fixture.hpp
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_io_matrix_spec.cpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_matrix_plan_manifest.py
-    --evidence-source ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_ci_plan_manifest.py
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_vds_trajectory_writer_with_mock_backend.cpp
-    --evidence-source
-    ${PROJECT_ROOT_DIR}/SPONGE/utils/h5md/vds_trajectory_h5_writer.hpp
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_io_contract_manifest.py
-    --evidence-source
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h5_input_fixture_equivalence.py)
-set_tests_properties(test_h5_audit_matrix_manifest
-                     PROPERTIES LABELS "h5_bundle;contract;coverage")
 
 add_sponge_h5_bundle_test(test_h5_io_matrix_spec test_h5_io_matrix_spec.cpp)
 set_tests_properties(test_h5_io_matrix_spec

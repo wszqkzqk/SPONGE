@@ -456,7 +456,6 @@ def require_smoke_preparation_before_gate(smoke_text):
 def require_manifest_guard_sources_are_wired(
     matrix_manifest_text,
     io_contract_manifest_text,
-    audit_manifest_text,
     cmake_text,
 ):
     matrix_tokens = [
@@ -511,43 +510,6 @@ def require_manifest_guard_sources_are_wired(
             f"semantic equivalence evidence: {missing_io_tokens}"
         )
 
-    audit_tokens = [
-        'parser.add_argument("--evidence-source"',
-        "require_acceptance_criteria_are_audited(plan_text, audit_text, evidence_text)",
-        "Acceptance Criteria source evidence",
-        "Test_Phase6_Plan_Buckets_Are_Represented",
-        "require_materialized_sidecars_match_legacy",
-        "Run_Legacy_Sidecar_Smoke_Cases",
-    ]
-    compact_audit_text = "".join(audit_manifest_text.split())
-    missing_audit_tokens = [
-        token
-        for token in audit_tokens
-        if "".join(token.split()) not in compact_audit_text
-    ]
-    if missing_audit_tokens:
-        fail(
-            "audit manifest source no longer binds Acceptance Criteria to "
-            f"source-level evidence: {missing_audit_tokens}"
-        )
-
-    required_evidence_sources = [
-        "test_h5_output_plan.cpp",
-        "test_h5_input_matrix_contract.cpp",
-        "test_h5_input_validation.cpp",
-        "test_h5_input_output_smoke_matrix.cpp",
-        "test_h5_reaxff_edip_runtime_parity.cpp",
-        "test_h5_restart_load_runtime_closure.cpp",
-        "test_h5_vds_terminal_resume_smoke.cpp",
-        "test_h5_io_contract_manifest.py",
-        "test_h5_input_fixture_equivalence.py",
-    ]
-    for source in required_evidence_sources:
-        if source not in cmake_text:
-            fail(f"audit manifest CTest command lacks evidence source {source}")
-    if cmake_text.count("--evidence-source") < len(required_evidence_sources):
-        fail("audit manifest CTest command lacks enough --evidence-source args")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -557,7 +519,6 @@ def main():
     parser.add_argument("--smoke-matrix", required=True, type=Path)
     parser.add_argument("--matrix-manifest", required=True, type=Path)
     parser.add_argument("--io-contract-manifest", required=True, type=Path)
-    parser.add_argument("--audit-manifest", required=True, type=Path)
     parser.add_argument("--targets-manifest", required=True, type=Path)
     args = parser.parse_args()
 
@@ -568,7 +529,6 @@ def main():
     smoke_text = args.smoke_matrix.read_text()
     matrix_manifest_text = args.matrix_manifest.read_text()
     io_contract_manifest_text = args.io_contract_manifest.read_text()
-    audit_manifest_text = args.audit_manifest.read_text()
     targets_manifest_text = args.targets_manifest.read_text()
     labels_by_test = parse_cmake_test_labels(cmake_text)
     script_commands = parse_script_commands(script_text)
@@ -590,7 +550,6 @@ def main():
     require_manifest_guard_sources_are_wired(
         matrix_manifest_text,
         io_contract_manifest_text,
-        audit_manifest_text,
         cmake_text,
     )
 

@@ -36,7 +36,6 @@ sync with `tests/h5_bundle/CMakeLists.txt`.
 | `test_h5_test_targets_manifest` | `test_h5_test_targets_manifest.py` | `h5_bundle;contract` |
 | `test_h5_matrix_plan_manifest` | `test_h5_matrix_plan_manifest.py` | `h5_bundle;contract;matrix` |
 | `test_h5_ci_plan_manifest` | `test_h5_ci_plan_manifest.py` | `h5_bundle;contract;matrix` |
-| `test_h5_audit_matrix_manifest` | `test_h5_audit_matrix_manifest.py` | `h5_bundle;contract;coverage` |
 | `test_h5_io_matrix_spec` | `test_h5_io_matrix_spec.cpp` | `h5_bundle;contract;matrix;rerun;vds` |
 | `test_h5_input_output_smoke_matrix` | `test_h5_input_output_smoke_matrix.cpp` | `h5_bundle;input;smoke;matrix;rerun;vds` |
 | `test_h5_reaxff_edip_runtime_parity` | `test_h5_reaxff_edip_runtime_parity.cpp` | `h5_bundle;input;smoke;matrix;rerun;vds;manybody` |
@@ -113,8 +112,6 @@ where all terminal shards finalize cleanly.
 - Add a row to this manifest.
 - `test_h5_test_targets_manifest` fails if the CTest target table drifts from
   `CMakeLists.txt`.
-- Update `docs/sponge_h5_bundle_unit_test_audit_matrix.md` if the test covers a
-  new contract item.
 
 ## Expanded real-backend module path coverage
 

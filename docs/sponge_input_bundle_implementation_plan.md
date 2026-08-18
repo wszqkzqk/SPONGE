@@ -1269,7 +1269,6 @@ Primary files:
 - `SPONGE/MD_core/MD_core.h`
 - `SPONGE/main.cpp`
 - `tests/control/test_h5_input_assembler.cpp`
-- End-to-end smoke input under `examples/h5_input/`
 
 Implementation steps:
 
@@ -1333,7 +1332,6 @@ Primary files:
 - `SPONGE/MD_core/rerun.hpp`
 - `SPONGE/utils/h5md/input_plan.hpp`
 - `tests/h5_bundle/test_trajectory_h5_reader.cpp`
-- `examples/h5_input/rerun_h5md.mdin.spg.toml`
 
 Implementation steps:
 
@@ -1654,8 +1652,6 @@ Primary files:
 - `SPONGE/MD_core/rerun.hpp`
 - `SPONGE/utils/h5md/input_plan.hpp`
 - `SPONGE/utils/h5md/input_assembler.hpp`
-- `examples/h5_input/npt_bundle.mdin.spg.toml`
-- `examples/h5_input/rerun_h5md.mdin.spg.toml`
 
 Implementation steps:
 
@@ -1694,8 +1690,8 @@ trajectory output from H5 launch can be read back by TrajectoryH5Reader
 
 Done boundary:
 
-This phase is complete when the canonical examples are executable launch decks,
-not only schema examples.
+This phase is complete when the canonical test fixtures are executable launch
+decks, not only schema examples.
 
 ### Phase 8 Detailed Plan: Migration, docs, and downstream sync
 
@@ -1709,8 +1705,6 @@ Primary files:
 - `docs/input-reference/io.md`
 - `docs/input-reference/barostat.md`
 - `docs/sponge_input_bundle_inventory.md`
-- `examples/h5_input/npt_bundle.mdin.spg.toml`
-- `examples/h5_input/rerun_h5md.mdin.spg.toml`
 - `scripts/check_mdin_schema_sync.py`
 
 Implementation steps:
@@ -1720,9 +1714,7 @@ Implementation steps:
    - restart load policies
    - H5MD rerun input
    - parser aliases
-2. Add example mdin files:
-   - `examples/h5_input/npt_bundle.mdin.spg.toml`
-   - `examples/h5_input/rerun_h5md.mdin.spg.toml`
+2. Keep end-to-end H5 launch coverage in `tests/h5_bundle/`.
 3. Add a Mokda sync note:
    - source: `SPONGE/schemas/`
    - destination: Mokda schema locations

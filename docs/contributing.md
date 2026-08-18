@@ -4,9 +4,9 @@
 
 Before a contribution can be merged, every individual or organization that
 owns rights in it must explicitly accept the
-[SPONGE Contributors Licensing Agreement](../CONTRIBUTOR_LICENSE_AGREEMENT.md).
+[SPONGE Contributors Licensing Agreement](../CLA.md).
 The English agreement controls; the Chinese translation is available at
-[`CONTRIBUTOR_LICENSE_AGREEMENT.zh-CN.md`](../CONTRIBUTOR_LICENSE_AGREEMENT.zh-CN.md).
+[`CLA-zh-CN.md`](../CLA-zh-CN.md).
 
 Contributors must disclose all third-party material and its license terms in
 the pull request. Maintainers must record the contributor's acceptance before

@@ -2145,6 +2145,8 @@ static void Test_Vds_Trajectory_Writer_With_Real_Backend()
         float nhc_1[2] = {0.3f, 0.4f};
         float sits_0[3] = {1.0f, 2.0f, 3.0f};
         float sits_1[3] = {4.0f, 5.0f, 6.0f};
+        REQUIRE_TRUE(writer.Append_Reaxff_Frame(
+            10, 0.1, {{"bond", 1.5}, {"angle", 3.5}}));
         REQUIRE_TRUE(writer.Append_Particle_Frame(10, 0.1, position_0, box));
         REQUIRE_TRUE(
             writer.Append_Observable_Frame(10, 0.1, {{"temperature", 300.0}}));
@@ -2155,8 +2157,6 @@ static void Test_Vds_Trajectory_Writer_With_Real_Backend()
             writer.Append_Metadynamics_Scalar_Frame(10, 0.1, 1.0, 2.0, 3.0));
         double spin_square_0 = 0.11;
         REQUIRE_TRUE(writer.Append_Qc_Frame(10, 0.1, -10.0, &spin_square_0));
-        REQUIRE_TRUE(writer.Append_Reaxff_Frame(
-            10, 0.1, {{"bond", 1.5}, {"angle", 3.5}}));
         REQUIRE_TRUE(writer.Append_Particle_Frame(20, 0.2, position_1, box));
         REQUIRE_TRUE(
             writer.Append_Observable_Frame(20, 0.2, {{"temperature", 301.0}}));

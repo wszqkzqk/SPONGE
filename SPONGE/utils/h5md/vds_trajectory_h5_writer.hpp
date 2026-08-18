@@ -38,8 +38,7 @@ struct VdsShardManifestEntry
     std::string status = "open";
 };
 
-inline bool Manifest_Entry_Has_Stream_Frames(
-    const VdsShardManifestEntry& entry)
+inline bool Manifest_Entry_Has_Stream_Frames(const VdsShardManifestEntry& entry)
 {
     return entry.frame_count > 0 || entry.observable_frame_count > 0 ||
            entry.nhc_frame_count > 0 || entry.sits_nk_frame_count > 0 ||
@@ -301,7 +300,7 @@ class VdsTrajectoryH5Writer
         }
         if (current_shard_writer_ == nullptr)
         {
-            if (!Rotate_To_New_Shard(step, time)) return false;
+            if (!Ensure_Current_Shard(step, time)) return false;
         }
         if (!current_shard_writer_->Append_Observable_Frame(
                 step, time, values_by_hdf5_name))
@@ -310,13 +309,7 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.observable_frame_count += 1;
-        if (current_manifest_entry_.frame_count == 0)
-        {
-            current_manifest_entry_.step_end =
-                std::max(current_manifest_entry_.step_end, step);
-            current_manifest_entry_.time_end =
-                std::max(current_manifest_entry_.time_end, time);
-        }
+        Extend_Nonparticle_Shard_Range(step, time);
         total_observable_frame_count_ += 1;
         return true;
     }
@@ -325,13 +318,6 @@ class VdsTrajectoryH5Writer
                               const std::string& module_name,
                               const float* values, std::size_t k_count)
     {
-        if (current_shard_writer_ == nullptr)
-        {
-            last_error_ =
-                "SITS nk frames require an open shard anchored by a trajectory "
-                "frame";
-            return false;
-        }
         if (!sits_nk_layout_defined_)
         {
             last_error_ = "SITS nk layout must be defined before appending";
@@ -342,6 +328,7 @@ class VdsTrajectoryH5Writer
             last_error_ = "SITS nk shape changed within VDS trajectory";
             return false;
         }
+        if (!Ensure_Current_Shard(step, time)) return false;
         if (!current_shard_writer_->Append_Sits_Nk_Frame(
                 step, time, module_name, values, k_count))
         {
@@ -349,6 +336,7 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.sits_nk_frame_count += 1;
+        Extend_Nonparticle_Shard_Range(step, time);
         return true;
     }
 
@@ -357,13 +345,6 @@ class VdsTrajectoryH5Writer
                                         const float* velocities,
                                         std::size_t chain_length)
     {
-        if (current_shard_writer_ == nullptr)
-        {
-            last_error_ =
-                "NHC frames require an open shard anchored by a trajectory "
-                "frame";
-            return false;
-        }
         if (!nhc_layout_defined_)
         {
             last_error_ = "NHC layout must be defined before appending";
@@ -374,6 +355,7 @@ class VdsTrajectoryH5Writer
             last_error_ = "NHC chain length changed within VDS trajectory";
             return false;
         }
+        if (!Ensure_Current_Shard(step, time)) return false;
         if (!current_shard_writer_->Append_Nose_Hoover_Chain_Frame(
                 step, time, coordinates, velocities, chain_length))
         {
@@ -381,25 +363,20 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.nhc_frame_count += 1;
+        Extend_Nonparticle_Shard_Range(step, time);
         return true;
     }
 
     bool Append_Metadynamics_Scalar_Frame(const int64_t step, const double time,
                                           double meta, double rbias, double rct)
     {
-        if (current_shard_writer_ == nullptr)
-        {
-            last_error_ =
-                "metadynamics scalar frames require an open shard anchored by "
-                "a trajectory frame";
-            return false;
-        }
         if (!metadynamics_scalar_layout_defined_)
         {
             last_error_ =
                 "metadynamics scalar layout must be defined before appending";
             return false;
         }
+        if (!Ensure_Current_Shard(step, time)) return false;
         if (!current_shard_writer_->Append_Metadynamics_Scalar_Frame(
                 step, time, meta, rbias, rct))
         {
@@ -407,24 +384,19 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.metadynamics_scalar_frame_count += 1;
+        Extend_Nonparticle_Shard_Range(step, time);
         return true;
     }
 
     bool Append_Qc_Frame(const int64_t step, const double time, double energy,
                          const double* spin_square = nullptr)
     {
-        if (current_shard_writer_ == nullptr)
-        {
-            last_error_ =
-                "QC frames require an open shard anchored by a trajectory "
-                "frame";
-            return false;
-        }
         if (!qc_layout_defined_)
         {
             last_error_ = "QC layout must be defined before appending";
             return false;
         }
+        if (!Ensure_Current_Shard(step, time)) return false;
         if (!current_shard_writer_->Append_Qc_Frame(step, time, energy,
                                                     spin_square))
         {
@@ -432,6 +404,7 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.qc_frame_count += 1;
+        Extend_Nonparticle_Shard_Range(step, time);
         return true;
     }
 
@@ -439,18 +412,12 @@ class VdsTrajectoryH5Writer
         const int64_t step, const double time,
         const std::map<std::string, double>& values_by_term)
     {
-        if (current_shard_writer_ == nullptr)
-        {
-            last_error_ =
-                "ReaxFF frames require an open shard anchored by a trajectory "
-                "frame";
-            return false;
-        }
         if (!reaxff_layout_defined_)
         {
             last_error_ = "ReaxFF layout must be defined before appending";
             return false;
         }
+        if (!Ensure_Current_Shard(step, time)) return false;
         if (!current_shard_writer_->Append_Reaxff_Frame(step, time,
                                                         values_by_term))
         {
@@ -458,6 +425,7 @@ class VdsTrajectoryH5Writer
             return false;
         }
         current_manifest_entry_.reaxff_frame_count += 1;
+        Extend_Nonparticle_Shard_Range(step, time);
         return true;
     }
 
@@ -606,6 +574,21 @@ class VdsTrajectoryH5Writer
     std::string Last_Error() const { return last_error_; }
 
    private:
+    bool Ensure_Current_Shard(const int64_t step, const double time)
+    {
+        return current_shard_writer_ != nullptr ||
+               Rotate_To_New_Shard(step, time);
+    }
+
+    void Extend_Nonparticle_Shard_Range(const int64_t step, const double time)
+    {
+        if (current_manifest_entry_.frame_count != 0) return;
+        current_manifest_entry_.step_end =
+            std::max(current_manifest_entry_.step_end, step);
+        current_manifest_entry_.time_end =
+            std::max(current_manifest_entry_.time_end, time);
+    }
+
     bool Rotate_To_New_Shard(const int64_t step, const double time)
     {
         const std::size_t manifest_size_before = manifest_.size();

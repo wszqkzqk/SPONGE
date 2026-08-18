@@ -804,18 +804,18 @@ static void Test_Vds_Preserves_Observables_Before_First_Particle_Frame()
     REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
     REQUIRE_TRUE(writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
 
-    REQUIRE_TRUE(writer.Append_Observable_Frame(
-        0, 0.0, {{"temperature", 299.0}}));
-    REQUIRE_TRUE(writer.Append_Observable_Frame(
-        1, 0.01, {{"temperature", 300.0}}));
+    REQUIRE_TRUE(
+        writer.Append_Observable_Frame(0, 0.0, {{"temperature", 299.0}}));
+    REQUIRE_TRUE(
+        writer.Append_Observable_Frame(1, 0.01, {{"temperature", 300.0}}));
     REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
                static_cast<std::size_t>(2));
 
     float position[3] = {1.0f, 0.0f, 0.0f};
     float box[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     REQUIRE_TRUE(writer.Append_Particle_Frame(1, 0.01, position, box));
-    REQUIRE_TRUE(writer.Append_Observable_Frame(
-        2, 0.02, {{"temperature", 301.0}}));
+    REQUIRE_TRUE(
+        writer.Append_Observable_Frame(2, 0.02, {{"temperature", 301.0}}));
     REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
                static_cast<std::size_t>(3));
     REQUIRE_TRUE(writer.Finalize());
@@ -830,6 +830,69 @@ static void Test_Vds_Preserves_Observables_Before_First_Particle_Frame()
                static_cast<int64_t>(3));
 }
 
+static void Test_Vds_Finalizes_Module_Frames_Before_First_Particle_Frame()
+{
+    MockBackendFactory factory;
+    VdsTrajectoryH5Writer writer(&factory);
+    auto plan = Make_Vds_Plan();
+
+    REQUIRE_TRUE(writer.Open(plan, "test"));
+    REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
+    REQUIRE_TRUE(writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
+    REQUIRE_TRUE(writer.Ensure_Nose_Hoover_Chain_Observables(2));
+    REQUIRE_TRUE(writer.Ensure_Sits_Nk_Observable("sits_a", 3));
+    REQUIRE_TRUE(writer.Ensure_Metadynamics_Scalars());
+    REQUIRE_TRUE(writer.Ensure_Qc_Observables(true));
+    REQUIRE_TRUE(writer.Ensure_Reaxff_Energy_Terms({"bond", "angle"}));
+
+    float nhc[2] = {0.1f, 0.2f};
+    float sits[3] = {1.0f, 2.0f, 3.0f};
+    for (int64_t step = 0; step < 2; ++step)
+    {
+        const double time = static_cast<double>(step) * 0.01;
+        const double spin_square = static_cast<double>(step) * 0.001;
+        REQUIRE_TRUE(writer.Append_Reaxff_Frame(
+            step, time, {{"bond", 1.25}, {"angle", 2.25}}));
+        REQUIRE_TRUE(writer.Append_Qc_Frame(step, time, -10.0, &spin_square));
+        REQUIRE_TRUE(
+            writer.Append_Metadynamics_Scalar_Frame(step, time, 1.0, 2.0, 3.0));
+        REQUIRE_TRUE(
+            writer.Append_Sits_Nk_Frame(step, time, "sits_a", sits, 3));
+        REQUIRE_TRUE(
+            writer.Append_Nose_Hoover_Chain_Frame(step, time, nhc, nhc, 2));
+        REQUIRE_TRUE(writer.Append_Observable_Frame(
+            step, time, {{"temperature", 300.0 + step}}));
+    }
+
+    REQUIRE_TRUE(writer.Finalize());
+    REQUIRE_EQ(writer.Total_Trajectory_Frame_Count(),
+               static_cast<std::size_t>(0));
+    REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(1));
+    const auto& entry = writer.Manifest()[0];
+    REQUIRE_EQ(entry.frame_count, static_cast<int64_t>(0));
+    REQUIRE_EQ(entry.observable_frame_count, static_cast<int64_t>(2));
+    REQUIRE_EQ(entry.nhc_frame_count, static_cast<int64_t>(2));
+    REQUIRE_EQ(entry.sits_nk_frame_count, static_cast<int64_t>(2));
+    REQUIRE_EQ(entry.metadynamics_scalar_frame_count, static_cast<int64_t>(2));
+    REQUIRE_EQ(entry.qc_frame_count, static_cast<int64_t>(2));
+    REQUIRE_EQ(entry.reaxff_frame_count, static_cast<int64_t>(2));
+    REQUIRE_EQ(entry.step_start, static_cast<int64_t>(0));
+    REQUIRE_EQ(entry.step_end, static_cast<int64_t>(1));
+    REQUIRE_EQ(entry.time_end, 0.01);
+
+    const auto& wrapper = *factory.logs[0];
+    REQUIRE_TRUE(wrapper.virtual_datasets.count(path::particles_all_step) == 0);
+    REQUIRE_TRUE(wrapper.virtual_datasets.count(module_path::nhc_step) != 0);
+    REQUIRE_TRUE(wrapper.virtual_datasets.count(Sits_Nk_Step_Path("sits_a")) !=
+                 0);
+    REQUIRE_TRUE(wrapper.virtual_datasets.count(
+                     Metadynamics_Scalar_Value_Path("meta")) != 0);
+    REQUIRE_TRUE(wrapper.virtual_datasets.count(
+                     Qc_Observable_Value_Path("energy")) != 0);
+    REQUIRE_TRUE(
+        wrapper.virtual_datasets.count(Reaxff_Term_Value_Path("bond")) != 0);
+}
+
 static void Test_Vds_Finalizes_Observable_Only_Shard()
 {
     MockBackendFactory factory;
@@ -839,8 +902,8 @@ static void Test_Vds_Finalizes_Observable_Only_Shard()
     REQUIRE_TRUE(writer.Open(plan, "test"));
     REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
     REQUIRE_TRUE(writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
-    REQUIRE_TRUE(writer.Append_Observable_Frame(
-        0, 0.0, {{"temperature", 299.0}}));
+    REQUIRE_TRUE(
+        writer.Append_Observable_Frame(0, 0.0, {{"temperature", 299.0}}));
 
     REQUIRE_TRUE(writer.Finalize());
     REQUIRE_EQ(writer.Total_Trajectory_Frame_Count(),
@@ -853,11 +916,11 @@ static void Test_Vds_Finalizes_Observable_Only_Shard()
                static_cast<int64_t>(1));
     REQUIRE_EQ(factory.logs[1]->append_counts.at(path::observables_all_step),
                static_cast<int64_t>(1));
-    REQUIRE_EQ(factory.logs[0]->virtual_datasets.at(path::observables_all_step)
-                   .size(),
-               static_cast<std::size_t>(1));
-    REQUIRE_TRUE(factory.logs[0]->virtual_datasets.count(
-                     path::particles_all_step) == 0);
+    REQUIRE_EQ(
+        factory.logs[0]->virtual_datasets.at(path::observables_all_step).size(),
+        static_cast<std::size_t>(1));
+    REQUIRE_TRUE(
+        factory.logs[0]->virtual_datasets.count(path::particles_all_step) == 0);
 }
 
 static void Test_Vds_Open_Precondition_Errors()
@@ -1123,6 +1186,7 @@ int main()
             Test_Vds_Wrapper_Finalize_Failure_Marks_Wrapper_Failed();
             Test_Vds_Precondition_Errors();
             Test_Vds_Preserves_Observables_Before_First_Particle_Frame();
+            Test_Vds_Finalizes_Module_Frames_Before_First_Particle_Frame();
             Test_Vds_Finalizes_Observable_Only_Shard();
             Test_Vds_Open_Precondition_Errors();
             Test_Vds_Finalize_Without_Frames();

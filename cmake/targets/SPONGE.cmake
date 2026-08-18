@@ -108,7 +108,7 @@ set(SOURCES ${SPONGE_SOURCES})
 
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(HighFive CONFIG REQUIRED)
-find_package(HDF5 REQUIRED COMPONENTS C)
+find_package(HDF5 1.10.7 REQUIRED COMPONENTS C)
 add_library(
   sponge_toml STATIC
   ${PROJECT_ROOT_DIR}/SPONGE/third_party/toml/toml.cpp

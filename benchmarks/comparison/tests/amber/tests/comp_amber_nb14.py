@@ -26,6 +26,9 @@ def _write_prmtop(
     hbond_b=None,
     excluded_counts=None,
     excluded_list=(),
+    dihedral_rows=(),
+    lj14_a=None,
+    lj14_b=None,
 ):
     atom_types = list(atom_types)
     atom_count = len(atom_types)
@@ -42,8 +45,11 @@ def _write_prmtop(
     pointers = [0] * 31
     pointers[0] = atom_count  # NATOM
     pointers[1] = atom_type_count  # NTYPES
+    pointers[7] = len(dihedral_rows)  # MPHIA
     pointers[10] = len(excluded_list)  # NNB
     pointers[11] = 1  # NRES
+    pointers[14] = len(dihedral_rows)  # NPHIA
+    pointers[17] = 1 if dihedral_rows else 0  # NPTRA
     pointers[19] = hbond_type_count  # NPHB
     pointers[27] = 1  # IFBOX
 
@@ -65,13 +71,35 @@ def _write_prmtop(
         sections.append(_flag("HBOND_ACOEF", "5E16.8", hbond_a, 5))
     if hbond_b is not None:
         sections.append(_flag("HBOND_BCOEF", "5E16.8", hbond_b, 5))
+    if dihedral_rows:
+        sections.extend(
+            [
+                _flag("DIHEDRAL_FORCE_CONSTANT", "5E16.8", [0.0], 5),
+                _flag("DIHEDRAL_PERIODICITY", "5E16.8", [1.0], 5),
+                _flag("DIHEDRAL_PHASE", "5E16.8", [0.0], 5),
+                _flag("SCEE_SCALE_FACTOR", "5E16.8", [1.0], 5),
+                _flag("SCNB_SCALE_FACTOR", "5E16.8", [2.0], 5),
+            ]
+        )
     sections.extend(
         [
             _flag("LENNARD_JONES_ACOEF", "3E24.16", normal_a, 3),
             _flag("LENNARD_JONES_BCOEF", "3E24.16", normal_b, 3),
-            _flag("EXCLUDED_ATOMS_LIST", "10I8", excluded_list),
         ]
     )
+    if lj14_a is not None:
+        sections.append(_flag("LENNARD_JONES_14_ACOEF", "3E24.16", lj14_a, 3))
+    if lj14_b is not None:
+        sections.append(_flag("LENNARD_JONES_14_BCOEF", "3E24.16", lj14_b, 3))
+    if dihedral_rows:
+        sections.append(
+            _flag(
+                "DIHEDRALS_WITHOUT_HYDROGEN",
+                "10I8",
+                [value for row in dihedral_rows for value in row],
+            )
+        )
+    sections.append(_flag("EXCLUDED_ATOMS_LIST", "10I8", excluded_list))
     path.write_text("".join(sections))
 
 
@@ -199,3 +227,74 @@ def test_nonzero_hbond_term_fails_closed(tmp_path):
 
     assert result.returncode != 0
     assert "AMBER 10-12 nonbonded terms are not supported" in output
+
+
+_FOUR_ATOM_COORDINATES = [
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 0.0),
+    (1.0, 0.0, 0.0),
+    (1.0, 0.0, 1.0),
+]
+
+
+def _four_atom_nb14_options(**overrides):
+    options = {
+        "atom_types": [1, 1, 2, 2],
+        "normal_a": [729.0, 200.0, 300.0],
+        "normal_b": [27.0, 20.0, 30.0],
+        "lj14_a": [729.0, 400.0, 500.0],
+        "lj14_b": [54.0, 40.0, 50.0],
+        "dihedral_rows": [(0, 3, 6, 9, 1)],
+        "excluded_counts": [3, 2, 1, 0],
+        "excluded_list": [2, 3, 4, 3, 4, 4],
+    }
+    options.update(overrides)
+    return options
+
+
+def test_chamber_lj14_matrix_uses_nonbonded_parm_index(tmp_path):
+    result, mdout_path = _run_sponge(
+        tmp_path,
+        _FOUR_ATOM_COORDINATES,
+        **_four_atom_nb14_options(),
+    )
+    output = result.stdout + "\n" + result.stderr
+
+    assert result.returncode == 0, output
+    assert "non-bond 14 numbers is 1" in output
+    assert math.isclose(
+        _extract_mdout_term(mdout_path, "nb14_LJ"), -0.5, abs_tol=0.01
+    )
+
+
+def test_missing_chamber_lj14_matrix_falls_back_to_ordinary_lj(tmp_path):
+    result, mdout_path = _run_sponge(
+        tmp_path,
+        _FOUR_ATOM_COORDINATES,
+        **_four_atom_nb14_options(
+            normal_b=[54.0, 20.0, 30.0],
+            lj14_a=None,
+            lj14_b=None,
+        ),
+    )
+    output = result.stdout + "\n" + result.stderr
+
+    assert result.returncode == 0, output
+    assert math.isclose(
+        _extract_mdout_term(mdout_path, "nb14_LJ"), -0.5, abs_tol=0.01
+    )
+
+
+def test_chamber_lj14_coefficients_must_be_complete(tmp_path):
+    result, _mdout_path = _run_sponge(
+        tmp_path,
+        _FOUR_ATOM_COORDINATES,
+        **_four_atom_nb14_options(lj14_b=None),
+    )
+    output = result.stdout + "\n" + result.stderr
+
+    assert result.returncode != 0
+    assert (
+        "LENNARD_JONES_14_ACOEF and LENNARD_JONES_14_BCOEF must either both "
+        "be present or both be absent"
+    ) in output

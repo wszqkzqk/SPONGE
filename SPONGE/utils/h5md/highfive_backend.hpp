@@ -28,7 +28,24 @@ inline bool HDF5_File_Locking_Is_Forced_On_By_Environment()
         character = static_cast<char>(
             std::toupper(static_cast<unsigned char>(character)));
     }
-    return normalized == "TRUE" || normalized == "1";
+    return normalized == "TRUE" || normalized == "1" ||
+           normalized == "BEST_EFFORT";
+}
+
+inline std::string Snapshot_Recovery_Path(const std::string& destination_path,
+                                          const std::string& identity_uuid)
+{
+    std::string safe_identity = identity_uuid;
+    for (char& character : safe_identity)
+    {
+        const unsigned char value = static_cast<unsigned char>(character);
+        if (!std::isalnum(value) && character != '-' && character != '_')
+        {
+            character = '_';
+        }
+    }
+    if (safe_identity.empty()) safe_identity = "unknown";
+    return destination_path + ".pending." + safe_identity;
 }
 
 class HighFiveBackend : public WriterBackend
@@ -73,8 +90,9 @@ class HighFiveBackend : public WriterBackend
                 if (options.atomic_snapshot &&
                     H5Pset_file_locking(access_props.getId(), false, true) < 0)
                 {
-                    return Fail("failed to disable HDF5 locking for an atomic "
-                                "snapshot");
+                    return Fail(
+                        "failed to disable HDF5 locking for an atomic "
+                        "snapshot");
                 }
 #endif
                 if (options.swmr_compatible)
@@ -179,7 +197,8 @@ class HighFiveBackend : public WriterBackend
     {
         if (!Ensure_File() || !Flush()) return false;
         const std::string temporary_path = destination_path + ".tmp";
-        const std::string pending_path = destination_path + ".pending";
+        const std::string pending_path =
+            Snapshot_Recovery_Path(destination_path, options_.identity_uuid);
         std::string error;
         if (!Remove_File_If_Exists(temporary_path, &error))
         {
@@ -215,8 +234,9 @@ class HighFiveBackend : public WriterBackend
                     return Fail(error + "; latest snapshot retained at " +
                                 pending_path);
                 }
-                return Fail(error + "; additionally failed to retain latest "
-                                    "snapshot at " +
+                return Fail(error +
+                            "; additionally failed to retain latest "
+                            "snapshot at " +
                             pending_path + ": " + pending_error);
             }
             Remove_File_If_Exists(temporary_path);

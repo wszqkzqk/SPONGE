@@ -1200,15 +1200,15 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
 #ifdef _WIN32
     write_generation(3);
     HANDLE held_destination = CreateFileA(
-        destination_path.string().c_str(), GENERIC_READ, FILE_SHARE_READ,
-        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        destination_path.string().c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     REQUIRE_TRUE(held_destination != INVALID_HANDLE_VALUE);
-    std::thread release_reader([held_destination]()
-                               {
-                                   std::this_thread::sleep_for(
-                                       std::chrono::milliseconds(50));
-                                   CloseHandle(held_destination);
-                               });
+    std::thread release_reader(
+        [held_destination]()
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            CloseHandle(held_destination);
+        });
     const bool replaced_after_retry = Atomic_Replace_File(
         temporary_path.string(), destination_path.string(), &error_message);
     release_reader.join();
@@ -1217,10 +1217,10 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
     {
         HighFive::File destination(destination_path.string(),
                                    HighFive::File::ReadOnly);
-        REQUIRE_EQ(Read_Int64_Vector(destination,
-                                     path::output_restart_generation)
-                       .back(),
-                   static_cast<int64_t>(3));
+        REQUIRE_EQ(
+            Read_Int64_Vector(destination, path::output_restart_generation)
+                .back(),
+            static_cast<int64_t>(3));
     }
 
     const auto snapshot_path = dir / "live_wrapper.spg.h5md";
@@ -1230,7 +1230,7 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
     snapshot_options.path = snapshot_path.string();
     snapshot_options.schema_name = "sponge.output.h5md";
     snapshot_options.schema_version = "test";
-    snapshot_options.identity_uuid = "test-live-wrapper";
+    snapshot_options.identity_uuid = "first-live-wrapper";
     snapshot_options.output_mode = "vds";
     snapshot_options.atomic_snapshot = true;
     REQUIRE_TRUE(snapshot_writer.Open(snapshot_options));
@@ -1247,46 +1247,72 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
     {
         HighFive::File published(snapshot_path.string(),
                                  HighFive::File::ReadOnly);
-        REQUIRE_EQ(Read_Int64_Vector(published, path::output_publication_epoch)
-                       .back(),
-                   static_cast<int64_t>(1));
+        REQUIRE_EQ(
+            Read_Int64_Vector(published, path::output_publication_epoch).back(),
+            static_cast<int64_t>(1));
     }
     REQUIRE_TRUE(snapshot_writer.Write_Publication_Epoch(3));
     REQUIRE_TRUE(!snapshot_writer.Publish_Snapshot(snapshot_path.string()));
-    const auto pending_snapshot_path =
-        std::filesystem::path(snapshot_path.string() + ".pending");
+    const auto pending_snapshot_path = std::filesystem::path(
+        snapshot_path.string() + ".pending.first-live-wrapper");
     REQUIRE_TRUE(std::filesystem::exists(pending_snapshot_path));
     {
         HighFive::File pending(pending_snapshot_path.string(),
                                HighFive::File::ReadOnly);
-        REQUIRE_EQ(Read_Int64_Vector(pending, path::output_publication_epoch)
-                       .back(),
-                   static_cast<int64_t>(3));
+        REQUIRE_EQ(
+            Read_Int64_Vector(pending, path::output_publication_epoch).back(),
+            static_cast<int64_t>(3));
     }
+    REQUIRE_TRUE(snapshot_writer.Close());
+
+    HighFiveBackend successor_backend;
+    H5MDWriter successor_writer(&successor_backend);
+    snapshot_options.identity_uuid = "second-live-wrapper";
+    REQUIRE_TRUE(successor_writer.Open(snapshot_options));
+    REQUIRE_TRUE(successor_writer.Write_Publication_Epoch(4));
+    REQUIRE_TRUE(!successor_writer.Publish_Snapshot(snapshot_path.string()));
+    const auto successor_pending_path = std::filesystem::path(
+        snapshot_path.string() + ".pending.second-live-wrapper");
+    REQUIRE_TRUE(std::filesystem::exists(pending_snapshot_path));
+    REQUIRE_TRUE(std::filesystem::exists(successor_pending_path));
+    {
+        HighFive::File first_pending(pending_snapshot_path.string(),
+                                     HighFive::File::ReadOnly);
+        REQUIRE_EQ(
+            Read_Int64_Vector(first_pending, path::output_publication_epoch)
+                .back(),
+            static_cast<int64_t>(3));
+        HighFive::File second_pending(successor_pending_path.string(),
+                                      HighFive::File::ReadOnly);
+        REQUIRE_EQ(
+            Read_Int64_Vector(second_pending, path::output_publication_epoch)
+                .back(),
+            static_cast<int64_t>(4));
+    }
+    REQUIRE_TRUE(successor_writer.Close());
     CloseHandle(persistent_reader);
-    REQUIRE_TRUE(Atomic_Replace_File(pending_snapshot_path.string(),
+    REQUIRE_TRUE(Atomic_Replace_File(successor_pending_path.string(),
                                      snapshot_path.string()));
     {
         HighFive::File published(snapshot_path.string(),
                                  HighFive::File::ReadOnly);
-        REQUIRE_EQ(Read_Int64_Vector(published, path::output_publication_epoch)
-                       .back(),
-                   static_cast<int64_t>(3));
+        REQUIRE_EQ(
+            Read_Int64_Vector(published, path::output_publication_epoch).back(),
+            static_cast<int64_t>(4));
     }
-    REQUIRE_TRUE(snapshot_writer.Close());
+    REQUIRE_TRUE(std::filesystem::exists(pending_snapshot_path));
 #endif
 
-    REQUIRE_TRUE(!Atomic_Replace_File(temporary_path.string(),
-                                      destination_path.string(),
-                                      &error_message));
+    REQUIRE_TRUE(!Atomic_Replace_File(
+        temporary_path.string(), destination_path.string(), &error_message));
     REQUIRE_TRUE(!error_message.empty());
     {
         HighFive::File destination(destination_path.string(),
                                    HighFive::File::ReadOnly);
-        REQUIRE_EQ(Read_Int64_Vector(destination,
-                                     path::output_restart_generation)
-                       .back(),
-                   published_generation);
+        REQUIRE_EQ(
+            Read_Int64_Vector(destination, path::output_restart_generation)
+                .back(),
+            published_generation);
     }
 
     write_generation(published_generation + 1);
@@ -1297,10 +1323,10 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
     {
         HighFive::File destination(destination_path.string(),
                                    HighFive::File::ReadOnly);
-        REQUIRE_EQ(Read_Int64_Vector(destination,
-                                     path::output_restart_generation)
-                       .back(),
-                   published_generation);
+        REQUIRE_EQ(
+            Read_Int64_Vector(destination, path::output_restart_generation)
+                .back(),
+            published_generation);
     }
 
     std::filesystem::remove_all(dir);
@@ -1863,10 +1889,10 @@ static void Test_Vds_Finalize_With_Only_Observables_With_Real_Backend()
         REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
         REQUIRE_TRUE(
             writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
-        REQUIRE_TRUE(writer.Append_Observable_Frame(
-            10, 0.1, {{"temperature", 299.0}}));
-        REQUIRE_TRUE(writer.Append_Observable_Frame(
-            20, 0.2, {{"temperature", 300.0}}));
+        REQUIRE_TRUE(
+            writer.Append_Observable_Frame(10, 0.1, {{"temperature", 299.0}}));
+        REQUIRE_TRUE(
+            writer.Append_Observable_Frame(20, 0.2, {{"temperature", 300.0}}));
         REQUIRE_TRUE(writer.Finalize());
         REQUIRE_EQ(writer.Total_Trajectory_Frame_Count(),
                    static_cast<std::size_t>(0));
@@ -1886,15 +1912,14 @@ static void Test_Vds_Finalize_With_Only_Observables_With_Real_Backend()
         REQUIRE_TRUE(file.exist(Observable_Value_Path("temperature")));
         REQUIRE_EQ(Read_Int64_Vector(file, path::observables_all_step),
                    std::vector<int64_t>({10, 20}));
-        REQUIRE_EQ(Read_Float64_Vector(file,
-                                      Observable_Value_Path("temperature")),
-                   std::vector<double>({299.0, 300.0}));
-        REQUIRE_EQ(Read_Int64_Vector(file,
-                                    path::shard_manifest_frame_count)[0],
+        REQUIRE_EQ(
+            Read_Float64_Vector(file, Observable_Value_Path("temperature")),
+            std::vector<double>({299.0, 300.0}));
+        REQUIRE_EQ(Read_Int64_Vector(file, path::shard_manifest_frame_count)[0],
                    static_cast<int64_t>(0));
-        REQUIRE_EQ(Read_Int64_Vector(
-                       file, path::shard_manifest_observables_count)[0],
-                   static_cast<int64_t>(2));
+        REQUIRE_EQ(
+            Read_Int64_Vector(file, path::shard_manifest_observables_count)[0],
+            static_cast<int64_t>(2));
         REQUIRE_EQ(Read_Int64_Vector(file, path::output_frame_count).back(),
                    static_cast<int64_t>(0));
         REQUIRE_EQ(
@@ -1905,8 +1930,8 @@ static void Test_Vds_Finalize_With_Only_Observables_With_Real_Backend()
             0.0);
     }
 
-    REQUIRE_TRUE(std::filesystem::exists(
-        shard_root / "segment_000000.spg.h5md"));
+    REQUIRE_TRUE(
+        std::filesystem::exists(shard_root / "segment_000000.spg.h5md"));
     std::filesystem::remove_all(dir);
 }
 
@@ -1927,11 +1952,22 @@ static void Test_Atomic_Snapshot_Rejects_Forced_HDF5_File_Locking()
     const bool opened = backend.Open(options);
     const std::string error = backend.Last_Error();
 
+    REQUIRE_TRUE(_putenv_s("HDF5_USE_FILE_LOCKING", "BEST_EFFORT") == 0);
+    HighFiveBackend best_effort_backend;
+    options.path =
+        Unique_Temp_Path("best_effort_hdf5_locking").string() + ".spg.h5md";
+    const bool best_effort_opened = best_effort_backend.Open(options);
+    const std::string best_effort_error = best_effort_backend.Last_Error();
+
     REQUIRE_TRUE(_putenv_s("HDF5_USE_FILE_LOCKING",
                            had_previous_value ? saved_value.c_str() : "") == 0);
     REQUIRE_TRUE(!opened);
     REQUIRE_TRUE(error.find("HDF5_USE_FILE_LOCKING") != std::string::npos);
     REQUIRE_TRUE(error.find("FALSE") != std::string::npos);
+    REQUIRE_TRUE(!best_effort_opened);
+    REQUIRE_TRUE(best_effort_error.find("HDF5_USE_FILE_LOCKING") !=
+                 std::string::npos);
+    REQUIRE_TRUE(best_effort_error.find("FALSE") != std::string::npos);
 }
 #endif
 

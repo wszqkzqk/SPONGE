@@ -38,11 +38,28 @@ class HighFiveBackend : public WriterBackend
             {
                 std::filesystem::create_directories(parent);
             }
-            if (options.swmr_compatible)
+            bool use_custom_access_props = options.swmr_compatible;
+#if defined(_WIN32) && H5_VERSION_GE(1, 10, 7)
+            use_custom_access_props =
+                use_custom_access_props || options.atomic_snapshot;
+#endif
+            if (use_custom_access_props)
             {
-                HighFive::FileAccessProps access_props;
-                access_props.add(HighFive::FileVersionBounds(
-                    H5F_LIBVER_LATEST, H5F_LIBVER_LATEST));
+                HighFive::FileAccessProps access_props =
+                    HighFive::FileAccessProps::Empty();
+#if defined(_WIN32) && H5_VERSION_GE(1, 10, 7)
+                if (options.atomic_snapshot &&
+                    H5Pset_file_locking(access_props.getId(), false, true) < 0)
+                {
+                    return Fail("failed to disable HDF5 locking for an atomic "
+                                "snapshot");
+                }
+#endif
+                if (options.swmr_compatible)
+                {
+                    access_props.add(HighFive::FileVersionBounds(
+                        H5F_LIBVER_LATEST, H5F_LIBVER_LATEST));
+                }
                 file_.reset(new HighFive::File(
                     actual_path_, HighFive::File::Overwrite,
                     HighFive::FileCreateProps::Default(), access_props));

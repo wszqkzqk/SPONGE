@@ -6,13 +6,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <highfive/highfive.hpp>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "utils/h5md/h5md_writer.hpp"
 #include "utils/h5md/atomic_file_publish.hpp"
+#include "utils/h5md/h5md_writer.hpp"
 
 namespace SpongeH5MD
 {
@@ -29,9 +30,8 @@ class HighFiveBackend : public WriterBackend
 #endif
         try
         {
-            actual_path_ = options.atomic_snapshot
-                               ? options.path + ".working"
-                               : options.path;
+            actual_path_ = options.atomic_snapshot ? options.path + ".working"
+                                                   : options.path;
             const std::filesystem::path file_path(actual_path_);
             const std::filesystem::path parent = file_path.parent_path();
             if (!parent.empty())
@@ -151,8 +151,7 @@ class HighFiveBackend : public WriterBackend
         if (copy_error)
         {
             return Fail("failed to snapshot HDF5 file " + actual_path_ +
-                        " to " + temporary_path + ": " +
-                        copy_error.message());
+                        " to " + temporary_path + ": " + copy_error.message());
         }
         if (!Atomic_Replace_File(temporary_path, destination_path, &error))
         {
@@ -176,9 +175,10 @@ class HighFiveBackend : public WriterBackend
                 {
                     if (swmr_write_started_)
                     {
-                        return Fail("cannot create group after SWMR write "
-                                    "started: " +
-                                    current);
+                        return Fail(
+                            "cannot create group after SWMR write "
+                            "started: " +
+                            current);
                     }
                     file_->createGroup(current);
                 }
@@ -213,9 +213,13 @@ class HighFiveBackend : public WriterBackend
                             spec.path);
             }
             const DatasetSpec normalized = Normalize_Spec(spec);
-            const std::vector<hsize_t> dims = To_HSize(normalized.shape.dims);
-            const std::vector<hsize_t> max_dims = To_HSize_Max(normalized);
-            const std::vector<hsize_t> chunk_dims = To_HSize_Chunk(normalized);
+            // HighFive's DataSpace and Chunking APIs take size_t dimensions.
+            // Passing hsize_t vectors selects the iterator-pair constructor on
+            // platforms where hsize_t and size_t are distinct types (macOS).
+            const std::vector<std::size_t>& dims = normalized.shape.dims;
+            const std::vector<std::size_t> max_dims = To_Size_Max(normalized);
+            const std::vector<std::size_t>& chunk_dims =
+                normalized.shape.chunk_dims;
             HighFive::DataSpace space(dims, max_dims);
             HighFive::DataSetCreateProps props;
             props.add(HighFive::Chunking(chunk_dims));
@@ -268,9 +272,10 @@ class HighFiveBackend : public WriterBackend
         {
             if (swmr_write_started_)
             {
-                return Fail("cannot create virtual dataset after SWMR write "
-                            "started: " +
-                            spec.path);
+                return Fail(
+                    "cannot create virtual dataset after SWMR write "
+                    "started: " +
+                    spec.path);
             }
             if (!Ensure_Parent_Group(spec.path)) return false;
             Delete_If_Exists(spec.path);
@@ -383,8 +388,9 @@ class HighFiveBackend : public WriterBackend
             }
             if (swmr_write_started_)
             {
-                return Fail("cannot create hard link after SWMR write started: " +
-                            link_path);
+                return Fail(
+                    "cannot create hard link after SWMR write started: " +
+                    link_path);
             }
             const herr_t rc =
                 H5Lcreate_hard(file_->getId(), target.c_str(), file_->getId(),
@@ -480,9 +486,10 @@ class HighFiveBackend : public WriterBackend
             }
             if (swmr_write_started_)
             {
-                return Fail("cannot create string dataset after SWMR write "
-                            "started: " +
-                            dataset_path);
+                return Fail(
+                    "cannot create string dataset after SWMR write "
+                    "started: " +
+                    dataset_path);
             }
             HighFive::DataSet dataset = file_->createDataSet<std::string>(
                 dataset_path, HighFive::DataSpace::From(value));
@@ -514,16 +521,18 @@ class HighFiveBackend : public WriterBackend
                 }
                 if (swmr_write_started_)
                 {
-                    return Fail("cannot resize string-array dataset after SWMR "
-                                "write started: " +
-                                dataset_path);
+                    return Fail(
+                        "cannot resize string-array dataset after SWMR "
+                        "write started: " +
+                        dataset_path);
                 }
             }
             else if (swmr_write_started_)
             {
-                return Fail("cannot create string-array dataset after SWMR "
-                            "write started: " +
-                            dataset_path);
+                return Fail(
+                    "cannot create string-array dataset after SWMR "
+                    "write started: " +
+                    dataset_path);
             }
             Delete_If_Exists(dataset_path);
             HighFive::DataSpace space({values.size()});
@@ -553,14 +562,16 @@ class HighFiveBackend : public WriterBackend
             }
             if (swmr_write_started_)
             {
-                return Fail("cannot modify attributes after SWMR write started: " +
-                            object_path + "@" + name);
+                return Fail(
+                    "cannot modify attributes after SWMR write started: " +
+                    object_path + "@" + name);
             }
             const hid_t object_id =
                 H5Oopen(file_->getId(), object_path.c_str(), H5P_DEFAULT);
             if (object_id < 0)
             {
-                return Fail("failed to inspect attribute target " + object_path);
+                return Fail("failed to inspect attribute target " +
+                            object_path);
             }
             const H5I_type_t object_type = H5Iget_type(object_id);
             H5Oclose(object_id);
@@ -779,32 +790,27 @@ class HighFiveBackend : public WriterBackend
         return converted;
     }
 
-    std::vector<hsize_t> To_HSize_Max(const DatasetSpec& spec) const
+    std::vector<std::size_t> To_Size_Max(const DatasetSpec& spec) const
     {
-        std::vector<hsize_t> converted;
+        std::vector<std::size_t> converted;
         converted.reserve(spec.shape.dims.size());
         for (std::size_t i = 0; i < spec.shape.dims.size(); ++i)
         {
             const std::size_t configured = spec.shape.max_dims[i];
             if (spec.appendable && i == 0 && configured == 0)
             {
-                converted.push_back(H5S_UNLIMITED);
+                converted.push_back(std::numeric_limits<std::size_t>::max());
             }
             else if (configured == 0)
             {
-                converted.push_back(static_cast<hsize_t>(spec.shape.dims[i]));
+                converted.push_back(spec.shape.dims[i]);
             }
             else
             {
-                converted.push_back(static_cast<hsize_t>(configured));
+                converted.push_back(configured);
             }
         }
         return converted;
-    }
-
-    std::vector<hsize_t> To_HSize_Chunk(const DatasetSpec& spec) const
-    {
-        return To_HSize(spec.shape.chunk_dims);
     }
 
     static std::size_t Record_Size(const std::vector<std::size_t>& dims)

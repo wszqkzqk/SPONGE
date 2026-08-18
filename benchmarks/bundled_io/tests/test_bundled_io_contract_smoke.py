@@ -226,10 +226,7 @@ def test_xponge_converter_core_normal_input_contract(tmp_path):
     assert not missing
 
     mdin = (
-        tmp_path
-        / "core_structural"
-        / "bundle"
-        / "mdin.bundled.spg.toml"
+        tmp_path / "core_structural" / "bundle" / "mdin.bundled.spg.toml"
     ).read_text(encoding="utf-8")
     assert 'input_h5_topology_path = "topology.spgt.h5"' in mdin
     assert 'input_h5_protocol_path = "protocol.spgp.h5"' in mdin
@@ -247,10 +244,7 @@ def test_xponge_converter_full_contract_manifest(tmp_path):
     assert not missing
 
     mdin = (
-        tmp_path
-        / "full_contract_rerun"
-        / "bundle"
-        / "mdin.bundled.spg.toml"
+        tmp_path / "full_contract_rerun" / "bundle" / "mdin.bundled.spg.toml"
     ).read_text(encoding="utf-8")
     for expected in (
         'mode = "rerun"',

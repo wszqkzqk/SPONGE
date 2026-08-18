@@ -90,56 +90,236 @@ REQUIRED_ENTRIES = {
 }
 
 SEMANTIC_EQUIVALENCE_EVIDENCE = {
-    "restart.coordinate": ["compare_restart_structural_to_legacy", "coordinate.txt", "/particles/all/position/value"],
-    "restart.velocity": ["compare_restart_structural_to_legacy", "velocity.txt", "/particles/all/velocity/value"],
-    "restart.box": ["compare_restart_structural_to_legacy", "coordinate.txt", "/particles/all/box/edges/value"],
-    "trajectory.crd": ["compare_trajectory_to_legacy", "traj.dat", "/particles/all/position/value"],
-    "trajectory.box": ["compare_trajectory_to_legacy", "box.dat", "/particles/all/box/edges/value"],
-    "trajectory.vel": ["compare_trajectory_to_legacy", "vel.dat", "/particles/all/velocity/value"],
+    "restart.coordinate": [
+        "compare_restart_structural_to_legacy",
+        "coordinate.txt",
+        "/particles/all/position/value",
+    ],
+    "restart.velocity": [
+        "compare_restart_structural_to_legacy",
+        "velocity.txt",
+        "/particles/all/velocity/value",
+    ],
+    "restart.box": [
+        "compare_restart_structural_to_legacy",
+        "coordinate.txt",
+        "/particles/all/box/edges/value",
+    ],
+    "trajectory.crd": [
+        "compare_trajectory_to_legacy",
+        "traj.dat",
+        "/particles/all/position/value",
+    ],
+    "trajectory.box": [
+        "compare_trajectory_to_legacy",
+        "box.dat",
+        "/particles/all/box/edges/value",
+    ],
+    "trajectory.vel": [
+        "compare_trajectory_to_legacy",
+        "vel.dat",
+        "/particles/all/velocity/value",
+    ],
     "topology.mass": ["compare_group_mass_charge", "mass.txt", "/atoms/mass"],
-    "topology.charge": ["compare_group_mass_charge", "charge.txt", "/atoms/charge"],
-    "topology.residue": ["compare_residue_to_h5", "residue.txt", "/atoms/residue_index"],
-    "topology.bond": ["compare_bonds_to_h5", "bond.txt", "/forcefield/bond/atoms"],
-    "topology.angle": ["compare_angles_to_h5", "angle.txt", "/forcefield/angle/atoms"],
-    "topology.dihedral": ["compare_dihedrals_to_h5", "dihedral.txt", "/forcefield/dihedral/atoms"],
+    "topology.charge": [
+        "compare_group_mass_charge",
+        "charge.txt",
+        "/atoms/charge",
+    ],
+    "topology.residue": [
+        "compare_residue_to_h5",
+        "residue.txt",
+        "/atoms/residue_index",
+    ],
+    "topology.bond": [
+        "compare_bonds_to_h5",
+        "bond.txt",
+        "/forcefield/bond/atoms",
+    ],
+    "topology.angle": [
+        "compare_angles_to_h5",
+        "angle.txt",
+        "/forcefield/angle/atoms",
+    ],
+    "topology.dihedral": [
+        "compare_dihedrals_to_h5",
+        "dihedral.txt",
+        "/forcefield/dihedral/atoms",
+    ],
     "topology.LJ": ["compare_lj_to_h5", "lj.txt", "/forcefield/lj/type"],
-    "topology.nb14_extra": ["compare_nb14_extra_to_h5", "nb14_extra.txt", "/forcefield/nb14_extra/atoms"],
-    "topology.urey_bradley": ["compare_urey_bradley_to_h5", "urey_bradley.txt", "/forcefield/urey_bradley/atoms"],
-    "topology.cmap": ["compare_cmap_to_h5", "cmap.txt", "/forcefield/cmap/atoms"],
+    "topology.nb14_extra": [
+        "compare_nb14_extra_to_h5",
+        "nb14_extra.txt",
+        "/forcefield/nb14_extra/atoms",
+    ],
+    "topology.urey_bradley": [
+        "compare_urey_bradley_to_h5",
+        "urey_bradley.txt",
+        "/forcefield/urey_bradley/atoms",
+    ],
+    "topology.cmap": [
+        "compare_cmap_to_h5",
+        "cmap.txt",
+        "/forcefield/cmap/atoms",
+    ],
     "topology.gb": ["compare_gb_to_h5", "gb.txt", "/forcefield/gb/params"],
-    "topology.exclude": ["compare_exclusions_to_h5", "exclude.txt", "/topology/exclusions/list"],
-    "topology.virtual_atom": ["compare_virtual_atoms_to_h5", "virtual_atom.txt", "/forcefield/virtual_atom/parameter"],
-    "topology.LJ_soft_core": ["compare_lj_soft_core_to_h5", "lj_soft_core.txt", "pair_AA"],
-    "topology.subsys_division": ["compare_lj_soft_core_to_h5", "subsys_division.txt", "/forcefield/subsys_division"],
+    "topology.exclude": [
+        "compare_exclusions_to_h5",
+        "exclude.txt",
+        "/topology/exclusions/list",
+    ],
+    "topology.virtual_atom": [
+        "compare_virtual_atoms_to_h5",
+        "virtual_atom.txt",
+        "/forcefield/virtual_atom/parameter",
+    ],
+    "topology.LJ_soft_core": [
+        "compare_lj_soft_core_to_h5",
+        "lj_soft_core.txt",
+        "pair_AA",
+    ],
+    "topology.subsys_division": [
+        "compare_lj_soft_core_to_h5",
+        "subsys_division.txt",
+        "/forcefield/subsys_division",
+    ],
     "topology.EAM": ["compare_eam_to_h5", "eam.txt", "/manybody/eam"],
-    "topology.EAM_atom_type": ["compare_eam_to_h5", "eam_atom_type.txt", 'root + "/atom_type"'],
-    "topology.SW": ["compare_manybody_pair_triple_to_h5", "sw.txt", "/manybody/sw"],
-    "topology.EDIP": ["compare_manybody_pair_triple_to_h5", "edip.txt", "/manybody/edip"],
-    "topology.TERSOFF": ["compare_tersoff_to_h5", "tersoff.txt", "/manybody/tersoff"],
-    "topology.REAXFF": ["compare_reaxff_to_h5", "reaxff.txt", "/manybody/reaxff/parameters"],
-    "topology.REAXFF_type": ["compare_reaxff_to_h5", "reaxff_type.txt", "/manybody/reaxff/type"],
-    "topology.qc_type": ["compare_qc_type_to_legacy", "qc_type.txt", "/qc/type"],
+    "topology.EAM_atom_type": [
+        "compare_eam_to_h5",
+        "eam_atom_type.txt",
+        'root + "/atom_type"',
+    ],
+    "topology.SW": [
+        "compare_manybody_pair_triple_to_h5",
+        "sw.txt",
+        "/manybody/sw",
+    ],
+    "topology.EDIP": [
+        "compare_manybody_pair_triple_to_h5",
+        "edip.txt",
+        "/manybody/edip",
+    ],
+    "topology.TERSOFF": [
+        "compare_tersoff_to_h5",
+        "tersoff.txt",
+        "/manybody/tersoff",
+    ],
+    "topology.REAXFF": [
+        "compare_reaxff_to_h5",
+        "reaxff.txt",
+        "/manybody/reaxff/parameters",
+    ],
+    "topology.REAXFF_type": [
+        "compare_reaxff_to_h5",
+        "reaxff_type.txt",
+        "/manybody/reaxff/type",
+    ],
+    "topology.qc_type": [
+        "compare_qc_type_to_legacy",
+        "qc_type.txt",
+        "/qc/type",
+    ],
     "protocol.cv": ["compare_config_sections_to_h5", "cv.txt", "/cv/config"],
-    "protocol.constrain": ["compare_protocol_constraints_to_h5", "constrain.txt", "/constraint/default/pairs"],
-    "protocol.restrain": ["compare_config_sections_to_h5", "restrain.txt", "/restraint/config"],
-    "protocol.SITS": ["compare_config_sections_to_h5", "sits.txt", "/sits/config"],
-    "protocol.SITS_atom": ["compare_protocol_sits_atom_to_h5", "sits_atom.txt", "/sits/atom_indices"],
-    "protocol.restrain_atom_id": ["compare_protocol_restraint_default_to_h5", "restrain_atom_id.txt", "/restraint/default/atom_indices"],
-    "protocol.restrain_weight": ["compare_protocol_restraint_default_to_h5", "restrain_weight.txt", "/restraint/default/weight"],
-    "protocol.restrain_cv": ["compare_config_sections_to_h5", "restrain_cv.txt", "/restraint/cv/config"],
-    "protocol.meta_edge": ["compare_protocol_meta_edge_to_h5", "meta_edge.txt", "/meta/default/grid"],
-    "protocol.soft_walls": ["compare_soft_walls_to_h5", "soft_walls.txt", "/wall/soft"],
-    "protocol.steer_cv": ["compare_config_sections_to_h5", "steer_cv.txt", "/steer/config"],
-    "restart.SITS_nk": ["compare_restart_sits_nk_to_h5", "sits_nk.txt", "/parameters/restart/bias/sits/SITS/nk"],
-    "restart.restrain_coordinate": ["compare_restart_restraint_reference_to_h5", "restrain_coordinate.txt", "/parameters/restart/references/restraint/default/coordinate"],
-    "restart.meta_potential": ["compare_restart_meta_potential_to_h5", "meta_potential.txt", "/parameters/restart/bias/meta/default/potential"],
-    "restart.meta_scatter": ["compare_restart_meta_scatter_to_h5", "meta_scatter.txt", "/parameters/restart/bias/meta/default/scatter"],
-    "restart.hills": ["compare_restart_hills_to_h5", "hills.txt", "/parameters/restart/bias/meta/default/hills"],
-    "restart.nose_hoover_chain_restart_input": ["compare_restart_nhc_to_h5", "nhc_restart.txt", "/parameters/restart/thermostat/nose_hoover_chain"],
-    "topology.pairwise_force": ["compare_custom_pair_to_h5", "pairwise_force.txt", "/forcefield/custom_force/pairwise"],
-    "topology.listed_forces": ["compare_custom_bond_to_h5", "listed_forces.txt", "/forcefield/custom_force/listed"],
-    "topology.pairwise_force_data.custom_pair": ["compare_custom_pair_to_h5", "custom_pair.txt", 'data_root + "/atom_type"'],
-    "topology.listed_force_data.custom_bond": ["compare_custom_bond_to_h5", "custom_bond.txt", 'data_root + "/parameter/value"'],
+    "protocol.constrain": [
+        "compare_protocol_constraints_to_h5",
+        "constrain.txt",
+        "/constraint/default/pairs",
+    ],
+    "protocol.restrain": [
+        "compare_config_sections_to_h5",
+        "restrain.txt",
+        "/restraint/config",
+    ],
+    "protocol.SITS": [
+        "compare_config_sections_to_h5",
+        "sits.txt",
+        "/sits/config",
+    ],
+    "protocol.SITS_atom": [
+        "compare_protocol_sits_atom_to_h5",
+        "sits_atom.txt",
+        "/sits/atom_indices",
+    ],
+    "protocol.restrain_atom_id": [
+        "compare_protocol_restraint_default_to_h5",
+        "restrain_atom_id.txt",
+        "/restraint/default/atom_indices",
+    ],
+    "protocol.restrain_weight": [
+        "compare_protocol_restraint_default_to_h5",
+        "restrain_weight.txt",
+        "/restraint/default/weight",
+    ],
+    "protocol.restrain_cv": [
+        "compare_config_sections_to_h5",
+        "restrain_cv.txt",
+        "/restraint/cv/config",
+    ],
+    "protocol.meta_edge": [
+        "compare_protocol_meta_edge_to_h5",
+        "meta_edge.txt",
+        "/meta/default/grid",
+    ],
+    "protocol.soft_walls": [
+        "compare_soft_walls_to_h5",
+        "soft_walls.txt",
+        "/wall/soft",
+    ],
+    "protocol.steer_cv": [
+        "compare_config_sections_to_h5",
+        "steer_cv.txt",
+        "/steer/config",
+    ],
+    "restart.SITS_nk": [
+        "compare_restart_sits_nk_to_h5",
+        "sits_nk.txt",
+        "/parameters/restart/bias/sits/SITS/nk",
+    ],
+    "restart.restrain_coordinate": [
+        "compare_restart_restraint_reference_to_h5",
+        "restrain_coordinate.txt",
+        "/parameters/restart/references/restraint/default/coordinate",
+    ],
+    "restart.meta_potential": [
+        "compare_restart_meta_potential_to_h5",
+        "meta_potential.txt",
+        "/parameters/restart/bias/meta/default/potential",
+    ],
+    "restart.meta_scatter": [
+        "compare_restart_meta_scatter_to_h5",
+        "meta_scatter.txt",
+        "/parameters/restart/bias/meta/default/scatter",
+    ],
+    "restart.hills": [
+        "compare_restart_hills_to_h5",
+        "hills.txt",
+        "/parameters/restart/bias/meta/default/hills",
+    ],
+    "restart.nose_hoover_chain_restart_input": [
+        "compare_restart_nhc_to_h5",
+        "nhc_restart.txt",
+        "/parameters/restart/thermostat/nose_hoover_chain",
+    ],
+    "topology.pairwise_force": [
+        "compare_custom_pair_to_h5",
+        "pairwise_force.txt",
+        "/forcefield/custom_force/pairwise",
+    ],
+    "topology.listed_forces": [
+        "compare_custom_bond_to_h5",
+        "listed_forces.txt",
+        "/forcefield/custom_force/listed",
+    ],
+    "topology.pairwise_force_data.custom_pair": [
+        "compare_custom_pair_to_h5",
+        "custom_pair.txt",
+        'data_root + "/atom_type"',
+    ],
+    "topology.listed_force_data.custom_bond": [
+        "compare_custom_bond_to_h5",
+        "custom_bond.txt",
+        'data_root + "/parameter/value"',
+    ],
 }
 
 REQUIRED_PROTOCOL_SIDECARS = {
@@ -313,7 +493,9 @@ def collect_mdin_input_file_refs(path):
     for key, value in data.items():
         if isinstance(value, dict):
             for child_key, child_value in value.items():
-                source_key = SECTION_INPUT_FILE_KEY_ALIASES.get((key, child_key))
+                source_key = SECTION_INPUT_FILE_KEY_ALIASES.get(
+                    (key, child_key)
+                )
                 if source_key and isinstance(child_value, str):
                     refs[source_key] = child_value
             continue
@@ -337,14 +519,20 @@ def require_mdin_input_refs_exist(mdin_path, root, label):
 def require_no_legacy_input_refs(mdin_path, label):
     refs = collect_mdin_input_file_refs(mdin_path)
     if refs:
-        fail(f"{label} should not retain legacy input file refs: {sorted(refs)}")
+        fail(
+            f"{label} should not retain legacy input file refs: {sorted(refs)}"
+        )
 
 
 def require_sidecar_mdin_refs_are_materialized(mdin_path, bundle_root, label):
     refs = collect_mdin_input_file_refs(mdin_path)
     for key, value in refs.items():
         path = Path(value)
-        if path.is_absolute() or not path.parts or path.parts[0] != "legacy_sidecars":
+        if (
+            path.is_absolute()
+            or not path.parts
+            or path.parts[0] != "legacy_sidecars"
+        ):
             fail(
                 f"{label} sidecar mdin input ref must stay below "
                 f"legacy_sidecars/: {key}={value!r}"
@@ -400,7 +588,9 @@ def h5dump_string_dataset(h5dump, h5_path, dataset_path):
 
     match = re.search(r"DATA\s*\{(?P<data>.*?)\n\s*\}", result.stdout, re.S)
     if not match:
-        fail(f"h5dump output lacks DATA block for {h5_path.name}:{dataset_path}")
+        fail(
+            f"h5dump output lacks DATA block for {h5_path.name}:{dataset_path}"
+        )
     return [
         json.loads(f'"{text}"')
         for text in re.findall(r'"((?:[^"\\]|\\.)*)"', match.group("data"))
@@ -448,7 +638,8 @@ def require_manifest_lists_h5_sidecar_tables(
     input_file_entries = [
         entry
         for entry in entries
-        if entry.get("direction") == "input" and entry.get("payload_kind") == "file"
+        if entry.get("direction") == "input"
+        and entry.get("payload_kind") == "file"
     ]
 
     h5_files = sorted(
@@ -550,7 +741,10 @@ def require_manifest_lists_materialized_sidecar_files(entries, bundle_root):
             if Path(sidecar_path).is_absolute():
                 fail(f"{entry['contract_id']} sidecar_path must be relative")
             raw_path = Path(sidecar_path)
-            if len(raw_path.parts) != 3 or raw_path.parts[0] != "legacy_sidecars":
+            if (
+                len(raw_path.parts) != 3
+                or raw_path.parts[0] != "legacy_sidecars"
+            ):
                 fail(
                     f"{entry['contract_id']} sidecar_path must be "
                     f"legacy_sidecars/<key>/<basename>: {sidecar_path!r}"
@@ -645,11 +839,7 @@ def require_manifest_path_relocates(value, expected_path, label):
 
 
 def load_manifest(fixture_root, case_name):
-    case_root = (
-        fixture_root
-        / case_name
-        / "bundled_input_with_legacy_sidecar"
-    )
+    case_root = fixture_root / case_name / "bundled_input_with_legacy_sidecar"
     bundle_root = case_root / "bundle"
     legacy_root = fixture_root / case_name / "legacy_input"
     manifest_path = case_root / "manifest.json"
@@ -658,7 +848,9 @@ def load_manifest(fixture_root, case_name):
         manifest = json.load(handle)
 
     if manifest.get("schema") != "xponge.legacy_to_bundle.manifest":
-        fail(f"{case_name} manifest schema mismatch: {manifest.get('schema')!r}")
+        fail(
+            f"{case_name} manifest schema mismatch: {manifest.get('schema')!r}"
+        )
     if manifest.get("schema_version") != 1:
         fail(
             f"{case_name} manifest schema_version mismatch: "
@@ -717,28 +909,38 @@ def require_fixture_group_structure(fixture_root, case_name, has_trajectory):
     require_dir(sidecar_root, f"{case_name} sidecar bundle")
 
     require_file(legacy_root / "mdin.spg.toml", f"{case_name} legacy mdin")
-    require_file(bundled_root / "mdin.bundled.spg.toml",
-                 f"{case_name} bundled mdin")
-    require_file(sidecar_root / "mdin.bundled.spg.toml",
-                 f"{case_name} sidecar mdin")
-    require_file(sidecar_case_root / "manifest.json",
-                 f"{case_name} sidecar manifest")
+    require_file(
+        bundled_root / "mdin.bundled.spg.toml", f"{case_name} bundled mdin"
+    )
+    require_file(
+        sidecar_root / "mdin.bundled.spg.toml", f"{case_name} sidecar mdin"
+    )
+    require_file(
+        sidecar_case_root / "manifest.json", f"{case_name} sidecar manifest"
+    )
 
     for bundle in (bundled_root, sidecar_root):
         require_file(bundle / "topology.spgt.h5", f"{case_name} topology H5")
         require_file(bundle / "protocol.spgp.h5", f"{case_name} protocol H5")
         require_file(bundle / "restart.spgr.h5", f"{case_name} restart H5")
         if has_trajectory:
-            require_file(bundle / "trajectory.spg.h5md",
-                         f"{case_name} trajectory H5")
+            require_file(
+                bundle / "trajectory.spg.h5md", f"{case_name} trajectory H5"
+            )
         else:
-            require_no_path(bundle / "trajectory.spg.h5md",
-                            f"{case_name} normal-mode trajectory H5")
+            require_no_path(
+                bundle / "trajectory.spg.h5md",
+                f"{case_name} normal-mode trajectory H5",
+            )
 
-    require_no_path(bundled_root / "legacy_sidecars",
-                    f"{case_name} pure bundled legacy_sidecars")
-    require_dir(sidecar_root / "legacy_sidecars",
-                f"{case_name} sidecar materialization root")
+    require_no_path(
+        bundled_root / "legacy_sidecars",
+        f"{case_name} pure bundled legacy_sidecars",
+    )
+    require_dir(
+        sidecar_root / "legacy_sidecars",
+        f"{case_name} sidecar materialization root",
+    )
     legacy_refs = require_mdin_input_refs_exist(
         legacy_root / "mdin.spg.toml", legacy_root, f"{case_name} legacy_input"
     )
@@ -845,7 +1047,9 @@ def require_status_semantics(entries):
             if payload_kind != "file":
                 fail(f"{contract_id} converted entry is not file payload")
             if override_policy != "forbidden":
-                fail(f"{contract_id} converted override policy is not forbidden")
+                fail(
+                    f"{contract_id} converted override policy is not forbidden"
+                )
         elif status == "typed_converted":
             if direction != "input":
                 fail(f"{contract_id} typed entry is not input")
@@ -886,7 +1090,9 @@ def require_status_semantics(entries):
             if payload_kind != "path":
                 fail(f"{contract_id} legacy output sidecar is not path payload")
             if override_policy != "explicit":
-                fail(f"{contract_id} legacy output sidecar policy is not explicit")
+                fail(
+                    f"{contract_id} legacy output sidecar policy is not explicit"
+                )
         else:
             fail(f"{contract_id} has unknown manifest status: {status!r}")
 
@@ -895,7 +1101,9 @@ def require_materialized_sidecars_match_legacy(bundle_root, legacy_root):
     sidecar_root = bundle_root / "legacy_sidecars"
     if not sidecar_root.is_dir():
         fail(f"missing legacy_sidecars directory: {sidecar_root}")
-    sidecar_files = sorted(path for path in sidecar_root.rglob("*") if path.is_file())
+    sidecar_files = sorted(
+        path for path in sidecar_root.rglob("*") if path.is_file()
+    )
     if not sidecar_files:
         fail(f"legacy_sidecars contains no files: {sidecar_root}")
     for sidecar_file in sidecar_files:
@@ -926,7 +1134,9 @@ def require_all_converted_inputs_are_declared(entries):
 
 
 def require_required_inputs_have_semantic_equivalence_evidence():
-    equivalence_path = Path(__file__).with_name("test_h5_input_fixture_equivalence.py")
+    equivalence_path = Path(__file__).with_name(
+        "test_h5_input_fixture_equivalence.py"
+    )
     equivalence_text = equivalence_path.read_text(encoding="utf-8")
 
     for contract_id, status in REQUIRED_ENTRIES.items():
@@ -960,7 +1170,9 @@ def require_required_inputs_have_semantic_equivalence_evidence():
         }
     )
     if stale:
-        fail(f"semantic equivalence evidence contains stale contract ids: {stale}")
+        fail(
+            f"semantic equivalence evidence contains stale contract ids: {stale}"
+        )
 
 
 def validate_core_structural_manifest(fixture_root, h5dump):
@@ -1002,7 +1214,9 @@ def validate_core_structural_manifest(fixture_root, h5dump):
         if entry.get("contract_id", "").startswith("output.h5.")
     }
     if h5_output_ids:
-        fail(f"core fixture unexpectedly preserves H5 output keys: {h5_output_ids}")
+        fail(
+            f"core fixture unexpectedly preserves H5 output keys: {h5_output_ids}"
+        )
 
     legacy_output_sidecar_ids = {
         entry["contract_id"]
@@ -1107,9 +1321,13 @@ def require_output_plan_matches_mdin(by_contract, bundle_root, legacy_root):
         entry = by_contract[contract_id]
         source_key = entry.get("source_key")
         if source_key not in legacy_mdin:
-            fail(f"{contract_id} source key missing from legacy mdin: {source_key}")
+            fail(
+                f"{contract_id} source key missing from legacy mdin: {source_key}"
+            )
         if source_key not in bundled_mdin:
-            fail(f"{contract_id} source key missing from bundled mdin: {source_key}")
+            fail(
+                f"{contract_id} source key missing from bundled mdin: {source_key}"
+            )
         if bundled_mdin[source_key] != legacy_mdin[source_key]:
             fail(
                 f"{contract_id} mdin value mismatch for {source_key}: "

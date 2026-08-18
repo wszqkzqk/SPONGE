@@ -21,10 +21,10 @@ namespace SpongeH5MD
 inline bool Destination_Replace_Is_Blocked_By_Open_Handle(
     const std::string& path)
 {
-    HANDLE probe = CreateFileA(
-        path.c_str(), DELETE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE probe =
+        CreateFileA(path.c_str(), DELETE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (probe != INVALID_HANDLE_VALUE)
     {
         CloseHandle(probe);

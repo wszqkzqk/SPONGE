@@ -1,4 +1,4 @@
-#include "embedded_common_header.hpp"
+﻿#include "embedded_common_header.hpp"
 
 namespace sponge_jit_detail
 {

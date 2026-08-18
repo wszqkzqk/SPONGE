@@ -143,16 +143,16 @@ static void Test_Manifest_Validation_Strict()
             Manifest_Entry(0, 0, 0, "complete")};
         auto report = Validate_Complete_Manifest(manifest, false);
         REQUIRE_TRUE(!report.valid);
-        REQUIRE_EQ(report.error_message,
-                   std::string(
-                       "manifest shard must contain at least one stream frame"));
+        REQUIRE_EQ(
+            report.error_message,
+            std::string(
+                "manifest shard must contain at least one stream frame"));
     }
     {
         VdsShardManifestEntry observable_only =
             Manifest_Entry(0, 0, 0, "complete");
         observable_only.observable_frame_count = 2;
-        auto report =
-            Validate_Complete_Manifest({observable_only}, false);
+        auto report = Validate_Complete_Manifest({observable_only}, false);
         REQUIRE_TRUE(report.valid);
         REQUIRE_EQ(report.complete_shard_count, static_cast<int64_t>(1));
         REQUIRE_EQ(report.complete_frame_count, static_cast<int64_t>(0));

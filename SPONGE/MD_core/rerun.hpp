@@ -5,6 +5,7 @@
 void MD_INFORMATION::RERUN_information::Initial(CONTROLLER* controller,
                                                 MD_INFORMATION* md_info)
 {
+    this->controller = controller;
     this->md_info = md_info;
     if (md_info->mode == RERUN)
     {
@@ -174,7 +175,10 @@ bool MD_INFORMATION::RERUN_information::Iteration(int strip)
                 if (!h5_trajectory_reader->Read_Frame(selection.frame_index,
                                                       &frame))
                 {
-                    md_info->sys.step_limit = md_info->sys.steps;
+                    controller->Throw_SPONGE_Error(
+                        spongeErrorBadFileFormat,
+                        "MD_INFORMATION::RERUN_information::Iteration",
+                        h5_trajectory_reader->Last_Error().c_str());
                 }
                 else
                 {
@@ -185,7 +189,10 @@ bool MD_INFORMATION::RERUN_information::Iteration(int strip)
                             &md_info->sys.box_angle, &md_info->sys.start_time,
                             &error_message))
                     {
-                        md_info->sys.step_limit = md_info->sys.steps;
+                        controller->Throw_SPONGE_Error(
+                            spongeErrorConflictingCommand,
+                            "MD_INFORMATION::RERUN_information::Iteration",
+                            error_message.c_str());
                     }
                     else
                     {

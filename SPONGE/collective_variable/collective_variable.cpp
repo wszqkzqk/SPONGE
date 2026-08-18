@@ -213,6 +213,8 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         const bool has_restraint_cv = file.exist(restraint_cv_root);
         SpongeH5MD::ProtocolCVH5Reader cv_reader;
         std::vector<SpongeH5MD::ProtocolCVDefinition> typed_cvs;
+        std::vector<SpongeH5MD::ProtocolVirtualAtomDefinition>
+            typed_virtual_atoms;
         if (!cv_reader.Open_Protocol(controller->Command(input_key)))
         {
             throw std::runtime_error(cv_reader.Last_Error());
@@ -225,6 +227,12 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         }
         if (!cv_reader.Read_Definitions(
                 static_cast<std::size_t>(manager->atom_numbers), &typed_cvs))
+        {
+            throw std::runtime_error(cv_reader.Last_Error());
+        }
+        if (!cv_reader.Read_Virtual_Atoms(
+                static_cast<std::size_t>(manager->atom_numbers),
+                &typed_virtual_atoms))
         {
             throw std::runtime_error(cv_reader.Last_Error());
         }
@@ -254,7 +262,8 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
             throw std::runtime_error(steering_reader.Last_Error());
         }
         if (!has_cv && !has_restraint && !has_restraint_cv &&
-            typed_cvs.empty() && typed_restraints.empty() &&
+            typed_cvs.empty() && typed_virtual_atoms.empty() &&
+            typed_restraints.empty() &&
             !has_typed_metadynamics && !has_typed_steering)
         {
             return false;
@@ -276,6 +285,18 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
                 Merge_H5_CV_Config(root, Read_H5_CV_Config(&file, root),
                                    &sections);
             }
+        }
+        for (const auto& definition : typed_virtual_atoms)
+        {
+            CVConfigSection native{definition.name,
+                                   {{"vatom_type", definition.type}}};
+            Merge_H5_CV_Config("/cv/virtual_atom/<name>", {native},
+                               &sections);
+            manager->protocol_virtual_atom_indices[definition.name] =
+                definition.atom_indices;
+            if (!definition.weight.empty())
+                manager->protocol_virtual_atom_weight[definition.name] =
+                    definition.weight;
         }
         for (const auto& definition : typed_cvs)
         {
@@ -1110,6 +1131,11 @@ std::vector<int>
 COLLECTIVE_VARIABLE_CONTROLLER::Ask_For_Indefinite_Length_Int_Parameter(
     const char* name, const char* parameter_name)
 {
+    if (strcmp(parameter_name, "atom") == 0)
+    {
+        const auto found = protocol_virtual_atom_indices.find(name);
+        if (found != protocol_virtual_atom_indices.end()) return found->second;
+    }
     std::vector<int> ints;
     std::string out;
     std::string file_name = parameter_name;
@@ -1160,6 +1186,11 @@ std::vector<float>
 COLLECTIVE_VARIABLE_CONTROLLER::Ask_For_Indefinite_Length_Float_Parameter(
     const char* name, const char* parameter_name)
 {
+    if (strcmp(parameter_name, "weight") == 0)
+    {
+        const auto found = protocol_virtual_atom_weight.find(name);
+        if (found != protocol_virtual_atom_weight.end()) return found->second;
+    }
     std::vector<float> floats;
     std::string out;
     std::string file_name = parameter_name;

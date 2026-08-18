@@ -556,28 +556,30 @@ void CONTROLLER::Set_Command(const char* Flag, const char* Value, int Check,
                              const char* prefix)
 {
     if (prefix && strcmp(prefix, "comments") == 0) return;
-    char temp[CHAR_LENGTH_MAX] = {0}, temp2[CHAR_LENGTH_MAX];
+    std::string key;
     if (prefix && prefix[0] != 0 && strcmp(prefix, "main") != 0)
     {
-        strcpy(temp, prefix);
-        strcat(temp, "_");
+        key = prefix;
+        key += "_";
     }
-    strcat(temp, Flag);
-    if (commands.count(temp))
+    key += Flag;
+    if (commands.count(key))
     {
-        sprintf(temp2, "Reason:\n\t'%s' is set more than once\n", temp);
+        const std::string reason =
+            "Reason:\n\t'" + key + "' is set more than once\n";
         Throw_SPONGE_Error(spongeErrorConflictingCommand,
-                           "CONTROLLER::Set_Command", temp2);
+                           "CONTROLLER::Set_Command", reason.c_str());
     }
-    strcpy(temp2, Value);
-    char* real_value = strtok(temp2, "#");
-    original_commands[temp] = real_value;
-    if (sscanf(real_value, "%s", temp2))
-        commands[temp] = temp2;
-    else
-        commands[temp] = "";
+    std::string real_value = Value == nullptr ? "" : Value;
+    const std::size_t comment = real_value.find('#');
+    if (comment != std::string::npos) real_value.erase(comment);
+    original_commands[key] = real_value;
+    std::istringstream input(real_value);
+    std::string first_token;
+    input >> first_token;
+    commands[key] = first_token;
 
-    command_check[temp] = Check;
+    command_check[key] = Check;
 }
 
 void CONTROLLER::Default_Set()

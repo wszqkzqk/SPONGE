@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -246,7 +247,15 @@ class VdsTrajectoryH5Writer
         if (current_shard_writer_ == nullptr ||
             current_shard_frame_count_ >= chunk_size_)
         {
-            if (!Rotate_To_New_Shard(step, time))
+            const int64_t shard_step =
+                pending_observable_frames_.empty()
+                    ? step
+                    : pending_observable_frames_.front().step;
+            const double shard_time =
+                pending_observable_frames_.empty()
+                    ? time
+                    : pending_observable_frames_.front().time;
+            if (!Rotate_To_New_Shard(shard_step, shard_time))
             {
                 return false;
             }
@@ -263,24 +272,28 @@ class VdsTrajectoryH5Writer
         current_manifest_entry_.time_end = time;
         current_shard_frame_count_ += 1;
         total_trajectory_frame_count_ += 1;
-        return true;
+        return Flush_Pending_Observable_Frames();
     }
 
     bool Append_Observable_Frame(
         const int64_t step, const double time,
         const std::map<std::string, double>& values_by_hdf5_name)
     {
-        if (current_shard_writer_ == nullptr)
+        if (wrapper_writer_ == nullptr)
         {
-            last_error_ =
-                "observable frames require an open shard anchored by a "
-                "trajectory frame";
+            last_error_ = "VDS wrapper is not open";
             return false;
         }
         if (!observable_layout_defined_)
         {
             last_error_ = "observable layout must be defined before appending";
             return false;
+        }
+        if (current_shard_writer_ == nullptr)
+        {
+            pending_observable_frames_.push_back(
+                {step, time, values_by_hdf5_name});
+            return true;
         }
         if (!current_shard_writer_->Append_Observable_Frame(
                 step, time, values_by_hdf5_name))
@@ -533,6 +546,17 @@ class VdsTrajectoryH5Writer
     {
         repair_applied_ = false;
         repaired_shard_count_ = 0;
+        if (!pending_observable_frames_.empty())
+        {
+            last_error_ =
+                "cannot finalize VDS observables before the first trajectory "
+                "frame";
+            if (wrapper_writer_ != nullptr)
+            {
+                wrapper_writer_->Mark_Failed(last_error_);
+            }
+            return false;
+        }
         if (!Complete_Current_Shard(allow_repair))
         {
             if (wrapper_writer_ != nullptr)
@@ -578,6 +602,31 @@ class VdsTrajectoryH5Writer
     std::string Last_Error() const { return last_error_; }
 
    private:
+    struct PendingObservableFrame
+    {
+        int64_t step = 0;
+        double time = 0.0;
+        std::map<std::string, double> values_by_hdf5_name;
+    };
+
+    bool Flush_Pending_Observable_Frames()
+    {
+        while (!pending_observable_frames_.empty())
+        {
+            const auto& frame = pending_observable_frames_.front();
+            if (!current_shard_writer_->Append_Observable_Frame(
+                    frame.step, frame.time, frame.values_by_hdf5_name))
+            {
+                last_error_ = current_shard_writer_->Last_Error();
+                return false;
+            }
+            current_manifest_entry_.observable_frame_count += 1;
+            total_observable_frame_count_ += 1;
+            pending_observable_frames_.pop_front();
+        }
+        return true;
+    }
+
     bool Rotate_To_New_Shard(const int64_t step, const double time)
     {
         const std::size_t manifest_size_before = manifest_.size();
@@ -1889,6 +1938,7 @@ class VdsTrajectoryH5Writer
     std::vector<std::string> reaxff_terms_;
     std::vector<std::string> observable_hdf5_names_;
     std::vector<std::string> observable_original_names_;
+    std::deque<PendingObservableFrame> pending_observable_frames_;
 
     VdsShardManifestEntry current_manifest_entry_;
     std::vector<VdsShardManifestEntry> manifest_;

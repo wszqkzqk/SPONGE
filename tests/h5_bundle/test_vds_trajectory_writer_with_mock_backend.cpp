@@ -760,8 +760,8 @@ static void Test_Vds_Precondition_Errors()
     REQUIRE_TRUE(
         !writer.Append_Observable_Frame(1, 0.0, {{"temperature", 1.0}}));
     REQUIRE_EQ(writer.Last_Error(),
-               std::string("observable frames require an open shard anchored "
-                           "by a trajectory frame"));
+               std::string("observable layout must be defined before "
+                           "appending"));
 
     REQUIRE_TRUE(writer.Append_Particle_Frame(1, 0.0, position, box));
     REQUIRE_TRUE(
@@ -792,6 +792,58 @@ static void Test_Vds_Precondition_Errors()
     REQUIRE_TRUE(!writer.Append_Sits_Nk_Frame(1, 0.0, "sits_b", position, 3));
     REQUIRE_EQ(writer.Last_Error(),
                std::string("SITS nk shape changed within VDS trajectory"));
+}
+
+static void Test_Vds_Preserves_Observables_Before_First_Particle_Frame()
+{
+    MockBackendFactory factory;
+    VdsTrajectoryH5Writer writer(&factory);
+    auto plan = Make_Vds_Plan();
+
+    REQUIRE_TRUE(writer.Open(plan, "test"));
+    REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
+    REQUIRE_TRUE(writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
+
+    REQUIRE_TRUE(writer.Append_Observable_Frame(
+        0, 0.0, {{"temperature", 299.0}}));
+    REQUIRE_TRUE(writer.Append_Observable_Frame(
+        1, 0.01, {{"temperature", 300.0}}));
+    REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
+               static_cast<std::size_t>(0));
+
+    float position[3] = {1.0f, 0.0f, 0.0f};
+    float box[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    REQUIRE_TRUE(writer.Append_Particle_Frame(1, 0.01, position, box));
+    REQUIRE_EQ(writer.Total_Observable_Frame_Count(),
+               static_cast<std::size_t>(2));
+    REQUIRE_TRUE(writer.Finalize());
+
+    REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(1));
+    REQUIRE_EQ(writer.Manifest()[0].frame_count, static_cast<int64_t>(1));
+    REQUIRE_EQ(writer.Manifest()[0].observable_frame_count,
+               static_cast<int64_t>(2));
+    REQUIRE_EQ(writer.Manifest()[0].step_start, static_cast<int64_t>(0));
+    REQUIRE_EQ(factory.logs[1]->append_counts.at(path::observables_all_step),
+               static_cast<int64_t>(2));
+}
+
+static void Test_Vds_Rejects_Unanchored_Observables_At_Finalize()
+{
+    MockBackendFactory factory;
+    VdsTrajectoryH5Writer writer(&factory);
+    auto plan = Make_Vds_Plan();
+
+    REQUIRE_TRUE(writer.Open(plan, "test"));
+    REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
+    REQUIRE_TRUE(writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
+    REQUIRE_TRUE(writer.Append_Observable_Frame(
+        0, 0.0, {{"temperature", 299.0}}));
+
+    REQUIRE_TRUE(!writer.Finalize());
+    REQUIRE_EQ(writer.Last_Error(),
+               std::string("cannot finalize VDS observables before the first "
+                           "trajectory frame"));
+    REQUIRE_EQ(factory.logs[0]->status, FileStatus::failed);
 }
 
 static void Test_Vds_Open_Precondition_Errors()
@@ -1056,6 +1108,8 @@ int main()
             Test_Vds_Status_Write_Failure_Marks_Wrapper_Failed();
             Test_Vds_Wrapper_Finalize_Failure_Marks_Wrapper_Failed();
             Test_Vds_Precondition_Errors();
+            Test_Vds_Preserves_Observables_Before_First_Particle_Frame();
+            Test_Vds_Rejects_Unanchored_Observables_At_Finalize();
             Test_Vds_Open_Precondition_Errors();
             Test_Vds_Finalize_Without_Frames();
             Test_Complete_Prefix_Repair_Finalize();

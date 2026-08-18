@@ -1203,10 +1203,6 @@ void MD_INFORMATION::trajectory_output::Append_H5_Observable_Frame(
     }
     if (h5_trajectory_vds_enabled)
     {
-        if (h5_vds_trajectory_writer->Total_Trajectory_Frame_Count() == 0)
-        {
-            return;
-        }
         if (!h5_vds_trajectory_writer->Append_Observable_Frame(
                 md_info->sys.steps, md_info->sys.Get_Current_Time(false),
                 values))

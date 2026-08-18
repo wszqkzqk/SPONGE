@@ -489,6 +489,12 @@ Observable streams in a shard may have a different frame count from trajectory
 streams because `write_mdout_interval` and `write_trajectory_interval` are
 separate cadence domains.
 
+On Windows, a reader that keeps the published wrapper open may prevent replacing
+that pathname. Intermediate publication therefore keeps the last complete wrapper
+visible and retries the newest complete prefix on the next publication. Initial
+and final publication remain strict and report an error if the pathname is still
+busy.
+
 `shard_manifest/path` is relative to the wrapper directory. Each completed
 entry also records `shard_manifest/byte_size`; a downloader must verify that
 size before atomically promoting a downloaded shard. A future minor revision

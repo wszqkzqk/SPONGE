@@ -152,7 +152,8 @@ class HighFiveBackend : public WriterBackend
         return Flush();
     }
 
-    bool Publish_Snapshot(const std::string& destination_path) override
+    bool Publish_Snapshot(const std::string& destination_path,
+                          bool allow_deferred = false) override
     {
         if (!Ensure_File() || !Flush()) return false;
         const std::string temporary_path = destination_path + ".tmp";
@@ -170,8 +171,18 @@ class HighFiveBackend : public WriterBackend
             return Fail("failed to snapshot HDF5 file " + actual_path_ +
                         " to " + temporary_path + ": " + copy_error.message());
         }
-        if (!Atomic_Replace_File(temporary_path, destination_path, &error))
+        bool destination_busy = false;
+        if (!Atomic_Replace_File(temporary_path, destination_path, &error,
+                                 &destination_busy, !allow_deferred))
         {
+            if (allow_deferred && destination_busy)
+            {
+                if (!Remove_File_If_Exists(temporary_path, &error))
+                {
+                    return Fail(error);
+                }
+                return true;
+            }
             Remove_File_If_Exists(temporary_path);
             return Fail(error);
         }

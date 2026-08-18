@@ -1222,6 +1222,45 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
                        .back(),
                    static_cast<int64_t>(3));
     }
+
+    const auto snapshot_path = dir / "live_wrapper.spg.h5md";
+    HighFiveBackend snapshot_backend;
+    H5MDWriter snapshot_writer(&snapshot_backend);
+    WriterOptions snapshot_options;
+    snapshot_options.path = snapshot_path.string();
+    snapshot_options.schema_name = "sponge.output.h5md";
+    snapshot_options.schema_version = "test";
+    snapshot_options.identity_uuid = "test-live-wrapper";
+    snapshot_options.output_mode = "vds";
+    snapshot_options.atomic_snapshot = true;
+    REQUIRE_TRUE(snapshot_writer.Open(snapshot_options));
+    REQUIRE_TRUE(snapshot_writer.Write_Publication_Epoch(1));
+    REQUIRE_TRUE(snapshot_writer.Publish_Snapshot(snapshot_path.string()));
+
+    HANDLE persistent_reader = CreateFileA(
+        snapshot_path.string().c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    REQUIRE_TRUE(persistent_reader != INVALID_HANDLE_VALUE);
+    REQUIRE_TRUE(snapshot_writer.Write_Publication_Epoch(2));
+    REQUIRE_TRUE(
+        snapshot_writer.Publish_Snapshot(snapshot_path.string(), true));
+    {
+        HighFive::File published(snapshot_path.string(),
+                                 HighFive::File::ReadOnly);
+        REQUIRE_EQ(Read_Int64_Vector(published, path::output_publication_epoch)
+                       .back(),
+                   static_cast<int64_t>(1));
+    }
+    CloseHandle(persistent_reader);
+    REQUIRE_TRUE(snapshot_writer.Publish_Snapshot(snapshot_path.string()));
+    {
+        HighFive::File published(snapshot_path.string(),
+                                 HighFive::File::ReadOnly);
+        REQUIRE_EQ(Read_Int64_Vector(published, path::output_publication_epoch)
+                       .back(),
+                   static_cast<int64_t>(2));
+    }
+    REQUIRE_TRUE(snapshot_writer.Close());
 #endif
 
     REQUIRE_TRUE(!Atomic_Replace_File(temporary_path.string(),

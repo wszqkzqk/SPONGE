@@ -1771,7 +1771,9 @@ class VdsTrajectoryH5Writer
             last_error_ = wrapper_writer_->Last_Error();
             return false;
         }
-        if (!wrapper_writer_->Publish_Snapshot(wrapper_path_))
+        // A long-lived Windows reader may prevent replacement of the published
+        // wrapper. Keep the last complete prefix and retry on the next publish.
+        if (!wrapper_writer_->Publish_Snapshot(wrapper_path_, true))
         {
             last_error_ = wrapper_writer_->Last_Error();
             return false;

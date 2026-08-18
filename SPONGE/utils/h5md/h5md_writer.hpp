@@ -83,7 +83,14 @@ class WriterBackend
     virtual bool Flush() = 0;
     virtual bool Close() = 0;
     virtual bool Finalize() = 0;
-    virtual bool Publish_Snapshot(const std::string&) { return true; }
+    // A deferred publication preserves the last complete destination snapshot
+    // when a Windows reader prevents replacing it. A later publication retries.
+    virtual bool Publish_Snapshot(const std::string&,
+                                  bool allow_deferred = false)
+    {
+        (void)allow_deferred;
+        return true;
+    }
 
     virtual bool Ensure_Group(const std::string& path) = 0;
     virtual bool Create_Dataset(const DatasetSpec& spec) = 0;
@@ -154,10 +161,11 @@ class H5MDWriter
         return Write_Publication_Epoch(publication_epoch) &&
                backend_ != nullptr && backend_->Finalize();
     }
-    bool Publish_Snapshot(const std::string& destination_path)
+    bool Publish_Snapshot(const std::string& destination_path,
+                          bool allow_deferred = false)
     {
         return backend_ != nullptr &&
-               backend_->Publish_Snapshot(destination_path);
+               backend_->Publish_Snapshot(destination_path, allow_deferred);
     }
 
     bool Ensure_Group(const std::string& path)

@@ -263,8 +263,8 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         }
         if (!has_cv && !has_restraint && !has_restraint_cv &&
             typed_cvs.empty() && typed_virtual_atoms.empty() &&
-            typed_restraints.empty() &&
-            !has_typed_metadynamics && !has_typed_steering)
+            typed_restraints.empty() && !has_typed_metadynamics &&
+            !has_typed_steering)
         {
             return false;
         }
@@ -290,8 +290,7 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         {
             CVConfigSection native{definition.name,
                                    {{"vatom_type", definition.type}}};
-            Merge_H5_CV_Config("/cv/virtual_atom/<name>", {native},
-                               &sections);
+            Merge_H5_CV_Config("/cv/virtual_atom/<name>", {native}, &sections);
             manager->protocol_virtual_atom_indices[definition.name] =
                 definition.atom_indices;
             if (!definition.weight.empty())

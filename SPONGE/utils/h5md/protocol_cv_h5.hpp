@@ -9,8 +9,8 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
-#include <sstream>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -93,7 +93,7 @@ class ProtocolCVH5Reader
                 const std::string root = "/cv/" + name;
                 if (name == "config" || name == "virtual_atom" ||
                     protocol_->getObjectType(root) !=
-                                            HighFive::ObjectType::Group)
+                        HighFive::ObjectType::Group)
                 {
                     continue;
                 }
@@ -147,8 +147,7 @@ class ProtocolCVH5Reader
                     atom_indices.empty() ? atom_refs.size()
                                          : atom_indices.size();
                 Read_Restart_Reference(root, selected_atom_count, &definition);
-                Validate_Current_Runtime_Shape(selected_atom_count,
-                                               definition);
+                Validate_Current_Runtime_Shape(selected_atom_count, definition);
                 definitions->push_back(std::move(definition));
             }
             return true;
@@ -200,8 +199,7 @@ class ProtocolCVH5Reader
                 if (definition.type == "center_of_mass" &&
                     !definition.weight.empty())
                     throw std::runtime_error(
-                        root +
-                        "/weight must be absent for center_of_mass");
+                        root + "/weight must be absent for center_of_mass");
                 definitions->push_back(std::move(definition));
             }
             return true;
@@ -332,7 +330,8 @@ class ProtocolCVH5Reader
     {
         const std::string path = root + "/atom_refs";
         if (!protocol_->exist(path)) return {};
-        const auto dims = protocol_->getDataSet(path).getSpace().getDimensions();
+        const auto dims =
+            protocol_->getDataSet(path).getSpace().getDimensions();
         if (dims.size() != 1 || dims[0] == 0)
             throw std::runtime_error(path + " must have shape [n], n > 0");
         std::vector<std::string> result;
@@ -353,12 +352,14 @@ class ProtocolCVH5Reader
             if (used != value.size() || atom < 0 ||
                 static_cast<std::size_t>(atom) >= atom_count)
                 throw std::runtime_error(
-                    path + " references a missing virtual atom or an "
-                           "out-of-range physical atom");
+                    path +
+                    " references a missing virtual atom or an "
+                    "out-of-range physical atom");
         }
         if (std::set<std::string>(result.begin(), result.end()).size() !=
             result.size())
-            throw std::runtime_error(path + " contains duplicate atom references");
+            throw std::runtime_error(path +
+                                     " contains duplicate atom references");
         return result;
     }
 

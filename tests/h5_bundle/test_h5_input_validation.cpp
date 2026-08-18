@@ -246,8 +246,7 @@ static void Test_Protocol_Reader_Loads_Typed_Virtual_Atoms()
         REQUIRE_EQ(virtual_atoms.size(), static_cast<std::size_t>(1));
         REQUIRE_EQ(virtual_atoms[0].name, std::string("center"));
         REQUIRE_EQ(virtual_atoms[0].atom_indices, std::vector<int>({0, 1}));
-        REQUIRE_EQ(virtual_atoms[0].weight,
-                   std::vector<float>({0.25f, 0.75f}));
+        REQUIRE_EQ(virtual_atoms[0].weight, std::vector<float>({0.25f, 0.75f}));
         std::vector<ProtocolCVDefinition> definitions;
         REQUIRE_TRUE(reader.Read_Definitions(3, &definitions));
         REQUIRE_EQ(definitions.size(), static_cast<std::size_t>(1));

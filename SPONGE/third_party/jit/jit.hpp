@@ -6,20 +6,10 @@ directly compiling for CPU backend
 
 #include "../../common.h"
 #include "../../control.h"
+#include "embedded_common_header.hpp"
 
 namespace sponge_jit_detail
 {
-inline const std::string& Embedded_Common_Header()
-{
-    static const std::string header = []()
-    {
-        std::string value;
-        value.reserve(65536);
-#include "jit.h"
-        return value;
-    }();
-    return header;
-}
 inline std::string Extract_Function_Name(const std::string& source)
 {
     size_t pos1 = source.find("extern");

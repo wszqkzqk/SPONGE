@@ -39,6 +39,7 @@ struct QUANTUM_CHEMISTRY
 
     float scf_energy = 0.0f;
     FILE* scf_output_file = NULL;
+    char scf_output_file_name[CHAR_LENGTH_MAX] = "";
 
     // 本地原子映射
     std::vector<int> atom_local;
@@ -86,7 +87,14 @@ struct QUANTUM_CHEMISTRY
     // ECP 选择: AUTO=根据基组自动选择, NONE=禁用, DEF2_ECP/LANL2DZ=显式指定
     QC_ECP_TYPE ecp_type = QC_ECP_TYPE::AUTO;
 
+    bool has_native_qc_type = false;
+    int native_qc_charge = 0;
+    int native_qc_multiplicity = 1;
+    std::vector<int> native_qc_atom_index;
+    std::vector<std::string> native_qc_symbol;
+
     // 初始化内部流程
+    void Load_H5_QC_Type_Input(CONTROLLER* controller, int atom_numbers);
     bool Parsing_Arguments(CONTROLLER* controller, const int atom_numbers,
                            const char*& qc_type_file,
                            std::string& basis_set_name);

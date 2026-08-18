@@ -187,15 +187,18 @@ inline FILE* CONTROLLER::Get_Output_File(bool binary, const char* command,
     {
         filename = this->Command(command);
     }
-    else if (default_suffix != NULL &&
-             this->Command_Exist("default_out_file_prefix"))
+    else if (SpongeH5OutputContract::Legacy_Sidecars_Default_Enabled(this))
     {
-        filename = this->Command("default_out_file_prefix");
-        filename += default_suffix;
-    }
-    else if (default_filename != NULL)
-    {
-        filename = default_filename;
+        if (default_suffix != NULL &&
+            this->Command_Exist("default_out_file_prefix"))
+        {
+            filename = this->Command("default_out_file_prefix");
+            filename += default_suffix;
+        }
+        else if (default_filename != NULL)
+        {
+            filename = default_filename;
+        }
     }
     if (!filename.empty())
     {

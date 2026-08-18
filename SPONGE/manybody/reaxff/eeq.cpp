@@ -984,23 +984,29 @@ void REAXFF_EEQ::Step_Print(CONTROLLER* controller)
     controller->Step_Print("REAXFF_EEQ", h_energy, true);
 }
 
-void REAXFF_EEQ::Print_Charges(const float* d_charge)
+void REAXFF_EEQ::Capture_Charges(const float* d_charge,
+                                 std::vector<float>* elementary_charges,
+                                 bool write_legacy_file)
 {
-    if (!is_initialized) return;
-    float* h_q = NULL;
-    Malloc_Safely((void**)&h_q, sizeof(float) * atom_numbers);
-    deviceMemcpy(h_q, d_charge, sizeof(float) * atom_numbers,
-                 deviceMemcpyDeviceToHost);
+    if (!is_initialized || elementary_charges == NULL) return;
+    elementary_charges->resize(atom_numbers);
+    deviceMemcpy(elementary_charges->data(), d_charge,
+                 sizeof(float) * atom_numbers, deviceMemcpyDeviceToHost);
 
-    FILE* fp = fopen("eeq_charges.txt", "w");
-    if (fp)
+    for (float& charge : *elementary_charges)
     {
-        for (int i = 0; i < atom_numbers; i++)
-        {
-            float q_elementary = h_q[i] / CONSTANT_SPONGE_CHARGE_SCALE;
-            fprintf(fp, "%d %.6f\n", i + 1, q_elementary);
-        }
-        fclose(fp);
+        charge /= CONSTANT_SPONGE_CHARGE_SCALE;
     }
-    free(h_q);
+    if (write_legacy_file)
+    {
+        FILE* fp = fopen("eeq_charges.txt", "w");
+        if (fp)
+        {
+            for (int i = 0; i < atom_numbers; i++)
+            {
+                fprintf(fp, "%d %.6f\n", i + 1, elementary_charges->at(i));
+            }
+            fclose(fp);
+        }
+    }
 }

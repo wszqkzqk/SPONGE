@@ -889,7 +889,7 @@ void VIRTUAL_INFORMATION::Initial(CONTROLLER* controller,
             {
                 Device_Malloc_And_Copy_Safely(
                     (void**)&temp_vl->v3_info.d_virtual_type_3,
-                    temp_vl->v3_info.d_virtual_type_3,
+                    temp_vl->v3_info.h_virtual_type_3,
                     sizeof(VIRTUAL_TYPE_3) * temp_vl->v3_info.virtual_numbers);
                 Device_Malloc_Safely(
                     (void**)&temp_vl->v3_info.l_virtual_type_3,
@@ -948,45 +948,61 @@ void VIRTUAL_INFORMATION::Coordinate_Refresh(VECTOR* crd, const LTMatrix3 cell,
         for (int layer = 0; layer < max_level; layer++)
         {
             VIRTUAL_LAYER_INFORMATION* temp_vl = &virtual_layer_info[layer];
-            if (temp_vl->v0_info.local_numbers > 0)
-                Launch_Device_Kernel(v0_Coordinate_Refresh,
-                                     (temp_vl->v0_info.local_numbers +
-                                      CONTROLLER::device_max_thread - 1) /
-                                         CONTROLLER::device_max_thread,
-                                     CONTROLLER::device_max_thread, 0, NULL,
-                                     temp_vl->v0_info.local_numbers,
-                                     temp_vl->v0_info.l_virtual_type_0, crd,
-                                     cell, rcell);
+            const int v0_numbers = local_state_ready
+                                       ? temp_vl->v0_info.local_numbers
+                                       : temp_vl->v0_info.virtual_numbers;
+            const VIRTUAL_TYPE_0* v0_info =
+                local_state_ready ? temp_vl->v0_info.l_virtual_type_0
+                                  : temp_vl->v0_info.d_virtual_type_0;
+            if (v0_numbers > 0)
+                Launch_Device_Kernel(
+                    v0_Coordinate_Refresh,
+                    (v0_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL, v0_numbers, v0_info,
+                    crd, cell, rcell);
 
-            if (temp_vl->v1_info.local_numbers > 0)
-                Launch_Device_Kernel(v1_Coordinate_Refresh,
-                                     (temp_vl->v1_info.local_numbers +
-                                      CONTROLLER::device_max_thread - 1) /
-                                         CONTROLLER::device_max_thread,
-                                     CONTROLLER::device_max_thread, 0, NULL,
-                                     temp_vl->v1_info.local_numbers,
-                                     temp_vl->v1_info.l_virtual_type_1, crd,
-                                     cell, rcell);
+            const int v1_numbers = local_state_ready
+                                       ? temp_vl->v1_info.local_numbers
+                                       : temp_vl->v1_info.virtual_numbers;
+            const VIRTUAL_TYPE_1* v1_info =
+                local_state_ready ? temp_vl->v1_info.l_virtual_type_1
+                                  : temp_vl->v1_info.d_virtual_type_1;
+            if (v1_numbers > 0)
+                Launch_Device_Kernel(
+                    v1_Coordinate_Refresh,
+                    (v1_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL, v1_numbers, v1_info,
+                    crd, cell, rcell);
 
-            if (temp_vl->v2_info.local_numbers > 0)
-                Launch_Device_Kernel(v2_Coordinate_Refresh,
-                                     (temp_vl->v2_info.local_numbers +
-                                      CONTROLLER::device_max_thread - 1) /
-                                         CONTROLLER::device_max_thread,
-                                     CONTROLLER::device_max_thread, 0, NULL,
-                                     temp_vl->v2_info.local_numbers,
-                                     temp_vl->v2_info.l_virtual_type_2, crd,
-                                     cell, rcell);
+            const int v2_numbers = local_state_ready
+                                       ? temp_vl->v2_info.local_numbers
+                                       : temp_vl->v2_info.virtual_numbers;
+            const VIRTUAL_TYPE_2* v2_info =
+                local_state_ready ? temp_vl->v2_info.l_virtual_type_2
+                                  : temp_vl->v2_info.d_virtual_type_2;
+            if (v2_numbers > 0)
+                Launch_Device_Kernel(
+                    v2_Coordinate_Refresh,
+                    (v2_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL, v2_numbers, v2_info,
+                    crd, cell, rcell);
 
-            if (temp_vl->v3_info.local_numbers > 0)
-                Launch_Device_Kernel(v3_Coordinate_Refresh,
-                                     (temp_vl->v3_info.local_numbers +
-                                      CONTROLLER::device_max_thread - 1) /
-                                         CONTROLLER::device_max_thread,
-                                     CONTROLLER::device_max_thread, 0, NULL,
-                                     temp_vl->v3_info.local_numbers,
-                                     temp_vl->v3_info.l_virtual_type_3, crd,
-                                     cell, rcell);
+            const int v3_numbers = local_state_ready
+                                       ? temp_vl->v3_info.local_numbers
+                                       : temp_vl->v3_info.virtual_numbers;
+            const VIRTUAL_TYPE_3* v3_info =
+                local_state_ready ? temp_vl->v3_info.l_virtual_type_3
+                                  : temp_vl->v3_info.d_virtual_type_3;
+            if (v3_numbers > 0)
+                Launch_Device_Kernel(
+                    v3_Coordinate_Refresh,
+                    (v3_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL, v3_numbers, v3_info,
+                    crd, cell, rcell);
         }
     }
 }
@@ -1222,6 +1238,7 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
                                     const int local_atom_numbers)
 {
     if (!is_initialized) return;
+    local_state_ready = true;
     // 每层之间需要串行计算，层内并行计算
     for (int layer = 0; layer < max_level; layer++)
     {

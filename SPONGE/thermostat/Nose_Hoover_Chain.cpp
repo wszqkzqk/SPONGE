@@ -1,5 +1,7 @@
 ﻿#include "Nose_Hoover_Chain.h"
 
+#include "../utils/h5md/input_assembler.hpp"
+
 static __global__ void Nose_Hoover_Chain_Update(
     int chain_length, float* chain_crd, float* chain_vel, float chain_mass,
     float Ek, float kB_T, float dt, int freedom)
@@ -290,6 +292,40 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Set_Target_Temperature(
     target_temperature = target_temperature_new;
 }
 
+bool NOSE_HOOVER_CHAIN_INFORMATION::Apply_H5_Restart_State(
+    const SpongeH5MD::RestartDynamicState& state, std::string* error_message)
+{
+    auto fail = [error_message](const std::string& message)
+    {
+        if (error_message != NULL)
+        {
+            *error_message = message;
+        }
+        return false;
+    };
+
+    if (!is_initialized)
+    {
+        return fail("Nose-Hoover chain module is not initialized");
+    }
+    if (!SpongeH5MD::Apply_Nose_Hoover_Chain_Dynamic_State(
+            state, chain_length, h_coordinate, h_velocity, error_message))
+    {
+        return false;
+    }
+    if (coordinate != NULL)
+    {
+        deviceMemcpy(coordinate, h_coordinate, sizeof(float) * chain_length,
+                     deviceMemcpyHostToDevice);
+    }
+    if (velocity != NULL)
+    {
+        deviceMemcpy(velocity, h_velocity, sizeof(float) * (chain_length + 1),
+                     deviceMemcpyHostToDevice);
+    }
+    return true;
+}
+
 void NOSE_HOOVER_CHAIN_INFORMATION::Save_Restart_File()
 {
     if (is_initialized && restart_file_name[0] != 0 &&
@@ -314,6 +350,8 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Save_Trajectory_File()
             fprintf(f_crd_traj, "%f ", h_coordinate[i]);
         }
         fprintf(f_crd_traj, "\n");
+        SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+            f_crd_traj, "Nose-Hoover coordinate trajectory");
     }
     if (is_initialized && f_vel_traj != NULL && CONTROLLER::MPI_rank == 0)
     {
@@ -322,5 +360,7 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Save_Trajectory_File()
             fprintf(f_vel_traj, "%f ", h_velocity[i]);
         }
         fprintf(f_vel_traj, "\n");
+        SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+            f_vel_traj, "Nose-Hoover velocity trajectory");
     }
 }

@@ -135,6 +135,7 @@ struct VIRTUAL_INFORMATION
     int is_controller_printf_initialized = 0;
     int last_modify_date = 20260216;
     bool need_atomic = false;
+    bool local_state_ready = false;
 
     // 内容信息
     int max_level = 0;  // 最大的虚拟层级

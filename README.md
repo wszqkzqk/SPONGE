@@ -34,4 +34,4 @@
 
 ## 许可证
 
-[Apache License 2.0](LICENSE) - Copyright (c) 2022-2026 SPONGE Development Team
+[SPONGE Licensing Agreement (English, controlling)](LICENSE) · [中文译本](LICENSE.zh-CN.md) · [第三方声明](THIRD_PARTY_NOTICES)

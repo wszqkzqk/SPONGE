@@ -4,7 +4,7 @@ param(
     [string]$Tag = "",
     [string]$OutputDir = "release-artifacts/nsis",
     [string]$NsiPath = "packaging/windows/installer.nsi",
-    [string]$LicensePath = "packaging/windows/license.rtf"
+    [string]$LicensePath = "LICENSE"
 )
 
 $ErrorActionPreference = "Stop"

@@ -101,11 +101,22 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/valence_angle.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/torsion.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/hydrogen_bond.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/native_init.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp)
 
 set(SOURCES ${SPONGE_SOURCES})
 
 find_package(tomlplusplus CONFIG REQUIRED)
+find_package(HighFive CONFIG REQUIRED)
+find_package(HDF5 1.10.7 REQUIRED COMPONENTS C)
+if(WIN32
+   AND HDF5_VERSION VERSION_GREATER_EQUAL "1.12.0"
+   AND HDF5_VERSION VERSION_LESS "1.12.1")
+  message(
+    FATAL_ERROR
+      "HDF5 1.12.0 does not provide H5Pset_file_locking; use HDF5 1.10.7-1.10.x or 1.12.1+"
+  )
+endif()
 add_library(
   sponge_toml STATIC
   ${PROJECT_ROOT_DIR}/SPONGE/third_party/toml/toml.cpp
@@ -118,6 +129,28 @@ set_source_files_properties(
 target_include_directories(sponge_toml PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
 target_link_libraries(sponge_toml PUBLIC tomlplusplus::tomlplusplus)
 
+add_library(
+  sponge_jit_header STATIC
+  ${PROJECT_ROOT_DIR}/SPONGE/third_party/jit/embedded_common_header.cpp)
+set_source_files_properties(
+  ${PROJECT_ROOT_DIR}/SPONGE/third_party/jit/embedded_common_header.cpp
+  PROPERTIES LANGUAGE CXX)
+target_include_directories(sponge_jit_header PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
+
 add_executable(${CURRENT_TARGET} ${SOURCES})
-target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_toml)
+target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_jit_header sponge_toml)
+if(TARGET HighFive::HighFive)
+  target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive::HighFive)
+elseif(TARGET HighFive)
+  target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive)
+else()
+  message(
+    FATAL_ERROR "HighFive target was not provided by find_package(HighFive)")
+endif()
+if(TARGET HDF5::HDF5)
+  target_link_libraries(${CURRENT_TARGET} PRIVATE HDF5::HDF5)
+else()
+  target_include_directories(${CURRENT_TARGET} PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(${CURRENT_TARGET} PRIVATE ${HDF5_LIBRARIES})
+endif()
 install(TARGETS ${CURRENT_TARGET} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

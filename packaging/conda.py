@@ -11,8 +11,8 @@ Examples:
 """
 
 import argparse
-import io
 import hashlib
+import io
 import json
 import platform
 import subprocess
@@ -313,7 +313,7 @@ def make_metadata(
         "build": build_string,
         "build_number": 0,
         "depends": depends,
-        "license": "Apache-2.0",
+        "license": "LicenseRef-SPONGE-NonCommercial-1.0",
         "platform": subdir.rsplit("-", 1)[0] if "-" in subdir else subdir,
         "arch": subdir.rsplit("-", 1)[1] if "-" in subdir else "unknown",
         "subdir": subdir,
@@ -383,6 +383,18 @@ def build_info_tar(
             "info/files",
             "\n".join(archive_paths).encode("utf-8"),
         )
+        for filename in ("LICENSE", "LICENSE.zh-CN.md", "THIRD_PARTY_NOTICES"):
+            _add_text_entry(
+                tar,
+                f"info/{filename}",
+                (PROJECT_ROOT / filename).read_bytes(),
+            )
+        for filename in ("LICENSE", "LICENSE.zh-CN.md", "THIRD_PARTY_NOTICES"):
+            _add_text_entry(
+                tar,
+                f"info/{filename}",
+                (PROJECT_ROOT / filename).read_bytes(),
+            )
 
     return _compress_zst(buf.getvalue())
 

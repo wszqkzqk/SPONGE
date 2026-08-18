@@ -130,10 +130,8 @@ void CMAP::Parameter_Host_to_Device()
                                   sizeof(int) * tot_cmap_num);
     Device_Malloc_And_Copy_Safely((void**)&d_cmap_type, h_cmap_type,
                                   sizeof(int) * tot_cmap_num);
-    Device_Malloc_And_Copy_Safely((void**)&d_coeff_ptr, h_coeff_ptr,
-                                  sizeof(float*) * tot_cmap_num);
     Device_Malloc_And_Copy_Safely((void**)&d_inter_coeff, h_inter_coeff,
-                                  sizeof(int) * 16 * uniq_gridpoint_num);
+                                  sizeof(float) * 16 * uniq_gridpoint_num);
     Device_Malloc_And_Copy_Safely((void**)&d_cmap_resolution, h_cmap_resolution,
                                   sizeof(int) * uniq_cmap_num);
     for (int i = 0; i < tot_cmap_num; i++)
@@ -157,7 +155,7 @@ void CMAP::Parameter_Host_to_Device()
 void CMAP::Memory_Allocate()
 {
     Malloc_Safely((void**)&h_cmap_resolution, sizeof(int) * uniq_cmap_num);
-    Malloc_Safely((void**)&h_cmap_type, sizeof(float) * tot_cmap_num);
+    Malloc_Safely((void**)&h_cmap_type, sizeof(int) * tot_cmap_num);
     Malloc_Safely((void**)&h_atom_a, sizeof(int) * tot_cmap_num);
     Malloc_Safely((void**)&h_atom_b, sizeof(int) * tot_cmap_num);
     Malloc_Safely((void**)&h_atom_c, sizeof(int) * tot_cmap_num);
@@ -345,10 +343,14 @@ static __global__
         phi = phi / (2.0 * CONSTANT_Pi / temp_reso);
         psi = psi / (2.0 * CONSTANT_Pi / temp_reso);
 
-        float parm_phi = phi - floorf(phi);
-        float parm_psi = psi - floorf(psi);
-        int locate_phi = (int)floorf(phi) + 12;
-        int locate_psi = (int)floorf(psi) + 12;
+        const int phi_cell = static_cast<int>(floorf(phi));
+        const int psi_cell = static_cast<int>(floorf(psi));
+        float parm_phi = phi - phi_cell;
+        float parm_psi = psi - psi_cell;
+        // The zero-angle grid origin is at the center of the periodic CMAP
+        // table. The grid resolution is input data, not a fixed 24x24 table.
+        int locate_phi = CMAP_Periodic_Grid_Index(phi_cell, temp_reso);
+        int locate_psi = CMAP_Periodic_Grid_Index(psi_cell, temp_reso);
 
         // 定义幂次
         float parm_phi_2 = parm_phi * parm_phi;

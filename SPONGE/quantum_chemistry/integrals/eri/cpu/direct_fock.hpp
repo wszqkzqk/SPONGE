@@ -1415,7 +1415,9 @@ static inline void QC_Build_Fock_Direct_CPU(
         candidate_partners.reserve(256);
         std::vector<QC_Bra_Prim_Cache_CPU> bra_prims;
 
-#pragma omp for schedule(dynamic)
+        // Keep the per-thread reduction stable. Dynamic assignment changes the
+        // SCF/DIIS iteration path even when the input state is identical.
+#pragma omp for schedule(static)
         for (int pair_ij = 0; pair_ij < n_pairs; pair_ij++)
         {
             const QC_Shell_Pair_Meta_CPU& bra_meta = pair_meta[(size_t)pair_ij];

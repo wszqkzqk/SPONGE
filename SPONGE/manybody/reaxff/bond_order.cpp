@@ -1011,6 +1011,14 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
         num_pairs = max_bonds;
     }
 
+    if (num_pairs <= 0)
+    {
+        Build_Bond_CSR(atom_numbers, 0);
+        deviceMemset(d_total_corrected_bond_order, 0,
+                     sizeof(float) * atom_numbers);
+        return;
+    }
+
     if (num_pairs > 0)
     {
         Calculate_Corrected_Bond_Orders_GPU(atom_numbers, d_crd, cell, rcell,

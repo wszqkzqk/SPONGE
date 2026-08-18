@@ -111,6 +111,13 @@ struct COLLECTIVE_VARIABLE_CONTROLLER : public CONTROLLER
     CheckMap cv_vatom_name;
     // 原子序号的映射到cv定义的虚原子的映射
     std::map<int, std::string> cv_vatom_index;
+    // Native protocol metadata retained for typed bias consumers.
+    std::map<std::string, std::vector<float>> protocol_cv_period;
+    std::map<std::string, std::vector<float>> protocol_cv_sigma;
+    std::map<std::string, std::vector<float>> protocol_cv_reference;
+    // Runtime still consumes the `meta` section; this retains the stable
+    // bundled object identity used by diagnostic and restart paths.
+    std::string protocol_metadynamics_name;
     // 初始化时获得使用的所有CV
     // 传入参数：
     //     name: 需要找寻的CV的任务名

@@ -3,6 +3,17 @@
 #include "../common.h"
 #include "../control.h"
 
+__host__ __device__ __forceinline__ int CMAP_Periodic_Grid_Index(
+    const int grid_cell, const int resolution)
+{
+    int grid_index = (grid_cell + resolution / 2) % resolution;
+    if (grid_index < 0)
+    {
+        grid_index += resolution;
+    }
+    return grid_index;
+}
+
 struct CMAP
 {
     char module_name[CHAR_LENGTH_MAX];

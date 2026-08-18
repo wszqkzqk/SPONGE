@@ -1,5 +1,388 @@
 ﻿#include "collective_variable.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <highfive/highfive.hpp>
+#include <iomanip>
+#include <limits>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "utils/h5md/protocol_cv_h5.hpp"
+#include "utils/h5md/protocol_metadynamics_h5.hpp"
+#include "utils/h5md/protocol_restraint_h5.hpp"
+#include "utils/h5md/protocol_steer_h5.hpp"
+
+namespace
+{
+struct CVConfigSection
+{
+    std::string name;
+    std::vector<std::pair<std::string, std::string>> items;
+};
+
+std::vector<std::string> Read_H5_String_Vector(HighFive::File* file,
+                                               const std::string& path)
+{
+    HighFive::DataSet dataset = file->getDataSet(path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != 1)
+    {
+        throw std::runtime_error(path + " must be a one-dimensional dataset");
+    }
+    std::vector<std::string> values;
+    dataset.read(values);
+    return values;
+}
+
+std::vector<std::int64_t> Read_H5_Int64_Vector(HighFive::File* file,
+                                               const std::string& path)
+{
+    HighFive::DataSet dataset = file->getDataSet(path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != 1)
+    {
+        throw std::runtime_error(path + " must be a one-dimensional dataset");
+    }
+    std::vector<std::int64_t> values;
+    dataset.read(values);
+    return values;
+}
+
+void Validate_CV_Config_Token(const std::string& value, const std::string& path,
+                              bool is_key)
+{
+    if (value.empty() || value.find_first_of("\r\n{}") != std::string::npos ||
+        (is_key && value.find('=') != std::string::npos))
+    {
+        throw std::runtime_error(path + " contains an invalid config token");
+    }
+}
+
+std::vector<CVConfigSection> Read_H5_CV_Config(HighFive::File* file,
+                                               const std::string& root)
+{
+    const std::string count_path = root + "/section/count";
+    HighFive::DataSet count_dataset = file->getDataSet(count_path);
+    if (!count_dataset.getSpace().getDimensions().empty())
+    {
+        throw std::runtime_error(count_path + " must be a scalar dataset");
+    }
+    long long declared_section_count = 0;
+    count_dataset.read(declared_section_count);
+    const auto section_names =
+        Read_H5_String_Vector(file, root + "/section/name");
+    const auto key_offsets =
+        Read_H5_Int64_Vector(file, root + "/section/key_offset");
+    const auto keys = Read_H5_String_Vector(file, root + "/key");
+    const auto values = Read_H5_String_Vector(file, root + "/value");
+
+    if (declared_section_count <= 0 ||
+        section_names.size() !=
+            static_cast<std::size_t>(declared_section_count))
+    {
+        throw std::runtime_error(root +
+                                 "/section/count must match a non-empty "
+                                 "section/name vector");
+    }
+    if (key_offsets.size() != section_names.size() + 1 ||
+        key_offsets.front() != 0 || key_offsets.back() < 0 ||
+        static_cast<std::size_t>(key_offsets.back()) != keys.size() ||
+        keys.size() != values.size())
+    {
+        throw std::runtime_error(
+            root + " section offsets and key/value lengths are inconsistent");
+    }
+
+    std::vector<CVConfigSection> sections;
+    std::set<std::string> unique_section_names;
+    for (std::size_t section = 0; section < section_names.size(); ++section)
+    {
+        Validate_CV_Config_Token(section_names[section], root + "/section/name",
+                                 true);
+        if (!unique_section_names.insert(section_names[section]).second)
+        {
+            throw std::runtime_error(root +
+                                     "/section/name contains a duplicate "
+                                     "section");
+        }
+        if (key_offsets[section] < 0 ||
+            key_offsets[section] > key_offsets[section + 1])
+        {
+            throw std::runtime_error(root +
+                                     "/section/key_offset must be monotonic");
+        }
+
+        CVConfigSection parsed{section_names[section], {}};
+        std::set<std::string> unique_keys;
+        for (std::int64_t item = key_offsets[section];
+             item < key_offsets[section + 1]; ++item)
+        {
+            const auto item_index = static_cast<std::size_t>(item);
+            Validate_CV_Config_Token(keys[item_index], root + "/key", true);
+            Validate_CV_Config_Token(values[item_index], root + "/value",
+                                     false);
+            if (!unique_keys.insert(keys[item_index]).second)
+            {
+                throw std::runtime_error(root +
+                                         "/key contains a duplicate key in "
+                                         "section " +
+                                         section_names[section]);
+            }
+            parsed.items.push_back({keys[item_index], values[item_index]});
+        }
+        sections.push_back(std::move(parsed));
+    }
+    return sections;
+}
+
+void Merge_H5_CV_Config(const std::string& root,
+                        const std::vector<CVConfigSection>& incoming,
+                        std::vector<CVConfigSection>* merged)
+{
+    for (const auto& section : incoming)
+    {
+        auto existing = std::find_if(merged->begin(), merged->end(),
+                                     [&](const CVConfigSection& value)
+                                     { return value.name == section.name; });
+        if (existing == merged->end())
+        {
+            merged->push_back(section);
+        }
+        else if (existing->items.size() != section.items.size() ||
+                 !std::all_of(existing->items.begin(), existing->items.end(),
+                              [&](const auto& item)
+                              {
+                                  return std::find(section.items.begin(),
+                                                   section.items.end(),
+                                                   item) != section.items.end();
+                              }))
+        {
+            throw std::runtime_error(
+                root + " conflicts with another typed CV definition for " +
+                section.name);
+        }
+    }
+}
+
+void Set_CV_Config_Value(COLLECTIVE_VARIABLE_CONTROLLER* manager,
+                         const std::string& section, const std::string& flag,
+                         const std::string& value,
+                         const std::string& source_path)
+{
+    const std::string full_key =
+        section.empty() || section == "main" ? flag : section + "_" + flag;
+    const auto existing = manager->original_commands.find(full_key);
+    if (existing != manager->original_commands.end())
+    {
+        if (string_strip(existing->second) == value) return;
+        manager->Throw_SPONGE_Error(
+            spongeErrorConflictingCommand,
+            "COLLECTIVE_VARIABLE_CONTROLLER::Load_H5_CV_Config",
+            string_format(
+                "Reason:\n\tCV command '%COMMAND%' has conflicting values "
+                "while merging %SOURCE%\n",
+                {{"COMMAND", full_key}, {"SOURCE", source_path}})
+                .c_str());
+    }
+    manager->Set_Command(flag.c_str(), value.c_str(), 1,
+                         section.empty() ? nullptr : section.c_str());
+}
+
+bool Load_H5_CV_Config(CONTROLLER* controller,
+                       COLLECTIVE_VARIABLE_CONTROLLER* manager)
+{
+    constexpr const char* input_key = "input_h5_protocol_path";
+    if (!controller->Command_Exist(input_key))
+    {
+        return false;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        constexpr const char* cv_root = "/cv/config";
+        constexpr const char* restraint_root = "/restraint/config";
+        constexpr const char* restraint_cv_root = "/restraint/cv/config";
+        const bool has_cv = file.exist(cv_root);
+        const bool has_restraint = file.exist(restraint_root);
+        const bool has_restraint_cv = file.exist(restraint_cv_root);
+        SpongeH5MD::ProtocolCVH5Reader cv_reader;
+        std::vector<SpongeH5MD::ProtocolCVDefinition> typed_cvs;
+        if (!cv_reader.Open_Protocol(controller->Command(input_key)))
+        {
+            throw std::runtime_error(cv_reader.Last_Error());
+        }
+        if (controller->Command_Exist("input_h5_restart_path") &&
+            !cv_reader.Open_Restart(
+                controller->Command("input_h5_restart_path")))
+        {
+            throw std::runtime_error(cv_reader.Last_Error());
+        }
+        if (!cv_reader.Read_Definitions(
+                static_cast<std::size_t>(manager->atom_numbers), &typed_cvs))
+        {
+            throw std::runtime_error(cv_reader.Last_Error());
+        }
+        SpongeH5MD::ProtocolRestraintH5Reader restraint_reader;
+        std::vector<SpongeH5MD::ProtocolCVRestraint> typed_restraints;
+        if (!restraint_reader.Open(controller->Command(input_key)) ||
+            !restraint_reader.Read_CV_Restraints(&typed_restraints))
+        {
+            throw std::runtime_error(restraint_reader.Last_Error());
+        }
+        SpongeH5MD::ProtocolMetadynamicsH5Reader metadynamics_reader;
+        SpongeH5MD::ProtocolMetadynamicsDefinition typed_metadynamics;
+        bool has_typed_metadynamics = false;
+        if (!metadynamics_reader.Open(controller->Command(input_key)) ||
+            !metadynamics_reader.Read_Definition(typed_cvs, &typed_metadynamics,
+                                                 &has_typed_metadynamics))
+        {
+            throw std::runtime_error(metadynamics_reader.Last_Error());
+        }
+        SpongeH5MD::ProtocolSteeringH5Reader steering_reader;
+        SpongeH5MD::ProtocolSteeringDefinition typed_steering;
+        bool has_typed_steering = false;
+        if (!steering_reader.Open(controller->Command(input_key)) ||
+            !steering_reader.Read_Definition(typed_cvs, &typed_steering,
+                                             &has_typed_steering))
+        {
+            throw std::runtime_error(steering_reader.Last_Error());
+        }
+        if (!has_cv && !has_restraint && !has_restraint_cv &&
+            typed_cvs.empty() && typed_restraints.empty() &&
+            !has_typed_metadynamics && !has_typed_steering)
+        {
+            return false;
+        }
+        const bool has_legacy_cv = controller->Command_Exist("cv_in_file");
+        const bool has_legacy_restraint =
+            controller->Command_Exist("restrain_in_file") ||
+            controller->Command_Exist("restrain_cv_in_file");
+        if (has_legacy_cv || has_legacy_restraint)
+        {
+            return false;
+        }
+
+        std::vector<CVConfigSection> sections;
+        for (const auto& root : {cv_root, restraint_root, restraint_cv_root})
+        {
+            if (file.exist(root))
+            {
+                Merge_H5_CV_Config(root, Read_H5_CV_Config(&file, root),
+                                   &sections);
+            }
+        }
+        for (const auto& definition : typed_cvs)
+        {
+            CVConfigSection native{definition.name,
+                                   definition.runtime_parameters};
+            Merge_H5_CV_Config("/cv/<name>", {native}, &sections);
+            if (!definition.period.empty())
+            {
+                manager->protocol_cv_period[definition.name] =
+                    definition.period;
+            }
+            if (!definition.sigma.empty())
+            {
+                manager->protocol_cv_sigma[definition.name] = definition.sigma;
+            }
+            if (!definition.reference_coordinates.empty())
+            {
+                manager->protocol_cv_reference[definition.name] =
+                    definition.reference_coordinates;
+            }
+        }
+        if (!typed_restraints.empty())
+        {
+            CVConfigSection typed{"restrain", {}};
+            std::vector<std::string> cv_refs;
+            std::vector<float> weight, reference, period;
+            std::vector<std::int64_t> start_step, max_step, reduce_step,
+                stop_step;
+            for (const auto& restraint : typed_restraints)
+            {
+                cv_refs.insert(cv_refs.end(), restraint.cv_refs.begin(),
+                               restraint.cv_refs.end());
+                weight.insert(weight.end(), restraint.weight.begin(),
+                              restraint.weight.end());
+                reference.insert(reference.end(), restraint.reference.begin(),
+                                 restraint.reference.end());
+                period.insert(period.end(), restraint.period.begin(),
+                              restraint.period.end());
+                start_step.insert(start_step.end(),
+                                  restraint.start_step.begin(),
+                                  restraint.start_step.end());
+                max_step.insert(max_step.end(), restraint.max_step.begin(),
+                                restraint.max_step.end());
+                reduce_step.insert(reduce_step.end(),
+                                   restraint.reduce_step.begin(),
+                                   restraint.reduce_step.end());
+                stop_step.insert(stop_step.end(), restraint.stop_step.begin(),
+                                 restraint.stop_step.end());
+            }
+            auto join_strings = [](const auto& values)
+            {
+                std::ostringstream out;
+                out << std::setprecision(
+                    std::numeric_limits<float>::max_digits10);
+                for (std::size_t i = 0; i < values.size(); ++i)
+                {
+                    if (i != 0) out << ' ';
+                    out << values[i];
+                }
+                return out.str();
+            };
+            typed.items = {{"CV", join_strings(cv_refs)},
+                           {"weight", join_strings(weight)},
+                           {"reference", join_strings(reference)},
+                           {"period", join_strings(period)},
+                           {"start_step", join_strings(start_step)},
+                           {"max_step", join_strings(max_step)},
+                           {"reduce_step", join_strings(reduce_step)},
+                           {"stop_step", join_strings(stop_step)}};
+            Merge_H5_CV_Config("/restraint/<name>", {typed}, &sections);
+        }
+        if (has_typed_metadynamics)
+        {
+            CVConfigSection typed{"meta",
+                                  typed_metadynamics.runtime_parameters};
+            Merge_H5_CV_Config("/meta/<name>", {typed}, &sections);
+            manager->protocol_metadynamics_name = typed_metadynamics.name;
+        }
+        if (has_typed_steering)
+        {
+            CVConfigSection typed{"steer", typed_steering.runtime_parameters};
+            Merge_H5_CV_Config("/steer", {typed}, &sections);
+        }
+
+        for (const auto& section : sections)
+        {
+            for (const auto& item : section.items)
+            {
+                Set_CV_Config_Value(
+                    manager, section.name, item.first, item.second,
+                    std::string(controller->Command(input_key)));
+            }
+        }
+        return !sections.empty();
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string("Reason:\n\tfailed to load typed CV objects from ") +
+            controller->Command(input_key) + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Load_H5_CV_Config", message.c_str());
+    }
+    return false;
+}
+}  // namespace
+
 CV_MAP_TYPE* CV_MAP = new CV_MAP_TYPE;
 CV_INSTANCE_TYPE* CV_INSTANCE_MAP = new CV_INSTANCE_TYPE;
 
@@ -10,7 +393,10 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Initial(
     strcpy(module_name, "cv_controller");
     this->controller = controller;
     mdinfo = controller->mdinfo;
-    if (controller->Command_Exist("cv_in_file"))
+    const bool has_h5_cv = Load_H5_CV_Config(controller, this);
+    if (has_h5_cv || controller->Command_Exist("cv_in_file") ||
+        controller->Command_Exist("restrain_in_file") ||
+        controller->Command_Exist("restrain_cv_in_file"))
     {
         int CV_numbers = 0;
         Commands_From_In_File(controller);
@@ -93,13 +479,34 @@ static int read_one_line(FILE* In_File, char* line, char* ender)
     return 1;
 }
 
+static void Set_CV_Config_Command(COLLECTIVE_VARIABLE_CONTROLLER* manager,
+                                  const char* line, const char* prefix,
+                                  const std::string& source_path)
+{
+    const std::string section = string_strip(prefix == nullptr ? "" : prefix);
+    if (section == "comments") return;
+
+    const std::string command_line = line == nullptr ? "" : line;
+    const auto separator = command_line.find('=');
+    if (separator == std::string::npos) return;
+    const std::string flag = string_strip(command_line.substr(0, separator));
+    std::string value = command_line.substr(separator + 1);
+    const auto comment = value.find('#');
+    if (comment != std::string::npos) value.erase(comment);
+    value = string_strip(value);
+    if (flag.empty() || value.empty()) return;
+
+    Set_CV_Config_Value(manager, section, flag, value, source_path);
+}
+
 void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
     CONTROLLER* controller)
 {
-    FILE* In_File = NULL;
-    if (controller->Command_Exist("cv_in_file"))
+    for (const char* input_key :
+         {"cv_in_file", "restrain_in_file", "restrain_cv_in_file"})
     {
-        std::string cv_path = controller->Command("cv_in_file");
+        if (!controller->Command_Exist(input_key)) continue;
+        const std::string cv_path = controller->Command(input_key);
         std::string ext = to_lower_copy(fs::path(cv_path).extension().string());
         if (ext == ".toml")
         {
@@ -107,12 +514,10 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
             Load_Toml_Commands(
                 toml_content, cv_path, this,
                 "COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File");
-            return;
+            continue;
         }
+        FILE* In_File = NULL;
         Open_File_Safely(&In_File, cv_path.c_str(), "r", true);
-    }
-    if (In_File != NULL)
-    {
         char line[CHAR_LENGTH_MAX];
         char prefix[CHAR_LENGTH_MAX] = {0};
         char ender[CHAR_LENGTH_MAX];
@@ -147,7 +552,7 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
             }
             else
             {
-                Get_Command(line, prefix);
+                Set_CV_Config_Command(this, line, prefix, cv_path);
                 line[0] = 0;
             }
             if (strchr(ender, '}') != NULL)
@@ -155,6 +560,7 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Commands_From_In_File(
                 prefix[0] = 0;
             }
         }
+        fclose(In_File);
     }
 }
 

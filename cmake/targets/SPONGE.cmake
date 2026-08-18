@@ -109,8 +109,9 @@ set(SOURCES ${SPONGE_SOURCES})
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(HighFive CONFIG REQUIRED)
 find_package(HDF5 1.10.7 REQUIRED COMPONENTS C)
-if(HDF5_VERSION VERSION_GREATER_EQUAL "1.12.0" AND HDF5_VERSION VERSION_LESS
-                                                   "1.12.1")
+if(WIN32
+   AND HDF5_VERSION VERSION_GREATER_EQUAL "1.12.0"
+   AND HDF5_VERSION VERSION_LESS "1.12.1")
   message(
     FATAL_ERROR
       "HDF5 1.12.0 does not provide H5Pset_file_locking; use HDF5 1.10.7-1.10.x or 1.12.1+"

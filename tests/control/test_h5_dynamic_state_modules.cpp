@@ -196,8 +196,8 @@ static void Test_Portable_Philox_Is_Addressable_And_Round_Trips()
         Require(std::isfinite(first[index]));
         Require(first[index] == repeated[index]);
     }
-    Require(first[0] != next[0] || first[1] != next[1] ||
-            first[2] != next[2] || first[3] != next[3]);
+    Require(first[0] != next[0] || first[1] != next[1] || first[2] != next[2] ||
+            first[3] != next[3]);
 
     const auto encoded = SpongeRestartRng::Counter_Philox_State(
         0x123456789abcdef0ULL, 0x123456789ULL);
@@ -221,8 +221,8 @@ static void Test_Portable_Splitmix_State_Round_Trips()
         SpongeRestartRng::Splitmix64_State(0x123456789abcdef0ULL);
     std::uint64_t decoded = 0;
     std::string error;
-    Require(SpongeRestartRng::Decode_Splitmix64_State(encoded, &decoded,
-                                                       &error));
+    Require(
+        SpongeRestartRng::Decode_Splitmix64_State(encoded, &decoded, &error));
     Require(decoded == 0x123456789abcdef0ULL);
 }
 

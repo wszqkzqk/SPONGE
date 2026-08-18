@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdio>
 #include <map>
@@ -31,8 +31,8 @@ class OutputFlushCoordinator
         Dirty_Files().clear();
         if (!ok && error_message != nullptr)
         {
-            *error_message = "failed to flush legacy output streams: " +
-                             errors.str();
+            *error_message =
+                "failed to flush legacy output streams: " + errors.str();
         }
         return ok;
     }

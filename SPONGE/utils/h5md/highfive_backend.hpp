@@ -213,13 +213,12 @@ class HighFiveBackend : public WriterBackend
                             spec.path);
             }
             const DatasetSpec normalized = Normalize_Spec(spec);
-            // HighFive's DataSpace and Chunking APIs take size_t dimensions.
-            // Passing hsize_t vectors selects the iterator-pair constructor on
-            // platforms where hsize_t and size_t are distinct types (macOS).
+            // DataSpace takes size_t dimensions.  Chunking takes hsize_t
+            // dimensions, so keep the two representations separate on macOS.
             const std::vector<std::size_t>& dims = normalized.shape.dims;
             const std::vector<std::size_t> max_dims = To_Size_Max(normalized);
-            const std::vector<std::size_t>& chunk_dims =
-                normalized.shape.chunk_dims;
+            const std::vector<hsize_t> chunk_dims =
+                To_HSize(normalized.shape.chunk_dims);
             HighFive::DataSpace space(dims, max_dims);
             HighFive::DataSetCreateProps props;
             props.add(HighFive::Chunking(chunk_dims));

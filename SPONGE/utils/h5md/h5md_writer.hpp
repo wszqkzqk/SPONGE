@@ -325,8 +325,7 @@ class H5MDWriter
     bool Write_Output_Stream_Descriptor(
         const std::string& stream_name, const std::string& logical_kind,
         const std::string& step_path, const std::string& time_path,
-        const std::vector<std::string>& value_paths,
-        bool experimental = false)
+        const std::vector<std::string>& value_paths, bool experimental = false)
     {
         const std::string root = Output_Stream_Root(stream_name);
         return Define_Output_Stream(stream_name) &&
@@ -530,8 +529,7 @@ static constexpr const char* output_restart_generation =
     "/parameters/sponge/output/restart_generation";
 static constexpr const char* output_streams =
     "/parameters/sponge/output/streams";
-static constexpr const char* output_mode =
-    "/parameters/sponge/output/mode";
+static constexpr const char* output_mode = "/parameters/sponge/output/mode";
 static constexpr const char* output_trajectory_chunk_size =
     "/parameters/sponge/output/trajectory_chunk_size";
 static constexpr const char* output_vds_status =

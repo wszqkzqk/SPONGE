@@ -204,8 +204,8 @@ void MIDDLE_Langevin_INFORMATION::Initial(CONTROLLER* controller,
                        target_temperature);
     controller->printf("    friction coefficient is %.2f ps^-1\n", gamma_ln);
     controller->printf("    random seed is %d\n", random_seed);
-    this->random_seed = static_cast<std::uint64_t>(
-        static_cast<std::uint32_t>(random_seed));
+    this->random_seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(random_seed));
     random_invocation_count = 0;
 
     dt = 0.001;
@@ -312,10 +312,10 @@ void MIDDLE_Langevin_INFORMATION::MD_Iteration_Leap_Frog(VECTOR* frc,
             Launch_Device_Kernel(MD_Iteration_Leap_Frog_With_LiuJian,
                                  (local_atom_numbers + 32 - 1) / 32, 32, 0,
                                  NULL, random_seed, random_invocation_count,
-                                 (float*)random_force,
-                                 local_atom_numbers, half_dt, dt, exp_gamma,
-                                 d_mass_inverse_local, d_sqrt_mass_local, vel,
-                                 crd, frc, acc, random_force);
+                                 (float*)random_force, local_atom_numbers,
+                                 half_dt, dt, exp_gamma, d_mass_inverse_local,
+                                 d_sqrt_mass_local, vel, crd, frc, acc,
+                                 random_force);
         }
         else
         {
@@ -323,9 +323,9 @@ void MIDDLE_Langevin_INFORMATION::MD_Iteration_Leap_Frog(VECTOR* frc,
                 MD_Iteration_Leap_Frog_With_LiuJian_With_Max_Velocity,
                 (local_atom_numbers + 32 - 1) / 32, 32, 0, NULL, random_seed,
                 random_invocation_count, (float*)random_force,
-                local_atom_numbers, half_dt, dt,
-                exp_gamma, d_mass_inverse_local, d_sqrt_mass_local, vel, crd,
-                frc, acc, random_force, max_velocity);
+                local_atom_numbers, half_dt, dt, exp_gamma,
+                d_mass_inverse_local, d_sqrt_mass_local, vel, crd, frc, acc,
+                random_force, max_velocity);
         }
         random_invocation_count += 1;
     }

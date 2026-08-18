@@ -66,9 +66,8 @@ void Require_Float_Container_Close(const Container& lhs, const Container& rhs,
     REQUIRE_EQ(lhs.size(), rhs.size());
     for (std::size_t index = 0; index < lhs.size(); ++index)
     {
-        const float scale =
-            std::max(1.0f, std::max(std::fabs(lhs[index]),
-                                    std::fabs(rhs[index])));
+        const float scale = std::max(
+            1.0f, std::max(std::fabs(lhs[index]), std::fabs(rhs[index])));
         if (std::fabs(lhs[index] - rhs[index]) > tolerance * scale)
         {
             std::ostringstream message;
@@ -218,8 +217,8 @@ void Isolate_NHC_Dynamic_Runtime_Inputs(const std::filesystem::path& root)
     }
 
     const auto protocol = root / "protocol.spgp.h5";
-    for (const char* object_path : {"/constraint", "/cv", "/meta",
-                                    "/restraint", "/sits", "/steer", "/wall"})
+    for (const char* object_path : {"/constraint", "/cv", "/meta", "/restraint",
+                                    "/sits", "/steer", "/wall"})
     {
         Delete_H5_Object_If_Exists(protocol, object_path);
     }
@@ -234,17 +233,17 @@ void Isolate_Sits_Protocol_Runtime_Inputs(const std::filesystem::path& root)
     }
 
     const auto protocol = root / "protocol.spgp.h5";
-    for (const char* object_path : {"/constraint", "/cv", "/meta",
-                                    "/restraint", "/steer", "/wall"})
+    for (const char* object_path :
+         {"/constraint", "/cv", "/meta", "/restraint", "/steer", "/wall"})
     {
         Delete_H5_Object_If_Exists(protocol, object_path);
     }
 }
 
-void Install_Full_Sits_Restart_State(
-    const std::filesystem::path& restart_path,
-    const std::vector<float>& nk, const std::vector<float>& log_norm,
-    const std::vector<float>& log_nk)
+void Install_Full_Sits_Restart_State(const std::filesystem::path& restart_path,
+                                     const std::vector<float>& nk,
+                                     const std::vector<float>& log_norm,
+                                     const std::vector<float>& log_nk)
 {
     REQUIRE_EQ(nk.size(), log_norm.size());
     REQUIRE_EQ(nk.size(), log_nk.size());
@@ -262,8 +261,7 @@ void Install_Full_Sits_Restart_State(
         else
         {
             restart
-                .createDataSet<float>(path,
-                                      HighFive::DataSpace::From(values))
+                .createDataSet<float>(path, HighFive::DataSpace::From(values))
                 .write(values);
         }
     };
@@ -297,8 +295,7 @@ void Install_Portable_Rng_Dynamic_State(
     restart.createGroup(root);
     const std::vector<std::int64_t> schema = {rng_state.state_schema_version};
     auto schema_dataset = restart.createDataSet<std::int64_t>(
-        SpongeH5MD::Restart_Rng_State_Component_Path(module,
-                                                      "schema_version"),
+        SpongeH5MD::Restart_Rng_State_Component_Path(module, "schema_version"),
         HighFive::DataSpace::From(schema));
     schema_dataset.write(schema);
     auto engine_dataset = restart.createDataSet<std::string>(
@@ -314,17 +311,16 @@ void Install_Portable_Rng_Dynamic_State(
         std::vector<std::int64_t>(rng_state.words_per_stream));
     for (std::size_t stream = 0; stream < rng_state.stream_count; ++stream)
     {
-        std::copy_n(rng_state.state_words.begin() +
-                        stream * rng_state.words_per_stream,
-                    rng_state.words_per_stream, words[stream].begin());
+        std::copy_n(
+            rng_state.state_words.begin() + stream * rng_state.words_per_stream,
+            rng_state.words_per_stream, words[stream].begin());
     }
     words_dataset.write(words);
     if (!restart.exist(SpongeH5MD::path::restart_integrator_state))
     {
         restart.createGroup(SpongeH5MD::path::restart_integrator_state);
     }
-    for (const auto& item :
-         std::vector<std::pair<std::string, std::string>>{
+    for (const auto& item : std::vector<std::pair<std::string, std::string>>{
              {"mode", integrator_mode},
              {"step", std::to_string(structural_state.step)},
              {"time", std::to_string(structural_state.time)}})
@@ -378,9 +374,8 @@ void Install_Portable_Rng_Module_Float_State(
 {
     HighFive::File restart(restart_path.string(), HighFive::File::ReadWrite);
     const std::string root =
-        thermostat_state
-            ? SpongeH5MD::Restart_Thermostat_State_Root(module)
-            : SpongeH5MD::Restart_Barostat_State_Root(module);
+        thermostat_state ? SpongeH5MD::Restart_Thermostat_State_Root(module)
+                         : SpongeH5MD::Restart_Barostat_State_Root(module);
     restart.createGroup(root);
     restart
         .createDataSet<float>(root + "/" + state_name,
@@ -773,9 +768,9 @@ PreparedCase Prepare_Portable_Rng_Runtime_Case(
     const std::filesystem::path& source_dir, const std::string& module,
     const SpongeH5MD::RestartRngState& rng_state, const int step_limit = 1)
 {
-    auto prepared = Prepare_Restart_Load_Case(
-        temp_root, name, source_dir, "dynamic", true, false, false, false,
-        false);
+    auto prepared =
+        Prepare_Restart_Load_Case(temp_root, name, source_dir, "dynamic", true,
+                                  false, false, false, false);
     std::string mdin = Read_Text(prepared.mdin);
     Replace_All(&mdin, "dt = 0", "dt = 0.001");
     Replace_All(&mdin, "step_limit = 1",
@@ -833,8 +828,7 @@ PreparedCase Prepare_Portable_Rng_Runtime_Case(
     const auto restart_path = prepared.root / "restart.spgr.h5";
     Install_Portable_Rng_Dynamic_State(
         restart_path, module, rng_state,
-        module == "monte_carlo_barostat" ||
-                module == "pressure_based_barostat"
+        module == "monte_carlo_barostat" || module == "pressure_based_barostat"
             ? "npt"
             : "nvt");
     if (module == "monte_carlo_barostat")
@@ -843,8 +837,8 @@ PreparedCase Prepare_Portable_Rng_Runtime_Case(
     }
     else if (module == "bussi_thermostat")
     {
-        Install_Portable_Rng_Module_Float_State(
-            restart_path, module, "lambda", {1.0f}, true);
+        Install_Portable_Rng_Module_Float_State(restart_path, module, "lambda",
+                                                {1.0f}, true);
     }
     else if (module == "pressure_based_barostat")
     {
@@ -870,8 +864,7 @@ PreparedCase Prepare_Continuation_From_Checkpoint(
     continuation.mdin = continuation.root / "mdin.restart_load.spg.toml";
     continuation.mdout = continuation.root / "out" / "mdout.txt";
     continuation.mdinfo = continuation.root / "out" / "mdinfo.txt";
-    continuation.h5_restart =
-        continuation.root / "out" / "restart.spgr.h5";
+    continuation.h5_restart = continuation.root / "out" / "restart.spgr.h5";
     return continuation;
 }
 
@@ -895,7 +888,8 @@ void Require_Portable_Rng_Continuation_Equivalent(
     REQUIRE_TRUE(resumed_reader.Open(resumed_restart.string()));
     SpongeH5MD::RestartStructuralState continuous_structural;
     SpongeH5MD::RestartStructuralState resumed_structural;
-    REQUIRE_TRUE(continuous_reader.Read_Structural_State(&continuous_structural));
+    REQUIRE_TRUE(
+        continuous_reader.Read_Structural_State(&continuous_structural));
     REQUIRE_TRUE(resumed_reader.Read_Structural_State(&resumed_structural));
     REQUIRE_EQ(continuous_structural.step, resumed_structural.step);
     REQUIRE_TRUE(std::fabs(continuous_structural.time -
@@ -917,8 +911,7 @@ void Require_Portable_Rng_Continuation_Equivalent(
     REQUIRE_EQ(continuous_rng.state_schema_version,
                resumed_rng.state_schema_version);
     REQUIRE_EQ(continuous_rng.stream_count, resumed_rng.stream_count);
-    REQUIRE_EQ(continuous_rng.words_per_stream,
-               resumed_rng.words_per_stream);
+    REQUIRE_EQ(continuous_rng.words_per_stream, resumed_rng.words_per_stream);
     REQUIRE_EQ(continuous_rng.state_words, resumed_rng.state_words);
     if (module == "monte_carlo_barostat")
     {
@@ -946,8 +939,7 @@ void Require_Portable_Rng_Continuation_Equivalent(
     {
         Require_Float_Container_Close(
             continuous_dynamic.barostat_float_states.at(module).at("g"),
-            resumed_dynamic.barostat_float_states.at(module).at("g"),
-            5.0e-4f);
+            resumed_dynamic.barostat_float_states.at(module).at("g"), 5.0e-4f);
     }
 }
 
@@ -1132,8 +1124,8 @@ void Run_Restart_Load_Runtime_Closure(
         Run_SPONGE(sponge_executable, protocol_sits_native);
     Require_Contains(Read_Text(protocol_sits_native_log),
                      "Read Nk from native H5 restart");
-    REQUIRE_TRUE(!std::filesystem::exists(
-        protocol_sits_native.root / ".sponge_h5_restart_protocol"));
+    REQUIRE_TRUE(!std::filesystem::exists(protocol_sits_native.root /
+                                          ".sponge_h5_restart_protocol"));
     REQUIRE_EQ(Read_H5_Float_Dataset(
                    protocol_sits_native.h5_restart,
                    SpongeH5MD::Restart_Sits_State_Path("SITS", "nk")),
@@ -1168,8 +1160,7 @@ void Run_Restart_Load_Runtime_Closure(
 
     const auto middle_langevin = Prepare_Portable_Rng_Runtime_Case(
         temp_root, "restart_load_dynamic_middle_langevin", pure_source,
-        "middle_langevin",
-        SpongeRestartRng::Counter_Philox_State(1234, 7));
+        "middle_langevin", SpongeRestartRng::Counter_Philox_State(1234, 7));
     const auto middle_langevin_log =
         Run_SPONGE(sponge_executable, middle_langevin);
     Require_Contains(Read_Text(middle_langevin_log),
@@ -1193,9 +1184,9 @@ void Run_Restart_Load_Runtime_Closure(
         temp_root, "restart_load_dynamic_middle_langevin_resumed",
         middle_langevin);
     Run_SPONGE(sponge_executable, middle_resumed);
-    Require_Portable_Rng_Continuation_Equivalent(
-        middle_continuous.h5_restart, middle_resumed.h5_restart,
-        "middle_langevin");
+    Require_Portable_Rng_Continuation_Equivalent(middle_continuous.h5_restart,
+                                                 middle_resumed.h5_restart,
+                                                 "middle_langevin");
 
     const auto andersen = Prepare_Portable_Rng_Runtime_Case(
         temp_root, "restart_load_dynamic_andersen", pure_source, "andersen",
@@ -1217,14 +1208,13 @@ void Run_Restart_Load_Runtime_Closure(
     const auto andersen_resumed = Prepare_Continuation_From_Checkpoint(
         temp_root, "restart_load_dynamic_andersen_resumed", andersen);
     Run_SPONGE(sponge_executable, andersen_resumed);
-    Require_Portable_Rng_Continuation_Equivalent(
-        andersen_continuous.h5_restart, andersen_resumed.h5_restart,
-        "andersen");
+    Require_Portable_Rng_Continuation_Equivalent(andersen_continuous.h5_restart,
+                                                 andersen_resumed.h5_restart,
+                                                 "andersen");
 
     const auto bussi = Prepare_Portable_Rng_Runtime_Case(
         temp_root, "restart_load_dynamic_bussi_thermostat", pure_source,
-        "bussi_thermostat",
-        SpongeRestartRng::Counter_Philox_State(2468, 13));
+        "bussi_thermostat", SpongeRestartRng::Counter_Philox_State(2468, 13));
     const auto bussi_log = Run_SPONGE(sponge_executable, bussi);
     Require_Contains(Read_Text(bussi_log),
                      "START INITIALIZING BUSSI THERMOSTAT");
@@ -1242,9 +1232,9 @@ void Run_Restart_Load_Runtime_Closure(
     const auto bussi_resumed = Prepare_Continuation_From_Checkpoint(
         temp_root, "restart_load_dynamic_bussi_thermostat_resumed", bussi);
     Run_SPONGE(sponge_executable, bussi_resumed);
-    Require_Portable_Rng_Continuation_Equivalent(
-        bussi_continuous.h5_restart, bussi_resumed.h5_restart,
-        "bussi_thermostat");
+    Require_Portable_Rng_Continuation_Equivalent(bussi_continuous.h5_restart,
+                                                 bussi_resumed.h5_restart,
+                                                 "bussi_thermostat");
 
     const auto pressure_barostat = Prepare_Portable_Rng_Runtime_Case(
         temp_root, "restart_load_dynamic_pressure_based_barostat", pure_source,
@@ -1290,18 +1280,15 @@ void Run_Restart_Load_Runtime_Closure(
         &mc_output_state, &rng_error));
     REQUIRE_TRUE(mc_output_state != mc_initial_state);
     REQUIRE_EQ(
-        monte_carlo_output
-            .barostat_integer_states.at("monte_carlo_barostat")
+        monte_carlo_output.barostat_integer_states.at("monte_carlo_barostat")
             .at("total_count_int64")[0],
         static_cast<std::int64_t>(11));
     REQUIRE_EQ(
-        monte_carlo_output
-            .barostat_integer_states.at("monte_carlo_barostat")
+        monte_carlo_output.barostat_integer_states.at("monte_carlo_barostat")
             .at("total_count_int64")[1],
         static_cast<std::int64_t>(20));
     REQUIRE_EQ(
-        monte_carlo_output
-            .barostat_integer_states.at("monte_carlo_barostat")
+        monte_carlo_output.barostat_integer_states.at("monte_carlo_barostat")
             .at("total_count_int64")[2],
         static_cast<std::int64_t>(30));
     const auto monte_carlo_continuous = Prepare_Portable_Rng_Runtime_Case(

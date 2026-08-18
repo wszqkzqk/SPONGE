@@ -523,16 +523,16 @@ static void Add_Supported_Dynamic_State(const std::filesystem::path& path,
                          std::string("serialized_rng_state"));
             if (module_name == "bussi_thermostat")
             {
-                Write_Float_Vector(
-                    file, SpongeH5MD::Restart_Thermostat_State_Path(
-                              module_name, "lambda"),
-                    {0.87f});
+                Write_Float_Vector(file,
+                                   SpongeH5MD::Restart_Thermostat_State_Path(
+                                       module_name, "lambda"),
+                                   {0.87f});
             }
             else if (module_name == "pressure_based_barostat")
             {
                 Write_Float_Vector(
-                    file, SpongeH5MD::Restart_Barostat_State_Path(module_name,
-                                                                  "g"),
+                    file,
+                    SpongeH5MD::Restart_Barostat_State_Path(module_name, "g"),
                     {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
             }
             else
@@ -571,9 +571,8 @@ static void Write_Trajectory_File(const std::filesystem::path& path,
 
     HighFiveBackend backend;
     TrajectoryH5Writer writer(&backend);
-    REQUIRE_TRUE(
-        writer.Open_Single_File(Make_Trajectory_Output_Plan(path),
-                                SpongeH5MD::kOutputSchemaVersion));
+    REQUIRE_TRUE(writer.Open_Single_File(Make_Trajectory_Output_Plan(path),
+                                         SpongeH5MD::kOutputSchemaVersion));
     REQUIRE_TRUE(writer.Define_Particle_Datasets(atom_count, false, false));
     REQUIRE_TRUE(
         writer.Append_Particle_Frame(10, 0.02, position.data(), box.data()));
@@ -987,11 +986,10 @@ static void Test_Recognizes_Portable_Stochastic_Dynamic_State()
         !SpongeH5InputValidation::Has_Unsupported_Dynamic_State(pressure));
 
     bussi.rng_state_text["bussi_thermostat"] = "legacy";
+    REQUIRE_TRUE(SpongeH5InputValidation::Has_Unsupported_Dynamic_State(bussi));
     REQUIRE_TRUE(
-        SpongeH5InputValidation::Has_Unsupported_Dynamic_State(bussi));
-    REQUIRE_TRUE(
-        SpongeH5InputValidation::Unsupported_Dynamic_State_Reason(bussi)
-            .find("both typed and legacy") != std::string::npos);
+        SpongeH5InputValidation::Unsupported_Dynamic_State_Reason(bussi).find(
+            "both typed and legacy") != std::string::npos);
 
     RestartDynamicState monte_carlo;
     monte_carlo.rng_states["monte_carlo_barostat"] =
@@ -999,21 +997,18 @@ static void Test_Recognizes_Portable_Stochastic_Dynamic_State()
     REQUIRE_TRUE(
         !SpongeH5InputValidation::Has_Supported_Dynamic_State(monte_carlo));
     monte_carlo.barostat_float_states["monte_carlo_barostat"]
-                                          ["delta_box_length_max"] =
-        {0.1f, 0.2f, 0.3f};
-    monte_carlo.barostat_float_states["monte_carlo_barostat"]
-                                          ["accept_rate"] =
-        {31.0f, 32.0f, 33.0f};
+                                     ["delta_box_length_max"] = {0.1f, 0.2f,
+                                                                 0.3f};
+    monte_carlo.barostat_float_states["monte_carlo_barostat"]["accept_rate"] = {
+        31.0f, 32.0f, 33.0f};
     monte_carlo.barostat_integer_states["monte_carlo_barostat"]
-                                            ["total_count_int64"] =
-        {10, 20, 30};
+                                       ["total_count_int64"] = {10, 20, 30};
     monte_carlo.barostat_integer_states["monte_carlo_barostat"]
-                                            ["accept_count_int64"] =
-        {3, 6, 9};
+                                       ["accept_count_int64"] = {3, 6, 9};
     REQUIRE_TRUE(
         SpongeH5InputValidation::Has_Supported_Dynamic_State(monte_carlo));
-    REQUIRE_TRUE(!SpongeH5InputValidation::Has_Unsupported_Dynamic_State(
-        monte_carlo));
+    REQUIRE_TRUE(
+        !SpongeH5InputValidation::Has_Unsupported_Dynamic_State(monte_carlo));
 
     RestartDynamicState malformed;
     malformed.rng_states["middle_langevin"] =
@@ -1266,9 +1261,8 @@ static void Test_EDIP_Reader_Loads_Dense_Runtime_Definition()
 
 static void Test_ReaxFF_Reader_Loads_Typed_Runtime_Definition()
 {
-    const auto topology =
-        SpongeH5InputMatrix::Full_Contract_Rerun_Path() / "bundled_input" /
-        "bundle" / "topology.spgt.h5";
+    const auto topology = SpongeH5InputMatrix::Full_Contract_Rerun_Path() /
+                          "bundled_input" / "bundle" / "topology.spgt.h5";
     TopologyManybodyH5Materializer reader;
     REQUIRE_TRUE(reader.Open(topology.string()));
     NativeReaxFFDefinition definition;
@@ -1324,8 +1318,8 @@ static void Test_Protocol_Reader_Loads_Native_Hard_Wall()
     NativeHardWallH5Reader invalid_reader;
     REQUIRE_TRUE(invalid_reader.Open(invalid_protocol.string()));
     REQUIRE_TRUE(!invalid_reader.Read(&definition));
-    REQUIRE_TRUE(invalid_reader.Last_Error().find("low bound must be smaller") !=
-                 std::string::npos);
+    REQUIRE_TRUE(invalid_reader.Last_Error().find(
+                     "low bound must be smaller") != std::string::npos);
 
     std::filesystem::remove_all(dir);
 }

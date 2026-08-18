@@ -79,7 +79,8 @@ class TrajectoryH5Reader
             const auto dims = Dimensions(path::output_frame_count);
             if (dims.size() != 1 || dims[0] == 0)
             {
-                return Fail("committed frame-count dataset is empty or invalid");
+                return Fail(
+                    "committed frame-count dataset is empty or invalid");
             }
             *frame_count = Read_Required_Single<std::int64_t>(
                 path::output_frame_count, {dims[0] - 1},
@@ -141,8 +142,7 @@ class TrajectoryH5Reader
             {
                 std::int64_t committed = 0;
                 if (!Read_Committed_Frame_Count(&committed)) return false;
-                result.frame_count =
-                    std::min(result.frame_count, committed);
+                result.frame_count = std::min(result.frame_count, committed);
             }
             *metadata = result;
             return true;
@@ -255,10 +255,9 @@ class TrajectoryH5Reader
         swmr_read_ = swmr_read;
         try
         {
-            const auto mode = swmr_read
-                                  ? HighFive::File::ReadOnly |
-                                        HighFive::File::ReadSWMR
-                                  : HighFive::File::ReadOnly;
+            const auto mode =
+                swmr_read ? HighFive::File::ReadOnly | HighFive::File::ReadSWMR
+                          : HighFive::File::ReadOnly;
             file_.reset(new HighFive::File(file_path, mode));
             return true;
         }

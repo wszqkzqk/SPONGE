@@ -148,9 +148,9 @@ class TopologyManybodyH5Materializer
                 Read_Vector<float>(root + "/atom/value", "ReaxFF atom values");
             const auto atom_offsets = Read_Vector<std::int64_t>(
                 root + "/atom/value_offset", "ReaxFF atom value offsets");
-            const auto atom_line_offsets = Read_Vector<std::int64_t>(
-                root + "/atom/line_value_offset",
-                "ReaxFF atom line value offsets");
+            const auto atom_line_offsets =
+                Read_Vector<std::int64_t>(root + "/atom/line_value_offset",
+                                          "ReaxFF atom line value offsets");
             if (atom_count <= 0 ||
                 atom_names.size() != static_cast<std::size_t>(atom_count) ||
                 atom_offsets.size() != atom_names.size() + 1 ||
@@ -170,10 +170,12 @@ class TopologyManybodyH5Materializer
                 if (atom_names[atom].empty() ||
                     type_map.count(atom_names[atom]) != 0)
                 {
-                    return Fail("ReaxFF atom type names must be non-empty and "
-                                "unique");
+                    return Fail(
+                        "ReaxFF atom type names must be non-empty and "
+                        "unique");
                 }
-                if (atom_offsets[atom] != static_cast<std::int64_t>(atom * 32) ||
+                if (atom_offsets[atom] !=
+                        static_cast<std::int64_t>(atom * 32) ||
                     atom_offsets[atom + 1] !=
                         static_cast<std::int64_t>((atom + 1) * 32))
                 {
@@ -207,13 +209,15 @@ class TopologyManybodyH5Materializer
                 Read_Vector<float>(root + "/bond/value", "ReaxFF bond values");
             const auto bond_offsets = Read_Vector<std::int64_t>(
                 root + "/bond/value_offset", "ReaxFF bond value offsets");
-            const auto bond_line_offsets = Read_Vector<std::int64_t>(
-                root + "/bond/line_value_offset",
-                "ReaxFF bond line value offsets");
+            const auto bond_line_offsets =
+                Read_Vector<std::int64_t>(root + "/bond/line_value_offset",
+                                          "ReaxFF bond line value offsets");
             if (bond_count < 0 ||
                 bond_types.size() != static_cast<std::size_t>(bond_count) * 2 ||
-                bond_values.size() != static_cast<std::size_t>(bond_count) * 16 ||
-                bond_offsets.size() != static_cast<std::size_t>(bond_count) + 1 ||
+                bond_values.size() !=
+                    static_cast<std::size_t>(bond_count) * 16 ||
+                bond_offsets.size() !=
+                    static_cast<std::size_t>(bond_count) + 1 ||
                 bond_line_offsets.size() !=
                     static_cast<std::size_t>(bond_count) * 2 + 1)
             {
@@ -222,7 +226,8 @@ class TopologyManybodyH5Materializer
             result.bonds.resize(static_cast<std::size_t>(bond_count));
             for (std::size_t bond = 0; bond < result.bonds.size(); ++bond)
             {
-                if (bond_offsets[bond] != static_cast<std::int64_t>(bond * 16) ||
+                if (bond_offsets[bond] !=
+                        static_cast<std::int64_t>(bond * 16) ||
                     bond_offsets[bond + 1] !=
                         static_cast<std::int64_t>((bond + 1) * 16) ||
                     bond_line_offsets[2 * bond] !=
@@ -263,8 +268,8 @@ class TopologyManybodyH5Materializer
 
             const auto assigned_names = Read_Vector<std::string>(
                 "/manybody/reaxff/type/name", "ReaxFF assigned atom types");
-            const auto assigned_count = Read_Scalar<std::int64_t>(
-                "/manybody/reaxff/type/count");
+            const auto assigned_count =
+                Read_Scalar<std::int64_t>("/manybody/reaxff/type/count");
             if (assigned_count !=
                 static_cast<std::int64_t>(assigned_names.size()))
             {
@@ -531,10 +536,9 @@ class TopologyManybodyH5Materializer
                                             "ReaxFF section type");
         const auto values = Read_Matrix<float>(root + "/value", ValueColumns,
                                                "ReaxFF section values");
-        if (count < 0 || types.size() != static_cast<std::size_t>(count) *
-                                              TypeColumns ||
-            values.size() !=
-                static_cast<std::size_t>(count) * ValueColumns)
+        if (count < 0 ||
+            types.size() != static_cast<std::size_t>(count) * TypeColumns ||
+            values.size() != static_cast<std::size_t>(count) * ValueColumns)
         {
             return Fail("ReaxFF counted section shape is invalid at " + root);
         }
@@ -547,8 +551,8 @@ class TopologyManybodyH5Materializer
                 const int minimum = require_positive_types ? 1 : 0;
                 if (type < minimum || type > atom_type_count)
                 {
-                    return Fail("ReaxFF section type index is out of range at " +
-                                root);
+                    return Fail(
+                        "ReaxFF section type index is out of range at " + root);
                 }
                 (*rows)[row].type[col] = type == 0 ? -1 : type - 1;
             }

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 
@@ -22,9 +22,9 @@ struct SPONGE_PHILOX4X32_10
     std::uint64_t stream = 0;
     std::uint64_t scalar_offset = 0;
 
-    __host__ __device__ SPONGE_PHILOX4X32_10(
-        std::uint64_t seed_value, std::uint64_t stream_index,
-        std::uint64_t offset)
+    __host__ __device__ SPONGE_PHILOX4X32_10(std::uint64_t seed_value,
+                                             std::uint64_t stream_index,
+                                             std::uint64_t offset)
         : seed(seed_value), stream(stream_index), scalar_offset(offset)
     {
     }
@@ -41,13 +41,14 @@ struct SPONGE_PHILOX4X32_10
                 static_cast<std::uint64_t>(substate) + index;
             if (absolute < 4)
             {
-                words[index] = Word(values, static_cast<std::uint32_t>(absolute));
+                words[index] =
+                    Word(values, static_cast<std::uint32_t>(absolute));
             }
             else
             {
                 const uint4 next = Generate_Block((scalar_offset >> 2) + 1);
-                words[index] = Word(next,
-                                    static_cast<std::uint32_t>(absolute - 4));
+                words[index] =
+                    Word(next, static_cast<std::uint32_t>(absolute - 4));
             }
         }
 
@@ -69,13 +70,12 @@ struct SPONGE_PHILOX4X32_10
     __host__ __device__ std::uint32_t UInt32() const
     {
         const uint4 values = Generate_Block(scalar_offset >> 2);
-        return Word(values,
-                    static_cast<std::uint32_t>(scalar_offset & 3U));
+        return Word(values, static_cast<std::uint32_t>(scalar_offset & 3U));
     }
 
    private:
     __host__ __device__ static std::uint32_t Word(const uint4& value,
-                                                   std::uint32_t index)
+                                                  std::uint32_t index)
     {
         if (index == 0) return value.x;
         if (index == 1) return value.y;
@@ -84,7 +84,7 @@ struct SPONGE_PHILOX4X32_10
     }
 
     __host__ __device__ static uint2 Multiply_High_Low(std::uint32_t a,
-                                                        std::uint32_t b)
+                                                       std::uint32_t b)
     {
         const std::uint64_t product =
             static_cast<std::uint64_t>(a) * static_cast<std::uint64_t>(b);
@@ -93,7 +93,7 @@ struct SPONGE_PHILOX4X32_10
     }
 
     __host__ __device__ static uint4 Round(const uint4& counter,
-                                            const uint2& key)
+                                           const uint2& key)
     {
         const uint2 left = Multiply_High_Low(0xD2511F53U, counter.x);
         const uint2 right = Multiply_High_Low(0xCD9E8D57U, counter.z);

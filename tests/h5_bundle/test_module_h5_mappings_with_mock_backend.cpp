@@ -1,5 +1,4 @@
-#include "h5_bundle_test_common.hpp"
-
+﻿#include "h5_bundle_test_common.hpp"
 #include "utils/h5md/module_h5_mappings.hpp"
 
 using namespace SpongeH5Test;
@@ -37,36 +36,42 @@ static void Test_Module_Path_Constants()
 {
     REQUIRE_EQ(std::string(module_path::nhc_root),
                std::string("/observables/all/thermostat/nose_hoover_chain"));
-    REQUIRE_EQ(std::string(module_path::nhc_step),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/step"));
-    REQUIRE_EQ(std::string(module_path::nhc_time),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/time"));
-    REQUIRE_EQ(std::string(module_path::nhc_coordinate_value),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/coordinate/value"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_step),
+        std::string("/observables/all/thermostat/nose_hoover_chain/step"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_time),
+        std::string("/observables/all/thermostat/nose_hoover_chain/time"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_coordinate_value),
+        std::string(
+            "/observables/all/thermostat/nose_hoover_chain/coordinate/value"));
     REQUIRE_EQ(Nose_Hoover_Chain_Coordinate_Root(),
                std::string(
                    "/observables/all/thermostat/nose_hoover_chain/coordinate"));
-    REQUIRE_EQ(std::string(module_path::nhc_coordinate_step),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/coordinate/step"));
-    REQUIRE_EQ(std::string(module_path::nhc_coordinate_time),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/coordinate/time"));
-    REQUIRE_EQ(std::string(module_path::nhc_velocity_value),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/velocity/value"));
-    REQUIRE_EQ(Nose_Hoover_Chain_Velocity_Root(),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/velocity"));
-    REQUIRE_EQ(std::string(module_path::nhc_velocity_step),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/velocity/step"));
-    REQUIRE_EQ(std::string(module_path::nhc_velocity_time),
-               std::string(
-                   "/observables/all/thermostat/nose_hoover_chain/velocity/time"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_coordinate_step),
+        std::string(
+            "/observables/all/thermostat/nose_hoover_chain/coordinate/step"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_coordinate_time),
+        std::string(
+            "/observables/all/thermostat/nose_hoover_chain/coordinate/time"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_velocity_value),
+        std::string(
+            "/observables/all/thermostat/nose_hoover_chain/velocity/value"));
+    REQUIRE_EQ(
+        Nose_Hoover_Chain_Velocity_Root(),
+        std::string("/observables/all/thermostat/nose_hoover_chain/velocity"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_velocity_step),
+        std::string(
+            "/observables/all/thermostat/nose_hoover_chain/velocity/step"));
+    REQUIRE_EQ(
+        std::string(module_path::nhc_velocity_time),
+        std::string(
+            "/observables/all/thermostat/nose_hoover_chain/velocity/time"));
 
     REQUIRE_EQ(std::string(module_path::sits_root),
                std::string("/observables/all/sits"));
@@ -166,20 +171,20 @@ static void Test_Nhc_And_Sits_Mappings()
     REQUIRE_TRUE(log->groups.count(Nose_Hoover_Chain_Coordinate_Root()) != 0);
     REQUIRE_TRUE(log->groups.count(Nose_Hoover_Chain_Velocity_Root()) != 0);
     REQUIRE_TRUE(log->groups.count(Sits_Module_Root("sits_a")) != 0);
-    Require_Dataset_Spec(*log, module_path::nhc_step, DataType::int64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, module_path::nhc_time, DataType::float64,
-                         {0}, {0}, {0}, true);
+    Require_Dataset_Spec(*log, module_path::nhc_step, DataType::int64, {0}, {0},
+                         {0}, true);
+    Require_Dataset_Spec(*log, module_path::nhc_time, DataType::float64, {0},
+                         {0}, {0}, true);
     Require_Dataset_Spec(*log, module_path::nhc_coordinate_value,
                          DataType::float32, {0, 4}, {0, 0}, {0, 4}, true);
     Require_Dataset_Spec(*log, module_path::nhc_velocity_value,
                          DataType::float32, {0, 4}, {0, 0}, {0, 4}, true);
-    Require_Dataset_Spec(*log, Sits_Nk_Step_Path("sits_a"),
-                         DataType::int64, {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, Sits_Nk_Time_Path("sits_a"),
-                         DataType::float64, {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, Sits_Nk_Value_Path("sits_a"),
-                         DataType::float32, {0, 3}, {0, 0}, {0, 3}, true);
+    Require_Dataset_Spec(*log, Sits_Nk_Step_Path("sits_a"), DataType::int64,
+                         {0}, {0}, {0}, true);
+    Require_Dataset_Spec(*log, Sits_Nk_Time_Path("sits_a"), DataType::float64,
+                         {0}, {0}, {0}, true);
+    Require_Dataset_Spec(*log, Sits_Nk_Value_Path("sits_a"), DataType::float32,
+                         {0, 3}, {0, 0}, {0, 3}, true);
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::nhc_step,
                                module_path::nhc_coordinate_step));
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::nhc_time,
@@ -201,8 +206,8 @@ static void Test_Metadynamics_And_Diagnostics()
     ModuleH5MappingWriter module(writer.get());
 
     REQUIRE_TRUE(module.Ensure_Metadynamics_Scalars());
-    REQUIRE_TRUE(module.Append_Metadynamics_Scalar_Frame(2, 0.2, 1.0, 2.0,
-                                                         3.0));
+    REQUIRE_TRUE(
+        module.Append_Metadynamics_Scalar_Frame(2, 0.2, 1.0, 2.0, 3.0));
     REQUIRE_TRUE(module.Write_Metadynamics_Hills("meta0", "HILLS"));
     REQUIRE_TRUE(module.Write_Metadynamics_History("meta0", "HISTORY"));
     REQUIRE_TRUE(module.Write_Metadynamics_Edge("meta0", "EDGE"));
@@ -215,18 +220,15 @@ static void Test_Metadynamics_And_Diagnostics()
                  0);
     REQUIRE_TRUE(log->datasets.count(Metadynamics_Scalar_Value_Path("rct")) !=
                  0);
-    Require_Dataset_Spec(*log, module_path::metad_step, DataType::int64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, module_path::metad_time, DataType::float64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log,
-                         Metadynamics_Scalar_Value_Path("meta"),
+    Require_Dataset_Spec(*log, module_path::metad_step, DataType::int64, {0},
+                         {0}, {0}, true);
+    Require_Dataset_Spec(*log, module_path::metad_time, DataType::float64, {0},
+                         {0}, {0}, true);
+    Require_Dataset_Spec(*log, Metadynamics_Scalar_Value_Path("meta"),
                          DataType::float64, {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log,
-                         Metadynamics_Scalar_Value_Path("rbias"),
+    Require_Dataset_Spec(*log, Metadynamics_Scalar_Value_Path("rbias"),
                          DataType::float64, {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log,
-                         Metadynamics_Scalar_Value_Path("rct"),
+    Require_Dataset_Spec(*log, Metadynamics_Scalar_Value_Path("rct"),
                          DataType::float64, {0}, {0}, {0}, true);
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::metad_step,
                                Metadynamics_Scalar_Step_Path("meta")));
@@ -248,12 +250,12 @@ static void Test_Metadynamics_And_Diagnostics()
                std::string("HISTORY"));
     REQUIRE_EQ(log->strings[Metadynamics_Diagnostic_Path("meta0", "edge")],
                std::string("EDGE"));
-    REQUIRE_EQ(log->strings[Metadynamics_Diagnostic_Path(
-                   "meta0", "potential_export")],
-               std::string("GRID"));
-    REQUIRE_EQ(log->strings[Metadynamics_Diagnostic_Path("meta0",
-                                                         "direct_export")],
-               std::string("DIRECT"));
+    REQUIRE_EQ(
+        log->strings[Metadynamics_Diagnostic_Path("meta0", "potential_export")],
+        std::string("GRID"));
+    REQUIRE_EQ(
+        log->strings[Metadynamics_Diagnostic_Path("meta0", "direct_export")],
+        std::string("DIRECT"));
     REQUIRE_TRUE(log->groups.count(module_path::metad_parameter_root) != 0);
     REQUIRE_TRUE(log->groups.count(Metadynamics_Diagnostic_Root("meta0")) != 0);
 }
@@ -270,8 +272,8 @@ static void Test_Qc_And_Reaxff_Mappings()
     REQUIRE_TRUE(module.Write_Qc_Scf_Output("SCF LOG"));
 
     REQUIRE_TRUE(module.Ensure_Reaxff_Energy_Terms({"bond", "angle"}));
-    REQUIRE_TRUE(module.Append_Reaxff_Frame(
-        3, 0.3, {{"bond", 1.0}, {"angle", 2.0}}));
+    REQUIRE_TRUE(
+        module.Append_Reaxff_Frame(3, 0.3, {{"bond", 1.0}, {"angle", 2.0}}));
     REQUIRE_TRUE(!module.Append_Reaxff_Frame(4, 0.4, {{"bond", 1.0}}));
     REQUIRE_TRUE(module.Ensure_Reaxff_Eeq_Charge_Snapshot(3));
     const std::vector<float> charges = {-0.25f, 0.5f, -0.25f};
@@ -281,16 +283,14 @@ static void Test_Qc_And_Reaxff_Mappings()
     REQUIRE_TRUE(log->datasets.count(Qc_Observable_Value_Path("energy")) != 0);
     REQUIRE_TRUE(log->datasets.count(Qc_Observable_Value_Path("spin_square")) !=
                  0);
-    Require_Dataset_Spec(*log, module_path::qc_step, DataType::int64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, module_path::qc_time, DataType::float64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log,
-                         Qc_Observable_Value_Path("energy"),
+    Require_Dataset_Spec(*log, module_path::qc_step, DataType::int64, {0}, {0},
+                         {0}, true);
+    Require_Dataset_Spec(*log, module_path::qc_time, DataType::float64, {0},
+                         {0}, {0}, true);
+    Require_Dataset_Spec(*log, Qc_Observable_Value_Path("energy"),
                          DataType::float64, {0}, {0}, {0}, true);
-    Require_Dataset_Spec(
-        *log, Qc_Observable_Value_Path("spin_square"),
-        DataType::float64, {0}, {0}, {0}, true);
+    Require_Dataset_Spec(*log, Qc_Observable_Value_Path("spin_square"),
+                         DataType::float64, {0}, {0}, {0}, true);
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::qc_step,
                                Qc_Observable_Step_Path("energy")));
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::qc_time,
@@ -299,20 +299,17 @@ static void Test_Qc_And_Reaxff_Mappings()
                                Qc_Observable_Step_Path("spin_square")));
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::qc_time,
                                Qc_Observable_Time_Path("spin_square")));
-    REQUIRE_EQ(log->strings[Qc_Scf_Output_Path()],
-               std::string("SCF LOG"));
+    REQUIRE_EQ(log->strings[Qc_Scf_Output_Path()], std::string("SCF LOG"));
     REQUIRE_TRUE(log->datasets.count(Reaxff_Term_Value_Path("bond")) != 0);
     REQUIRE_TRUE(log->datasets.count(Reaxff_Term_Value_Path("angle")) != 0);
-    Require_Dataset_Spec(*log, module_path::reaxff_step, DataType::int64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, module_path::reaxff_time, DataType::float64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(
-        *log, Reaxff_Term_Value_Path("bond"),
-        DataType::float64, {0}, {0}, {0}, true);
-    Require_Dataset_Spec(
-        *log, Reaxff_Term_Value_Path("angle"),
-        DataType::float64, {0}, {0}, {0}, true);
+    Require_Dataset_Spec(*log, module_path::reaxff_step, DataType::int64, {0},
+                         {0}, {0}, true);
+    Require_Dataset_Spec(*log, module_path::reaxff_time, DataType::float64, {0},
+                         {0}, {0}, true);
+    Require_Dataset_Spec(*log, Reaxff_Term_Value_Path("bond"),
+                         DataType::float64, {0}, {0}, {0}, true);
+    Require_Dataset_Spec(*log, Reaxff_Term_Value_Path("angle"),
+                         DataType::float64, {0}, {0}, {0}, true);
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::reaxff_step,
                                Reaxff_Term_Step_Path("bond")));
     REQUIRE_TRUE(Has_Hard_Link(*log, module_path::reaxff_time,
@@ -342,23 +339,24 @@ static void Test_Qc_Optional_Spin_Square_Path()
     REQUIRE_TRUE(log->datasets.count(Qc_Observable_Value_Path("energy")) != 0);
     REQUIRE_TRUE(log->datasets.count(Qc_Observable_Value_Path("spin_square")) ==
                  0);
-    Require_Dataset_Spec(*log, module_path::qc_step, DataType::int64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log, module_path::qc_time, DataType::float64,
-                         {0}, {0}, {0}, true);
-    Require_Dataset_Spec(*log,
-                         Qc_Observable_Value_Path("energy"),
+    Require_Dataset_Spec(*log, module_path::qc_step, DataType::int64, {0}, {0},
+                         {0}, true);
+    Require_Dataset_Spec(*log, module_path::qc_time, DataType::float64, {0},
+                         {0}, {0}, true);
+    Require_Dataset_Spec(*log, Qc_Observable_Value_Path("energy"),
                          DataType::float64, {0}, {0}, {0}, true);
     REQUIRE_TRUE(log->groups.count(module_path::qc_root) != 0);
 }
 
 int main()
 {
-    return Run_Test([] {
-        Test_Module_Path_Constants();
-        Test_Nhc_And_Sits_Mappings();
-        Test_Metadynamics_And_Diagnostics();
-        Test_Qc_And_Reaxff_Mappings();
-        Test_Qc_Optional_Spin_Square_Path();
-    });
+    return Run_Test(
+        []
+        {
+            Test_Module_Path_Constants();
+            Test_Nhc_And_Sits_Mappings();
+            Test_Metadynamics_And_Diagnostics();
+            Test_Qc_And_Reaxff_Mappings();
+            Test_Qc_Optional_Spin_Square_Path();
+        });
 }

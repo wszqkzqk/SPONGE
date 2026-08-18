@@ -168,8 +168,7 @@ void PRESSURE_BASED_BAROSTAT_INFORMATION::Initial(
                               "PRESSURE_BASED_BAROSTAT_INFORMATION::Initial");
         seed = atoi(controller->Command("barostat", "seed"));
     }
-    random_seed =
-        static_cast<std::uint64_t>(static_cast<std::uint32_t>(seed));
+    random_seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(seed));
     random_invocation_count = 0;
     use_legacy_rng = false;
     controller->printf("    The random seed is %d\n", seed);

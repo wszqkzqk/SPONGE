@@ -178,29 +178,26 @@ static void Write_Restart_File_With_Module_State(
                    writer, "write NHC restart state");
     Require_Writer(writer.Write_Integrator_State_Text("mode", "npt"), writer,
                    "write integrator restart mode");
-    Require_Writer(
-        writer.Write_Rng_State(
-            "bussi_thermostat",
-            SpongeRestartRng::Counter_Philox_State(12345, 67890)),
-        writer, "write Bussi typed RNG restart state");
+    Require_Writer(writer.Write_Rng_State(
+                       "bussi_thermostat",
+                       SpongeRestartRng::Counter_Philox_State(12345, 67890)),
+                   writer, "write Bussi typed RNG restart state");
     const float bussi_lambda[1] = {0.95f};
     Require_Writer(writer.Write_Thermostat_State_Float(
                        "bussi_thermostat", "lambda", bussi_lambda, 1),
                    writer, "write Bussi lambda restart state");
     const float pressure_g[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-    Require_Writer(
-        writer.Write_Rng_State(
-            "pressure_based_barostat",
-            SpongeRestartRng::Counter_Philox_State(24680, 13579)),
-        writer, "write pressure barostat typed RNG restart state");
+    Require_Writer(writer.Write_Rng_State(
+                       "pressure_based_barostat",
+                       SpongeRestartRng::Counter_Philox_State(24680, 13579)),
+                   writer, "write pressure barostat typed RNG restart state");
     Require_Writer(writer.Write_Barostat_State_Float("pressure_based_barostat",
                                                      "g", pressure_g, 6),
                    writer, "write pressure barostat g restart state");
-    Require_Writer(
-        writer.Write_Rng_State(
-            "middle_langevin",
-            SpongeRestartRng::Counter_Philox_State(1234, 5678)),
-        writer, "write Middle Langevin typed RNG restart state");
+    Require_Writer(writer.Write_Rng_State(
+                       "middle_langevin",
+                       SpongeRestartRng::Counter_Philox_State(1234, 5678)),
+                   writer, "write Middle Langevin typed RNG restart state");
     Require_Writer(
         writer.Write_Rng_State(
             "andersen", SpongeRestartRng::Counter_Philox_State(4321, 8765)),
@@ -214,21 +211,21 @@ static void Write_Restart_File_With_Module_State(
     const float mc_rate[3] = {31.0f, 32.0f, 33.0f};
     const std::int64_t mc_total[3] = {10, 20, 30};
     const std::int64_t mc_accept[3] = {3, 6, 9};
-    Require_Writer(writer.Write_Barostat_State_Float(
-                       "monte_carlo_barostat", "delta_box_length_max",
-                       mc_delta, 3),
-                   writer, "write Monte Carlo barostat delta state");
-    Require_Writer(writer.Write_Barostat_State_Float(
-                       "monte_carlo_barostat", "accept_rate", mc_rate, 3),
+    Require_Writer(
+        writer.Write_Barostat_State_Float("monte_carlo_barostat",
+                                          "delta_box_length_max", mc_delta, 3),
+        writer, "write Monte Carlo barostat delta state");
+    Require_Writer(writer.Write_Barostat_State_Float("monte_carlo_barostat",
+                                                     "accept_rate", mc_rate, 3),
                    writer, "write Monte Carlo barostat rate state");
-    Require_Writer(writer.Write_Barostat_State_Int64(
-                       "monte_carlo_barostat", "total_count_int64", mc_total,
-                       3),
-                   writer, "write Monte Carlo barostat total count state");
-    Require_Writer(writer.Write_Barostat_State_Int64(
-                       "monte_carlo_barostat", "accept_count_int64", mc_accept,
-                       3),
-                   writer, "write Monte Carlo barostat accept count state");
+    Require_Writer(
+        writer.Write_Barostat_State_Int64("monte_carlo_barostat",
+                                          "total_count_int64", mc_total, 3),
+        writer, "write Monte Carlo barostat total count state");
+    Require_Writer(
+        writer.Write_Barostat_State_Int64("monte_carlo_barostat",
+                                          "accept_count_int64", mc_accept, 3),
+        writer, "write Monte Carlo barostat accept count state");
     Require_Writer(writer.Write_Sits_State_Schema_Version("sits_bias", 1),
                    writer, "write SITS restart schema version");
     Require_Writer(writer.Write_Sits_State("sits_bias", "nk", sits_nk.data(),
@@ -432,8 +429,8 @@ static void Test_Restart_Reader_Round_Trips_Dynamic_And_Protocol_State()
     std::uint64_t invocation_count = 0;
     std::string rng_error;
     REQUIRE_TRUE(SpongeRestartRng::Decode_Counter_Philox_State(
-        dynamic_state.rng_states["bussi_thermostat"], &seed,
-        &invocation_count, &rng_error));
+        dynamic_state.rng_states["bussi_thermostat"], &seed, &invocation_count,
+        &rng_error));
     REQUIRE_EQ(seed, static_cast<std::uint64_t>(12345));
     REQUIRE_EQ(invocation_count, static_cast<std::uint64_t>(67890));
     Require_Float_Vector_Close(
@@ -448,8 +445,8 @@ static void Test_Restart_Reader_Round_Trips_Dynamic_And_Protocol_State()
         dynamic_state.barostat_float_states["pressure_based_barostat"]["g"],
         {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
     REQUIRE_TRUE(SpongeRestartRng::Decode_Counter_Philox_State(
-        dynamic_state.rng_states["middle_langevin"], &seed,
-        &invocation_count, &rng_error));
+        dynamic_state.rng_states["middle_langevin"], &seed, &invocation_count,
+        &rng_error));
     REQUIRE_EQ(seed, static_cast<std::uint64_t>(1234));
     REQUIRE_EQ(invocation_count, static_cast<std::uint64_t>(5678));
     REQUIRE_TRUE(SpongeRestartRng::Decode_Counter_Philox_State(
@@ -464,13 +461,13 @@ static void Test_Restart_Reader_Round_Trips_Dynamic_And_Protocol_State()
     REQUIRE_EQ(mc_rng_state, 0x123456789abcdef0ULL);
     Require_Float_Vector_Close(
         dynamic_state.barostat_float_states["monte_carlo_barostat"]
-                                            ["delta_box_length_max"],
+                                           ["delta_box_length_max"],
         {0.10f, 0.20f, 0.30f});
     REQUIRE_EQ(dynamic_state.barostat_integer_states["monte_carlo_barostat"]
-                                                      ["total_count_int64"],
+                                                    ["total_count_int64"],
                std::vector<std::int64_t>({10, 20, 30}));
     REQUIRE_EQ(dynamic_state.barostat_integer_states["monte_carlo_barostat"]
-                                                      ["accept_count_int64"],
+                                                    ["accept_count_int64"],
                std::vector<std::int64_t>({3, 6, 9}));
 
     RestartProtocolState protocol_state;

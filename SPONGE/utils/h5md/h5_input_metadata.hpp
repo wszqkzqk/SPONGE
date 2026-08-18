@@ -211,10 +211,10 @@ inline CompatibilityResult Check_Trajectory_Against_Topology(
     {
         return topology_check;
     }
-    const auto artifact_check = Check_Artifact_Identity(
-        "trajectory", trajectory.schema_name, "sponge.output.h5md",
-        trajectory.schema_version, "sponge.output.v2",
-        trajectory.identity_uuid);
+    const auto artifact_check =
+        Check_Artifact_Identity("trajectory", trajectory.schema_name,
+                                "sponge.output.h5md", trajectory.schema_version,
+                                "sponge.output.v2", trajectory.identity_uuid);
     if (!artifact_check.compatible) return artifact_check;
     if (!trajectory.has_position)
     {

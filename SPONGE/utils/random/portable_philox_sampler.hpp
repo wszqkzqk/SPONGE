@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cmath>
 #include <cstdint>
@@ -13,8 +13,7 @@
 class SPONGE_PORTABLE_PHILOX_SAMPLER
 {
    public:
-    SPONGE_PORTABLE_PHILOX_SAMPLER(std::uint64_t seed,
-                                   std::uint64_t stream)
+    SPONGE_PORTABLE_PHILOX_SAMPLER(std::uint64_t seed, std::uint64_t stream)
         : seed_(seed), stream_(stream)
     {
     }
@@ -24,8 +23,7 @@ class SPONGE_PORTABLE_PHILOX_SAMPLER
         const std::uint64_t high = Next_Word() >> 5;
         const std::uint64_t low = Next_Word() >> 6;
         const std::uint64_t mantissa = (high << 26) | low;
-        return (static_cast<double>(mantissa) + 0.5) /
-               9007199254740992.0;
+        return (static_cast<double>(mantissa) + 0.5) / 9007199254740992.0;
     }
 
     double Normal()
@@ -36,7 +34,8 @@ class SPONGE_PORTABLE_PHILOX_SAMPLER
             return spare_normal_;
         }
         const double magnitude = std::sqrt(-2.0 * std::log(Uniform_Open01()));
-        const double phase = 6.283185307179586476925286766559 * Uniform_Open01();
+        const double phase =
+            6.283185307179586476925286766559 * Uniform_Open01();
         spare_normal_ = magnitude * std::sin(phase);
         has_spare_normal_ = true;
         return magnitude * std::cos(phase);

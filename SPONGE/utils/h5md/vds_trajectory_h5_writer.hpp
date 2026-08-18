@@ -9,8 +9,8 @@
 #include <system_error>
 #include <vector>
 
-#include "utils/h5md/h5md_writer.hpp"
 #include "utils/h5md/atomic_file_publish.hpp"
+#include "utils/h5md/h5md_writer.hpp"
 #include "utils/h5md/module_h5_mappings.hpp"
 #include "utils/h5md/output_plan.hpp"
 #include "utils/h5md/trajectory_h5_writer.hpp"
@@ -458,8 +458,7 @@ class VdsTrajectoryH5Writer
             return false;
         }
         ModuleH5MappingWriter module_writer(wrapper_writer_.get());
-        if (!module_writer.Write_Reaxff_Eeq_Charge_Snapshot(values,
-                                                            atom_count))
+        if (!module_writer.Write_Reaxff_Eeq_Charge_Snapshot(values, atom_count))
         {
             last_error_ = module_writer.Last_Error();
             return false;
@@ -719,8 +718,7 @@ class VdsTrajectoryH5Writer
                 current_manifest_entry_.path, size_error);
             if (!size_error)
             {
-                current_manifest_entry_.byte_size =
-                    static_cast<int64_t>(size);
+                current_manifest_entry_.byte_size = static_cast<int64_t>(size);
             }
             manifest_.push_back(current_manifest_entry_);
         }
@@ -1824,8 +1822,8 @@ class VdsTrajectoryH5Writer
         }
         if (qc_layout_defined_ &&
             !write("qc", total(&VdsShardManifestEntry::qc_frame_count),
-                   "module_frames", module_path::qc_step,
-                   module_path::qc_time, qc_values, true))
+                   "module_frames", module_path::qc_step, module_path::qc_time,
+                   qc_values, true))
         {
             return false;
         }

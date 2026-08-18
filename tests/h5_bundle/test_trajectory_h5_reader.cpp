@@ -234,9 +234,9 @@ static void Test_Trajectory_Reader_Refreshes_Swmr_Frames()
                    "read initial committed frame count");
     REQUIRE_EQ(committed, static_cast<std::int64_t>(0));
 
-    Require_Writer(writer.Append_Particle_Frame(10, 0.02, position.data(),
-                                                box.data()),
-                   writer, "publish SWMR trajectory frame");
+    Require_Writer(
+        writer.Append_Particle_Frame(10, 0.02, position.data(), box.data()),
+        writer, "publish SWMR trajectory frame");
     Require_Writer(writer.Publish(), writer,
                    "flush SWMR trajectory publication");
     Require_Reader(reader.Refresh(), reader, "refresh SWMR trajectory reader");

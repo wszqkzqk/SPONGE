@@ -208,13 +208,12 @@ class RestartH5Writer
         state_hash_.Add_Numeric(path::particles_all_time, {1}, &time, 1);
         state_hash_.Add_Numeric(path::position_value, {1, atom_count_, 3},
                                 position_xyz, atom_count_ * 3);
-        state_hash_.Add_Numeric(path::box_edges_value, {1, 3, 3},
-                                box_edges_3x3, 9);
+        state_hash_.Add_Numeric(path::box_edges_value, {1, 3, 3}, box_edges_3x3,
+                                9);
         if (include_velocity_ && velocity_xyz != nullptr)
         {
-            state_hash_.Add_Numeric(path::velocity_value,
-                                    {1, atom_count_, 3}, velocity_xyz,
-                                    atom_count_ * 3);
+            state_hash_.Add_Numeric(path::velocity_value, {1, atom_count_, 3},
+                                    velocity_xyz, atom_count_ * 3);
         }
         if (!Write_Run_Metadata(step, time) ||
             !writer_.Write_Output_Completion(1, step, time))
@@ -312,8 +311,7 @@ class RestartH5Writer
             return false;
         }
         if (!writer_.Append_Float32(path::restart_nhc,
-                                    coordinate_velocity_pairs,
-                                    pair_count * 2))
+                                    coordinate_velocity_pairs, pair_count * 2))
         {
             return false;
         }
@@ -360,11 +358,10 @@ class RestartH5Writer
             Restart_Rng_State_Component_Path(module_name, "state_words");
         if (!writer_.Ensure_Group(root) ||
             !writer_.Write_String(engine_path, state.engine) ||
-            !writer_.Create_Dataset({schema_path,
-                                     DataType::int64,
-                                     {{0}, {1}, {1}},
-                                     true}) ||
-            !writer_.Append_Int64(schema_path, &state.state_schema_version, 1) ||
+            !writer_.Create_Dataset(
+                {schema_path, DataType::int64, {{0}, {1}, {1}}, true}) ||
+            !writer_.Append_Int64(schema_path, &state.state_schema_version,
+                                  1) ||
             !writer_.Create_Dataset(
                 {words_path,
                  DataType::int64,
@@ -613,8 +610,7 @@ class RestartH5Writer
         {
             return false;
         }
-        if (!writer_.Append_Float32(dataset_path, coordinates,
-                                    atom_count * 3))
+        if (!writer_.Append_Float32(dataset_path, coordinates, atom_count * 3))
         {
             return false;
         }
@@ -647,8 +643,7 @@ class RestartH5Writer
         {
             return false;
         }
-        if (!writer_.Append_Float32(dataset_path, coordinates,
-                                    atom_count * 3))
+        if (!writer_.Append_Float32(dataset_path, coordinates, atom_count * 3))
         {
             return false;
         }

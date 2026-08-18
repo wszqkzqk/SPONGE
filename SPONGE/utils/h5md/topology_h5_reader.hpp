@@ -53,8 +53,7 @@ class TopologyH5Reader
                 result.schema_version =
                     Read_Optional_String(path::sponge_schema_version);
             }
-            result.identity_uuid =
-                Read_Optional_String(path::identity_uuid);
+            result.identity_uuid = Read_Optional_String(path::identity_uuid);
             result.atom_count = Read_Optional_Int64("/topology/atom_count");
             result.atom_ordering_hash =
                 Read_Optional_String("/topology/atom_order_hash");

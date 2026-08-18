@@ -97,9 +97,8 @@ struct META
     void Step_Print(CONTROLLER* controller);
     void Write_Potential(void);
     void Write_Directly(void);
-    bool Export_H5_Restart_State(
-        SpongeH5MD::RestartMetadynamicsState* state,
-        std::string* error_message);
+    bool Export_H5_Restart_State(SpongeH5MD::RestartMetadynamicsState* state,
+                                 std::string* error_message);
     bool Apply_H5_Restart_State(
         const SpongeH5MD::RestartMetadynamicsState& state,
         std::string* error_message);

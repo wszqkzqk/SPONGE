@@ -1218,8 +1218,7 @@ PreparedCase Prepare_Case(const std::filesystem::path& temp_root,
         mdin, {"output_h5_trajectory_path", "output_h5_trajectory_vds",
                "output_h5_restart_path", "output_h5_restart_topology_hash",
                "output_h5_restart_atom_order_hash",
-               "output_h5_restart_protocol_hash",
-               "output_h5_observable_path"});
+               "output_h5_restart_protocol_hash", "output_h5_observable_path"});
     Append_If_Missing(&mdin, "mdinfo", "mdinfo = \"mdinfo.txt\"");
     Append_If_Missing(&mdin, "mdout", "mdout = \"mdout.txt\"");
     if (bundled_output)
@@ -1233,14 +1232,12 @@ PreparedCase Prepare_Case(const std::filesystem::path& temp_root,
                 Toml_Relative_Path(prepared.root, output_paths.h5_restart));
         if (!Has_Key_Line(mdin, "input_h5_topology_path"))
         {
-            Append_If_Missing(
-                &mdin, "output_h5_restart_topology_hash",
-                "output_h5_restart_topology_hash = \"" +
-                    Raw_Restart_Topology_Hash() + "\"");
-            Append_If_Missing(
-                &mdin, "output_h5_restart_atom_order_hash",
-                "output_h5_restart_atom_order_hash = \"" +
-                    Raw_Restart_Atom_Order_Hash() + "\"");
+            Append_If_Missing(&mdin, "output_h5_restart_topology_hash",
+                              "output_h5_restart_topology_hash = \"" +
+                                  Raw_Restart_Topology_Hash() + "\"");
+            Append_If_Missing(&mdin, "output_h5_restart_atom_order_hash",
+                              "output_h5_restart_atom_order_hash = \"" +
+                                  Raw_Restart_Atom_Order_Hash() + "\"");
         }
         Append_If_Missing(
             &mdin, "output_h5_trajectory_path",
@@ -1353,14 +1350,10 @@ void Require_Normal_Prepared_Mdin(const PreparedCase& prepared,
                                                       output_paths.h5_restart));
         if (!Has_Key_Line(mdin, "input_h5_topology_path"))
         {
-            Require_Contains(
-                mdin,
-                "output_h5_restart_topology_hash = \"" +
-                    Raw_Restart_Topology_Hash() + "\"");
-            Require_Contains(
-                mdin,
-                "output_h5_restart_atom_order_hash = \"" +
-                    Raw_Restart_Atom_Order_Hash() + "\"");
+            Require_Contains(mdin, "output_h5_restart_topology_hash = \"" +
+                                       Raw_Restart_Topology_Hash() + "\"");
+            Require_Contains(mdin, "output_h5_restart_atom_order_hash = \"" +
+                                       Raw_Restart_Atom_Order_Hash() + "\"");
         }
         Require_Contains(
             mdin,
@@ -2150,14 +2143,13 @@ void Run_Normal_Mode_Matrix(const std::filesystem::path& sponge_executable)
 
     const auto cases =
         Normal_Smoke_Cases(legacy_source, bundled_source, sidecar_source);
-    auto missing_lineage = Prepare_Case(
-        temp_root, "normal_legacy_in_bundled_out_missing_lineage",
-        legacy_source, "mdin.spg.toml", true);
+    auto missing_lineage =
+        Prepare_Case(temp_root, "normal_legacy_in_bundled_out_missing_lineage",
+                     legacy_source, "mdin.spg.toml", true);
     auto missing_lineage_mdin = Read_Text(missing_lineage.mdin);
     missing_lineage_mdin = Remove_Key_Lines(
-        missing_lineage_mdin,
-        {"output_h5_restart_topology_hash",
-         "output_h5_restart_atom_order_hash"});
+        missing_lineage_mdin, {"output_h5_restart_topology_hash",
+                               "output_h5_restart_atom_order_hash"});
     Write_Text(missing_lineage.mdin, missing_lineage_mdin);
     Run_SPONGE_Expect_Failure(
         sponge_executable, missing_lineage,

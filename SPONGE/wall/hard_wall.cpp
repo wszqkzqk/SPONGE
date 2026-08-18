@@ -17,8 +17,8 @@ static bool Is_Hard_Wall_Infinite(float value)
 static bool Has_Legacy_Hard_Wall(CONTROLLER* controller,
                                  const char* module_name)
 {
-    for (const char* key : {"x_low", "y_low", "z_low", "x_high", "y_high",
-                            "z_high"})
+    for (const char* key :
+         {"x_low", "y_low", "z_low", "x_high", "y_high", "z_high"})
     {
         if (controller->Command_Exist(module_name, key)) return true;
     }
@@ -68,8 +68,7 @@ void HARD_WALL::Initial(CONTROLLER* controller, float temperature,
         strcpy(this->module_name, "hard_wall");
     }
     controller->printf("START INITIALIZING HARD WALL:\n");
-    const bool has_legacy =
-        Has_Legacy_Hard_Wall(controller, this->module_name);
+    const bool has_legacy = Has_Legacy_Hard_Wall(controller, this->module_name);
     bool loaded_native = false;
     bool allow_npt = false;
     if (controller->Command_Exist("input_h5_protocol_path"))
@@ -109,8 +108,7 @@ void HARD_WALL::Initial(CONTROLLER* controller, float temperature,
             controller->printf("    loaded native H5 hard-wall protocol\n");
         }
     }
-    if (!loaded_native &&
-        controller->Command_Exist(this->module_name, "x_low"))
+    if (!loaded_native && controller->Command_Exist(this->module_name, "x_low"))
     {
         controller->Check_Float(this->module_name, "x_low",
                                 "HARD_WALL::Initial");
@@ -118,8 +116,7 @@ void HARD_WALL::Initial(CONTROLLER* controller, float temperature,
         controller->printf("    x_low = %f Angstrom\n", x_low);
         is_initialized = 1;
     }
-    if (!loaded_native &&
-        controller->Command_Exist(this->module_name, "y_low"))
+    if (!loaded_native && controller->Command_Exist(this->module_name, "y_low"))
     {
         controller->Check_Float(this->module_name, "y_low",
                                 "HARD_WALL::Initial");
@@ -127,8 +124,7 @@ void HARD_WALL::Initial(CONTROLLER* controller, float temperature,
         controller->printf("    y_low = %f Angstrom\n", y_low);
         is_initialized = 1;
     }
-    if (!loaded_native &&
-        controller->Command_Exist(this->module_name, "z_low"))
+    if (!loaded_native && controller->Command_Exist(this->module_name, "z_low"))
     {
         controller->Check_Float(this->module_name, "z_low",
                                 "HARD_WALL::Initial");

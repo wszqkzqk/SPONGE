@@ -788,8 +788,7 @@ void Apply_H5_Dynamic_Restart_State()
     const bool has_bussi_rng =
         dynamic_state.rng_state_text.count("bussi_thermostat") != 0 ||
         dynamic_state.rng_states.count("bussi_thermostat") != 0;
-    if (bussi_thermo.is_initialized ||
-        has_bussi_rng)
+    if (bussi_thermo.is_initialized || has_bussi_rng)
     {
         if (!bussi_thermo.Apply_H5_Restart_State(dynamic_state, &error_message))
         {
@@ -1877,9 +1876,8 @@ void Main_Print()
         edip.Step_Print(&controller);
         eam.Step_Print(&controller);
         tersoff.Step_Print(&controller);
-        reaxff.Step_Print(
-            &controller, md_info.d_charge,
-            !md_info.output.h5_reaxff_eeq_snapshot_enabled);
+        reaxff.Step_Print(&controller, md_info.d_charge,
+                          !md_info.output.h5_reaxff_eeq_snapshot_enabled);
         md_info.output.Append_H5_Reaxff_Frame(&controller);
         if (!reaxff.h_eeq_charges.empty())
         {

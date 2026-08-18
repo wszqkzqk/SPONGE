@@ -984,9 +984,9 @@ void REAXFF_EEQ::Step_Print(CONTROLLER* controller)
     controller->Step_Print("REAXFF_EEQ", h_energy, true);
 }
 
-void REAXFF_EEQ::Capture_Charges(
-    const float* d_charge, std::vector<float>* elementary_charges,
-    bool write_legacy_file)
+void REAXFF_EEQ::Capture_Charges(const float* d_charge,
+                                 std::vector<float>* elementary_charges,
+                                 bool write_legacy_file)
 {
     if (!is_initialized || elementary_charges == NULL) return;
     elementary_charges->resize(atom_numbers);
@@ -1004,8 +1004,7 @@ void REAXFF_EEQ::Capture_Charges(
         {
             for (int i = 0; i < atom_numbers; i++)
             {
-                fprintf(fp, "%d %.6f\n", i + 1,
-                        elementary_charges->at(i));
+                fprintf(fp, "%d %.6f\n", i + 1, elementary_charges->at(i));
             }
             fclose(fp);
         }

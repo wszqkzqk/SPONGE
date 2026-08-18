@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <string>
@@ -60,12 +60,12 @@ inline bool Decode_Counter_Philox_State(
     {
         if (word < 0 || word > 0xffffffffLL)
         {
-            return fail("counter Philox restart state contains a non-uint32 word");
+            return fail(
+                "counter Philox restart state contains a non-uint32 word");
         }
     }
     *seed = Join_Words(state.state_words[0], state.state_words[1]);
-    *invocation_count =
-        Join_Words(state.state_words[2], state.state_words[3]);
+    *invocation_count = Join_Words(state.state_words[2], state.state_words[3]);
     if (*invocation_count > UINT64_MAX / 4)
     {
         return fail("counter Philox restart invocation count would overflow");
@@ -92,7 +92,8 @@ inline bool Decode_Splitmix64_State(const SpongeH5MD::RestartRngState& state,
         if (error_message != nullptr) *error_message = message;
         return false;
     };
-    if (value == nullptr) return fail("SplitMix64 restart output pointer is null");
+    if (value == nullptr)
+        return fail("SplitMix64 restart output pointer is null");
     if (state.engine != "sponge.splitmix64.v1" ||
         state.state_schema_version != 1 || state.stream_count != 1 ||
         state.words_per_stream != 2 || state.state_words.size() != 2)

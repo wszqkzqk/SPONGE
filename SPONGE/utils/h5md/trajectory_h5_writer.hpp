@@ -169,9 +169,8 @@ class TrajectoryH5Writer
         if (include_force) value_paths.push_back(path::force_value);
         return stream_watermarks_.Define("particles") &&
                writer_.Write_Output_Stream_Descriptor(
-                   "particles", "trajectory_frames",
-                   path::particles_all_step, path::particles_all_time,
-                   value_paths);
+                   "particles", "trajectory_frames", path::particles_all_step,
+                   path::particles_all_time, value_paths);
     }
 
     bool Write_Topology_Compatibility(const std::string& topology_hash,
@@ -239,9 +238,8 @@ class TrajectoryH5Writer
         }
         return stream_watermarks_.Define("observables") &&
                writer_.Write_Output_Stream_Descriptor(
-                   "observables", "thermo_frames",
-                   path::observables_all_step, path::observables_all_time,
-                   value_paths);
+                   "observables", "thermo_frames", path::observables_all_step,
+                   path::observables_all_time, value_paths);
     }
 
     bool Append_Particle_Frame(const int64_t step, const double time,
@@ -325,8 +323,8 @@ class TrajectoryH5Writer
                    chain_length) &&
                stream_watermarks_.Define("nose_hoover_chain") &&
                writer_.Write_Output_Stream_Descriptor(
-                   "nose_hoover_chain", "module_frames",
-                   module_path::nhc_step, module_path::nhc_time,
+                   "nose_hoover_chain", "module_frames", module_path::nhc_step,
+                   module_path::nhc_time,
                    {module_path::nhc_coordinate_value,
                     module_path::nhc_velocity_value});
     }
@@ -466,8 +464,8 @@ class TrajectoryH5Writer
                                           std::size_t atom_count)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return Mark_Dirty_If(module_writer.Write_Reaxff_Eeq_Charge_Snapshot(
-            values, atom_count));
+        return Mark_Dirty_If(
+            module_writer.Write_Reaxff_Eeq_Charge_Snapshot(values, atom_count));
     }
 
     bool Write_Mdinfo_Text(const std::string& text)

@@ -1,4 +1,4 @@
-#include "native_init.h"
+﻿#include "native_init.h"
 
 #include <algorithm>
 #include <cmath>
@@ -89,8 +89,7 @@ void Initialize_EEQ(REAXFF_EEQ* eeq, CONTROLLER* controller,
     Device_Malloc_Safely((void**)&eeq->d_temp_sum, sizeof(float));
     Malloc_Safely((void**)&eeq->h_h_numnbrs, sizeof(int) * atom_numbers);
     Malloc_Safely((void**)&eeq->h_h_firstnbrs, sizeof(int) * atom_numbers);
-    Device_Malloc_Safely((void**)&eeq->d_h_numnbrs,
-                         sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&eeq->d_h_numnbrs, sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&eeq->d_h_firstnbrs,
                          sizeof(int) * atom_numbers);
     deviceMemset(eeq->d_q, 0, sizeof(float) * atom_numbers);
@@ -125,9 +124,8 @@ void Initialize_Bond_Order(REAXFF_BOND_ORDER* bo, CONTROLLER* controller,
     controller->printf("START INITIALIZING REAXFF_BOND_ORDER (native H5)\n");
 
     const std::vector<float**> atom_arrays = {
-        &bo->h_ro_sigma, &bo->h_ro_pi,      &bo->h_ro_pi2,
-        &bo->h_valency, &bo->h_valency_val, &bo->h_b_o_131,
-        &bo->h_b_o_132, &bo->h_b_o_133};
+        &bo->h_ro_sigma,    &bo->h_ro_pi,   &bo->h_ro_pi2,  &bo->h_valency,
+        &bo->h_valency_val, &bo->h_b_o_131, &bo->h_b_o_132, &bo->h_b_o_133};
     for (float** pointer : atom_arrays)
     {
         Malloc_Safely((void**)pointer, sizeof(float) * ntypes);
@@ -146,10 +144,9 @@ void Initialize_Bond_Order(REAXFF_BOND_ORDER* bo, CONTROLLER* controller,
     }
 
     const std::vector<float**> pair_arrays = {
-        &bo->h_bo_1,   &bo->h_bo_2,   &bo->h_bo_3,   &bo->h_bo_4,
-        &bo->h_bo_5,   &bo->h_bo_6,   &bo->h_ovc,    &bo->h_v13cor,
-        &bo->h_p_boc3, &bo->h_p_boc4, &bo->h_p_boc5, &bo->h_r_s,
-        &bo->h_r_p,    &bo->h_r_pp};
+        &bo->h_bo_1,   &bo->h_bo_2, &bo->h_bo_3,   &bo->h_bo_4,   &bo->h_bo_5,
+        &bo->h_bo_6,   &bo->h_ovc,  &bo->h_v13cor, &bo->h_p_boc3, &bo->h_p_boc4,
+        &bo->h_p_boc5, &bo->h_r_s,  &bo->h_r_p,    &bo->h_r_pp};
     for (float** pointer : pair_arrays)
     {
         Malloc_Safely((void**)pointer, sizeof(float) * npairs);
@@ -160,12 +157,9 @@ void Initialize_Bond_Order(REAXFF_BOND_ORDER* bo, CONTROLLER* controller,
         for (int j = 0; j < ntypes; ++j)
         {
             const int index = i * ntypes + j;
-            bo->h_p_boc3[index] =
-                sqrtf(bo->h_b_o_132[i] * bo->h_b_o_132[j]);
-            bo->h_p_boc4[index] =
-                sqrtf(bo->h_b_o_131[i] * bo->h_b_o_131[j]);
-            bo->h_p_boc5[index] =
-                sqrtf(bo->h_b_o_133[i] * bo->h_b_o_133[j]);
+            bo->h_p_boc3[index] = sqrtf(bo->h_b_o_132[i] * bo->h_b_o_132[j]);
+            bo->h_p_boc4[index] = sqrtf(bo->h_b_o_131[i] * bo->h_b_o_131[j]);
+            bo->h_p_boc5[index] = sqrtf(bo->h_b_o_133[i] * bo->h_b_o_133[j]);
             bo->h_r_s[index] = 0.5f * (bo->h_ro_sigma[i] + bo->h_ro_sigma[j]);
             bo->h_r_p[index] = 0.5f * (bo->h_ro_pi[i] + bo->h_ro_pi[j]);
             bo->h_r_pp[index] = 0.5f * (bo->h_ro_pi2[i] + bo->h_ro_pi2[j]);
@@ -229,20 +223,16 @@ void Initialize_Bond_Order(REAXFF_BOND_ORDER* bo, CONTROLLER* controller,
                          sizeof(float) * atom_numbers);
     Device_Malloc_Safely((void**)&bo->d_CdDelta_prime,
                          sizeof(float) * atom_numbers);
-    Device_Malloc_Safely((void**)&bo->d_bond_count,
-                         sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&bo->d_bond_count, sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&bo->d_bond_offset,
                          sizeof(int) * (atom_numbers + 1));
     Device_Malloc_Safely((void**)&bo->d_bond_nbr,
                          sizeof(int) * 2 * bo->max_bonds);
     Device_Malloc_Safely((void**)&bo->d_bond_idx,
                          sizeof(int) * 2 * bo->max_bonds);
-    Device_Malloc_Safely((void**)&bo->d_fill_count,
-                         sizeof(int) * atom_numbers);
-    Device_Malloc_Safely((void**)&bo->d_pair_i,
-                         sizeof(int) * bo->max_bonds);
-    Device_Malloc_Safely((void**)&bo->d_pair_j,
-                         sizeof(int) * bo->max_bonds);
+    Device_Malloc_Safely((void**)&bo->d_fill_count, sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&bo->d_pair_i, sizeof(int) * bo->max_bonds);
+    Device_Malloc_Safely((void**)&bo->d_pair_j, sizeof(int) * bo->max_bonds);
     Device_Malloc_Safely((void**)&bo->d_pair_distances,
                          sizeof(float) * bo->max_bonds);
     Device_Malloc_Safely((void**)&bo->d_num_pairs_ptr, sizeof(int));
@@ -290,7 +280,8 @@ void Initialize_Bond(REAXFF_BOND* bond, CONTROLLER* controller,
 {
     constexpr int stride = 5;
     const int ntypes = static_cast<int>(definition.atoms.size());
-    const std::size_t count = static_cast<std::size_t>(ntypes) * ntypes * stride;
+    const std::size_t count =
+        static_cast<std::size_t>(ntypes) * ntypes * stride;
     bond->atom_numbers = atom_numbers;
     bond->atom_type_numbers = ntypes;
     controller->printf("START INITIALIZING REAXFF BOND FORCE (native H5)\n");
@@ -328,7 +319,8 @@ void Initialize_VDW(REAXFF_VDW* vdw, CONTROLLER* controller,
 {
     constexpr int stride = 8;
     const int ntypes = static_cast<int>(definition.atoms.size());
-    const std::size_t count = static_cast<std::size_t>(ntypes) * ntypes * stride;
+    const std::size_t count =
+        static_cast<std::size_t>(ntypes) * ntypes * stride;
     vdw->atom_numbers = atom_numbers;
     vdw->atom_type_numbers = ntypes;
     vdw->p_vdw1 = definition.general[28];
@@ -339,8 +331,7 @@ void Initialize_VDW(REAXFF_VDW* vdw, CONTROLLER* controller,
     {
         for (int j = 0; j < ntypes; ++j)
         {
-            float* value =
-                vdw->h_twobody_params + (i * ntypes + j) * stride;
+            float* value = vdw->h_twobody_params + (i * ntypes + j) * stride;
             value[0] = 2.0f * sqrtf(definition.atoms[i].values[3] *
                                     definition.atoms[j].values[3]);
             value[1] = sqrtf(definition.atoms[i].values[4] *
@@ -439,8 +430,7 @@ void Initialize_Over_Under(REAXFF_OVER_UNDER* ovun, CONTROLLER* controller,
     COPY_OVUN_ARRAY(p_ovun1, npairs);
     COPY_OVUN_ARRAY(De_s, npairs);
 #undef COPY_OVUN_ARRAY
-    Device_Malloc_Safely((void**)&ovun->d_Delta,
-                         sizeof(float) * atom_numbers);
+    Device_Malloc_Safely((void**)&ovun->d_Delta, sizeof(float) * atom_numbers);
     Device_Malloc_Safely((void**)&ovun->d_Delta_boc,
                          sizeof(float) * atom_numbers);
     Device_Malloc_Safely((void**)&ovun->d_Delta_val,
@@ -487,10 +477,8 @@ void Initialize_Angle(REAXFF_VALENCE_ANGLE* angle, CONTROLLER* controller,
         angle->params.thb_cut =
             atof(controller->Command("REAXFF", "thb_cutoff"));
     }
-    angle->params.thb_cutsq =
-        angle->params.thb_cut * angle->params.thb_cut;
-    controller->printf(
-        "START INITIALIZING REAXFF VALENCE ANGLE (native H5)\n");
+    angle->params.thb_cutsq = angle->params.thb_cut * angle->params.thb_cut;
+    controller->printf("START INITIALIZING REAXFF VALENCE ANGLE (native H5)\n");
     controller->Step_Print_Initial("REAXFF_ANG", "%14.7e");
     controller->Step_Print_Initial("REAXFF_PEN", "%14.7e");
     controller->Step_Print_Initial("REAXFF_COA", "%14.7e");
@@ -530,8 +518,7 @@ void Initialize_Angle(REAXFF_VALENCE_ANGLE* angle, CONTROLLER* controller,
             entries_by_triplet[reverse].push_back(entry_index);
         }
     }
-    Malloc_Safely((void**)&angle->h_thbp_info,
-                  sizeof(REAXFF_THBP_Info) * n3);
+    Malloc_Safely((void**)&angle->h_thbp_info, sizeof(REAXFF_THBP_Info) * n3);
     memset(angle->h_thbp_info, 0, sizeof(REAXFF_THBP_Info) * n3);
     std::vector<REAXFF_THBP_Entry> sorted_entries;
     for (int index = 0; index < n3; ++index)
@@ -596,8 +583,8 @@ void Initialize_Torsion(REAXFF_TORSION* torsion, CONTROLLER* controller,
     std::vector<int> explicit_entry(n4, 0);
     std::vector<REAXFF_TORSION_Entry> all_entries;
     std::map<int, std::vector<int>> entries_by_quartet;
-    const auto quartet_index = [ntypes](const int a, const int b, const int c,
-                                        const int d)
+    const auto quartet_index =
+        [ntypes](const int a, const int b, const int c, const int d)
     { return ((a * ntypes + b) * ntypes + c) * ntypes + d; };
     for (const auto& item : pending)
     {
@@ -622,10 +609,10 @@ void Initialize_Torsion(REAXFF_TORSION* torsion, CONTROLLER* controller,
         {
             for (int outer_b = 0; outer_b < ntypes; ++outer_b)
             {
-                const int direct = quartet_index(
-                    outer_a, item.type[1], item.type[2], outer_b);
-                const int reverse = quartet_index(
-                    outer_b, item.type[2], item.type[1], outer_a);
+                const int direct =
+                    quartet_index(outer_a, item.type[1], item.type[2], outer_b);
+                const int reverse =
+                    quartet_index(outer_b, item.type[2], item.type[1], outer_a);
                 if (!explicit_entry[direct])
                     entries_by_quartet[direct] = {entry_index};
                 if (!explicit_entry[reverse])
@@ -657,14 +644,13 @@ void Initialize_Torsion(REAXFF_TORSION* torsion, CONTROLLER* controller,
     Device_Malloc_Safely((void**)&torsion->d_energy_cot_sum, sizeof(float));
     torsion->thb_cut = 0.001f;
     if (controller->Command_Exist("REAXFF", "thb_cutoff"))
-        torsion->thb_cut =
-            atof(controller->Command("REAXFF", "thb_cutoff"));
+        torsion->thb_cut = atof(controller->Command("REAXFF", "thb_cutoff"));
     torsion->is_initialized = 1;
 }
 
-void Initialize_Hydrogen_Bond(
-    REAXFF_HYDROGEN_BOND* hb, CONTROLLER* controller,
-    const NativeReaxFFDefinition& definition, const int atom_numbers)
+void Initialize_Hydrogen_Bond(REAXFF_HYDROGEN_BOND* hb, CONTROLLER* controller,
+                              const NativeReaxFFDefinition& definition,
+                              const int atom_numbers)
 {
     const int ntypes = static_cast<int>(definition.atoms.size());
     const int n3 = ntypes * ntypes * ntypes;
@@ -714,10 +700,10 @@ void Initialize_Hydrogen_Bond(
 
 }  // namespace
 
-void Initial_ReaxFF_From_Native(
-    REAXFF* reaxff, CONTROLLER* controller,
-    const NativeReaxFFDefinition& definition, const int atom_numbers,
-    const float cutoff, float* cutoff_full, bool* need_full_nl_flag)
+void Initial_ReaxFF_From_Native(REAXFF* reaxff, CONTROLLER* controller,
+                                const NativeReaxFFDefinition& definition,
+                                const int atom_numbers, const float cutoff,
+                                float* cutoff_full, bool* need_full_nl_flag)
 {
     (void)cutoff;
     (void)cutoff_full;

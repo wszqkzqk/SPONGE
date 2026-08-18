@@ -17,7 +17,7 @@ struct ANDERSEN_THERMOSTAT_INFORMATION
 
     int update_interval = 0;  // 更新间隔
 
-    int float4_numbers;                  // 存储随机数的长度
+    int float4_numbers;  // 存储随机数的长度
     std::uint64_t random_seed = 0;
     std::uint64_t random_invocation_count = 0;
     VECTOR* random_vel =

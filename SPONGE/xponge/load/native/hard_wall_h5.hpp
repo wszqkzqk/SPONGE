@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <array>
 #include <cmath>
@@ -58,8 +58,8 @@ class NativeHardWallH5Reader
             NativeHardWallDefinition result;
             result.bounds_low =
                 Read_Bounds("/wall/hard/bounds_low", "hard-wall low bounds");
-            result.bounds_high = Read_Bounds("/wall/hard/bounds_high",
-                                             "hard-wall high bounds");
+            result.bounds_high =
+                Read_Bounds("/wall/hard/bounds_high", "hard-wall high bounds");
             result.allow_npt = Read_Allow_Npt();
             Validate(result);
             *definition = result;
@@ -147,15 +147,17 @@ class NativeHardWallH5Reader
             const float high = definition.bounds_high[axis];
             if (Is_Nan(low) || Is_Nan(high))
             {
-                throw std::runtime_error("hard-wall bounds must not contain NaN");
+                throw std::runtime_error(
+                    "hard-wall bounds must not contain NaN");
             }
             if (!(low < high))
             {
                 throw std::runtime_error(
-                    "each hard-wall low bound must be smaller than its high bound");
+                    "each hard-wall low bound must be smaller than its high "
+                    "bound");
             }
-            has_finite_bound = has_finite_bound || Is_Finite(low) ||
-                               Is_Finite(high);
+            has_finite_bound =
+                has_finite_bound || Is_Finite(low) || Is_Finite(high);
         }
         if (!has_finite_bound)
         {
@@ -174,8 +176,7 @@ class NativeHardWallH5Reader
     static bool Is_Nan(float value)
     {
         const std::uint32_t bits = Float_Bits(value);
-        return (bits & 0x7f800000U) == 0x7f800000U &&
-               (bits & 0x007fffffU) != 0;
+        return (bits & 0x7f800000U) == 0x7f800000U && (bits & 0x007fffffU) != 0;
     }
 
     static bool Is_Finite(float value)

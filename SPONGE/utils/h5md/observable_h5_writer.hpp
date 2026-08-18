@@ -160,8 +160,8 @@ class ObservableH5Writer
                    chain_length) &&
                stream_watermarks_.Define("nose_hoover_chain") &&
                writer_.Write_Output_Stream_Descriptor(
-                   "nose_hoover_chain", "module_frames",
-                   module_path::nhc_step, module_path::nhc_time,
+                   "nose_hoover_chain", "module_frames", module_path::nhc_step,
+                   module_path::nhc_time,
                    {module_path::nhc_coordinate_value,
                     module_path::nhc_velocity_value});
     }
@@ -301,8 +301,8 @@ class ObservableH5Writer
                                           std::size_t atom_count)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return Mark_Dirty_If(module_writer.Write_Reaxff_Eeq_Charge_Snapshot(
-            values, atom_count));
+        return Mark_Dirty_If(
+            module_writer.Write_Reaxff_Eeq_Charge_Snapshot(values, atom_count));
     }
 
     bool Write_Mdinfo_Text(const std::string& text)

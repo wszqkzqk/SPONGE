@@ -214,20 +214,21 @@ class RestartH5Reader
                     result.rng_state_text[module_name] =
                         Read_String(Restart_Rng_State_Path(module_name));
                 }
-                for (const auto& module_name :
-                     List_Group_Children(path::restart_rng_state,
-                                         HighFive::ObjectType::Group))
+                for (const auto& module_name : List_Group_Children(
+                         path::restart_rng_state, HighFive::ObjectType::Group))
                 {
                     const std::string schema_path =
                         Restart_Rng_State_Component_Path(module_name,
                                                          "schema_version");
                     const std::string engine_path =
                         Restart_Rng_State_Component_Path(module_name, "engine");
-                    const std::string words_path = Restart_Rng_State_Component_Path(
-                        module_name, "state_words");
+                    const std::string words_path =
+                        Restart_Rng_State_Component_Path(module_name,
+                                                         "state_words");
                     RestartRngState rng;
-                    rng.state_schema_version = Read_Numeric_Single<std::int64_t>(
-                        schema_path, "typed RNG state schema version");
+                    rng.state_schema_version =
+                        Read_Numeric_Single<std::int64_t>(
+                            schema_path, "typed RNG state schema version");
                     rng.engine = Read_String(engine_path);
                     const auto dimensions = Require_Dimensions(
                         words_path, {0, 0}, "typed RNG state words");
@@ -262,7 +263,8 @@ class RestartH5Reader
                         Restart_Thermostat_State_Root(module_name),
                         &text_states, &float_states, &integer_states);
                     if (!text_states.empty())
-                        result.thermostat_text_states[module_name] = text_states;
+                        result.thermostat_text_states[module_name] =
+                            text_states;
                     if (!float_states.empty())
                         result.thermostat_float_states[module_name] =
                             float_states;
@@ -281,12 +283,13 @@ class RestartH5Reader
                     std::map<std::string, std::vector<std::int64_t>>
                         integer_states;
                     Read_Named_Dynamic_State_Group(
-                        Restart_Barostat_State_Root(module_name),
-                        &text_states, &float_states, &integer_states);
+                        Restart_Barostat_State_Root(module_name), &text_states,
+                        &float_states, &integer_states);
                     if (!text_states.empty())
                         result.barostat_text_states[module_name] = text_states;
                     if (!float_states.empty())
-                        result.barostat_float_states[module_name] = float_states;
+                        result.barostat_float_states[module_name] =
+                            float_states;
                     if (!integer_states.empty())
                         result.barostat_integer_states[module_name] =
                             integer_states;
@@ -571,9 +574,8 @@ class RestartH5Reader
     }
 
     template <typename T>
-    std::vector<T> Read_All_Numeric(
-        const std::string& dataset_path,
-        const std::vector<std::size_t>& dimensions)
+    std::vector<T> Read_All_Numeric(const std::string& dataset_path,
+                                    const std::vector<std::size_t>& dimensions)
     {
         const std::size_t count = dimensions.empty() ? 1 : Product(dimensions);
         std::vector<T> values(count);
@@ -581,8 +583,8 @@ class RestartH5Reader
         if (H5Dread(dataset.getId(), Native_H5_Type<T>(), H5S_ALL, H5S_ALL,
                     H5P_DEFAULT, values.data()) < 0)
         {
-            throw std::runtime_error("failed to read restart state dataset at " +
-                                     dataset_path);
+            throw std::runtime_error(
+                "failed to read restart state dataset at " + dataset_path);
         }
         return values;
     }
@@ -701,16 +703,16 @@ class RestartH5Reader
                 }
                 else
                 {
-                    const auto values = Read_All_Numeric<std::int8_t>(
-                        dataset_path, dimensions);
+                    const auto values =
+                        Read_All_Numeric<std::int8_t>(dataset_path, dimensions);
                     hash->Add_Numeric(dataset_path, dimensions, values.data(),
                                       values.size());
                 }
                 return;
             }
         }
-        throw std::runtime_error(
-            "unsupported restart state dataset type at " + dataset_path);
+        throw std::runtime_error("unsupported restart state dataset type at " +
+                                 dataset_path);
     }
 
     std::string Compute_State_Hash_Impl()
@@ -719,8 +721,8 @@ class RestartH5Reader
         std::vector<std::string> paths;
         for (const char* particle_path :
              {path::particles_all_step, path::particles_all_time,
-              path::position_value, path::velocity_value,
-              path::box_edges_value, path::force_value})
+              path::position_value, path::velocity_value, path::box_edges_value,
+              path::force_value})
         {
             if (Exists(particle_path)) paths.push_back(particle_path);
         }

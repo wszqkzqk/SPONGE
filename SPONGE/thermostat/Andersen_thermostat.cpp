@@ -160,8 +160,8 @@ void ANDERSEN_THERMOSTAT_INFORMATION::Initial(CONTROLLER* controller,
         random_seed = atoi(controller[0].Command("thermostat", "seed"));
     }
     controller[0].printf("    random seed is %d\n", random_seed);
-    this->random_seed = static_cast<std::uint64_t>(
-        static_cast<std::uint32_t>(random_seed));
+    this->random_seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(random_seed));
     random_invocation_count = 0;
     float4_numbers = (3 * atom_numbers + 3) / 4;
     Device_Malloc_Safely((void**)&random_vel, sizeof(float4) * float4_numbers);
@@ -277,23 +277,21 @@ void ANDERSEN_THERMOSTAT_INFORMATION::MD_Iteration_Leap_Frog(
     {
         if (max_velocity <= 0)
         {
-            Launch_Device_Kernel(MD_Iteration_Leap_Frog_With_Andersen,
-                                 (local_atom_numbers + 32 - 1) / 32, 32, 0,
-                                 NULL, random_seed, random_invocation_count,
-                                 (float*)random_vel,
-                                 local_atom_numbers, 0.5f * dt, dt,
-                                 d_mass_inverse_local, d_factor_local, vel, crd,
-                                 frc, acc, random_vel);
+            Launch_Device_Kernel(
+                MD_Iteration_Leap_Frog_With_Andersen,
+                (local_atom_numbers + 32 - 1) / 32, 32, 0, NULL, random_seed,
+                random_invocation_count, (float*)random_vel, local_atom_numbers,
+                0.5f * dt, dt, d_mass_inverse_local, d_factor_local, vel, crd,
+                frc, acc, random_vel);
         }
         else
         {
             Launch_Device_Kernel(
                 MD_Iteration_Leap_Frog_With_Andersen_With_Max_Velocity,
                 (local_atom_numbers + 32 - 1) / 32, 32, 0, NULL, random_seed,
-                random_invocation_count, (float*)random_vel,
-                local_atom_numbers, 0.5f * dt, dt,
-                d_mass_inverse_local, d_factor_local, vel, crd, frc, acc,
-                random_vel, max_velocity);
+                random_invocation_count, (float*)random_vel, local_atom_numbers,
+                0.5f * dt, dt, d_mass_inverse_local, d_factor_local, vel, crd,
+                frc, acc, random_vel, max_velocity);
         }
         random_invocation_count += 1;
     }

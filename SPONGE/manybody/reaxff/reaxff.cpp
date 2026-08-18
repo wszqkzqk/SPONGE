@@ -140,8 +140,7 @@ void REAXFF::Step_Print(CONTROLLER* controller, const float* d_charge,
     eeq.Step_Print(controller);
     if (eeq.is_initialized && CONTROLLER::MPI_rank == 0)
     {
-        eeq.Capture_Charges(d_charge, &h_eeq_charges,
-                            write_legacy_eeq_charges);
+        eeq.Capture_Charges(d_charge, &h_eeq_charges, write_legacy_eeq_charges);
     }
     else
     {

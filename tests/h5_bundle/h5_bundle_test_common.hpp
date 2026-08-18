@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -73,36 +73,36 @@ struct TestFailure : std::runtime_error
     using std::runtime_error::runtime_error;
 };
 
-#define REQUIRE_TRUE(expr)                                                   \
-    do                                                                       \
-    {                                                                        \
-        if (!(expr))                                                         \
-        {                                                                    \
-            std::ostringstream require_message;                              \
-            require_message << __FILE__ << ":" << __LINE__                  \
-                            << " requirement failed: " #expr;               \
-            throw TestFailure(require_message.str());                        \
-        }                                                                    \
+#define REQUIRE_TRUE(expr)                                    \
+    do                                                        \
+    {                                                         \
+        if (!(expr))                                          \
+        {                                                     \
+            std::ostringstream require_message;               \
+            require_message << __FILE__ << ":" << __LINE__    \
+                            << " requirement failed: " #expr; \
+            throw TestFailure(require_message.str());         \
+        }                                                     \
     } while (false)
 
-#define REQUIRE_EQ(lhs, rhs)                                                 \
-    do                                                                       \
-    {                                                                        \
-        const auto require_lhs = (lhs);                                      \
-        const auto require_rhs = (rhs);                                      \
-        if (!(require_lhs == require_rhs))                                   \
-        {                                                                    \
-            std::ostringstream require_message;                              \
-            require_message << __FILE__ << ":" << __LINE__                  \
-                            << " equality failed: " #lhs " == " #rhs;      \
-            throw TestFailure(require_message.str());                        \
-        }                                                                    \
+#define REQUIRE_EQ(lhs, rhs)                                          \
+    do                                                                \
+    {                                                                 \
+        const auto require_lhs = (lhs);                               \
+        const auto require_rhs = (rhs);                               \
+        if (!(require_lhs == require_rhs))                            \
+        {                                                             \
+            std::ostringstream require_message;                       \
+            require_message << __FILE__ << ":" << __LINE__            \
+                            << " equality failed: " #lhs " == " #rhs; \
+            throw TestFailure(require_message.str());                 \
+        }                                                             \
     } while (false)
 
 namespace SpongeH5Test
 {
-using SpongeH5MD::DataType;
 using SpongeH5MD::DatasetSpec;
+using SpongeH5MD::DataType;
 using SpongeH5MD::FileStatus;
 using SpongeH5MD::VirtualDatasetSource;
 using SpongeH5MD::WriterBackend;
@@ -138,9 +138,9 @@ struct BackendLog
 class MockBackend : public WriterBackend
 {
    public:
-    explicit MockBackend(std::shared_ptr<BackendLog> log)
-        : log_(std::move(log))
-    {}
+    explicit MockBackend(std::shared_ptr<BackendLog> log) : log_(std::move(log))
+    {
+    }
 
     bool Open(const WriterOptions& options) override
     {
@@ -211,8 +211,8 @@ class MockBackend : public WriterBackend
         return true;
     }
 
-    bool Append_Int64(const std::string& path, const int64_t*, std::size_t count)
-        override
+    bool Append_Int64(const std::string& path, const int64_t*,
+                      std::size_t count) override
     {
         return Append(path, count);
     }
@@ -237,8 +237,7 @@ class MockBackend : public WriterBackend
             log_->last_error = "mock float32 snapshot data is empty: " + path;
             return false;
         }
-        log_->float32_snapshots[path] =
-            std::vector<float>(data, data + count);
+        log_->float32_snapshots[path] = std::vector<float>(data, data + count);
         return true;
     }
 

@@ -77,8 +77,7 @@ inline bool Has_Supported_Dynamic_State(
         state.rng_states.count("bussi_thermostat") != 0 ||
         state.rng_state_text.count("bussi_thermostat") != 0;
     const bool has_bussi_state =
-        has_bussi_rng &&
-        bussi_state != state.thermostat_float_states.end() &&
+        has_bussi_rng && bussi_state != state.thermostat_float_states.end() &&
         bussi_state->second.count("lambda") != 0 &&
         bussi_state->second.at("lambda").size() == 1;
     const auto pressure_state =
@@ -164,8 +163,8 @@ inline std::string Unsupported_Dynamic_State_Reason(
         else if (module.first == "monte_carlo_barostat")
         {
             std::uint64_t value = 0;
-            if (!SpongeRestartRng::Decode_Splitmix64_State(
-                    module.second, &value, &error))
+            if (!SpongeRestartRng::Decode_Splitmix64_State(module.second,
+                                                           &value, &error))
             {
                 return module.first + ": " + error;
             }
@@ -218,8 +217,7 @@ inline std::string Unsupported_Dynamic_State_Reason(
     }
     for (const auto& module : state.barostat_integer_states)
     {
-        if (!module.second.empty() &&
-            module.first != "monte_carlo_barostat")
+        if (!module.second.empty() && module.first != "monte_carlo_barostat")
         {
             return "unsupported integer barostat dynamic state module: " +
                    module.first;
@@ -238,8 +236,7 @@ inline bool Has_Supported_Metadynamics_State(
     const SpongeH5MD::RestartMetadynamicsState& state)
 {
     if (state.name.empty()) return false;
-    return state.has_typed_state ||
-           state.text_states.count("hills") != 0 ||
+    return state.has_typed_state || state.text_states.count("hills") != 0 ||
            state.text_states.count("history") != 0 ||
            state.text_states.count("edge") != 0 ||
            state.text_states.count("potential_export") != 0 ||

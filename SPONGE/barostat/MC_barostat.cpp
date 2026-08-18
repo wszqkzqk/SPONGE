@@ -13,8 +13,7 @@ std::uint64_t MC_BAROSTAT_INFORMATION::Next_Random_U64()
 
 float MC_BAROSTAT_INFORMATION::Next_Uniform()
 {
-    return static_cast<float>(Next_Random_U64() >> 40) *
-           (1.0f / 16777216.0f);
+    return static_cast<float>(Next_Random_U64() >> 40) * (1.0f / 16777216.0f);
 }
 
 int MC_BAROSTAT_INFORMATION::Next_Random_Index(int upper_bound)
@@ -198,8 +197,8 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
                               "MC_BAROSTAT_INFORMATION::Initial");
         random_seed = atoi(controller[0].Command(this->module_name, "seed"));
     }
-    random_state = static_cast<std::uint64_t>(
-        static_cast<std::uint32_t>(random_seed));
+    random_state =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(random_seed));
     controller->printf("    random seed is %d\n", random_seed);
     for (int dimension = 0; dimension < 3; ++dimension)
     {
@@ -486,8 +485,8 @@ bool MC_BAROSTAT_INFORMATION::Apply_H5_Restart_State(
     const std::string module = "monte_carlo_barostat";
     const auto rng = state.rng_states.find(module);
     if (rng == state.rng_states.end() ||
-        !SpongeRestartRng::Decode_Splitmix64_State(
-            rng->second, &random_state, error_message))
+        !SpongeRestartRng::Decode_Splitmix64_State(rng->second, &random_state,
+                                                   error_message))
     {
         if (rng == state.rng_states.end())
         {
@@ -508,10 +507,9 @@ bool MC_BAROSTAT_INFORMATION::Apply_H5_Restart_State(
     const auto totals = integers->second.find("total_count_int64");
     const auto accepts = integers->second.find("accept_count_int64");
     if (delta == floats->second.end() || rates == floats->second.end() ||
-        totals == integers->second.end() ||
-        accepts == integers->second.end() || delta->second.size() != 3 ||
-        rates->second.size() != 3 || totals->second.size() != 3 ||
-        accepts->second.size() != 3)
+        totals == integers->second.end() || accepts == integers->second.end() ||
+        delta->second.size() != 3 || rates->second.size() != 3 ||
+        totals->second.size() != 3 || accepts->second.size() != 3)
     {
         return fail("Monte Carlo barostat adaptive state has invalid shape");
     }
@@ -529,10 +527,8 @@ bool MC_BAROSTAT_INFORMATION::Apply_H5_Restart_State(
         }
         Delta_Box_Length_Max[dimension] = delta->second[dimension];
         accept_rate[dimension] = rates->second[dimension];
-        total_count[dimension] =
-            static_cast<int>(totals->second[dimension]);
-        accep_count[dimension] =
-            static_cast<int>(accepts->second[dimension]);
+        total_count[dimension] = static_cast<int>(totals->second[dimension]);
+        accep_count[dimension] = static_cast<int>(accepts->second[dimension]);
     }
     return true;
 }

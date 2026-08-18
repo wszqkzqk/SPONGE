@@ -732,12 +732,10 @@ void Require_VDS_Wrapper_Finalized(const std::filesystem::path& wrapper_path)
     REQUIRE_TRUE(!shard_paths.empty());
 }
 
-void Require_Reaxff_Eeq_Charge_Snapshot(
-    const std::filesystem::path& h5_path)
+void Require_Reaxff_Eeq_Charge_Snapshot(const std::filesystem::path& h5_path)
 {
     HighFive::File file(h5_path.string(), HighFive::File::ReadOnly);
-    REQUIRE_TRUE(file.exist(
-        SpongeH5MD::module_path::reaxff_eeq_charges_value));
+    REQUIRE_TRUE(file.exist(SpongeH5MD::module_path::reaxff_eeq_charges_value));
     const auto charges = Read_Float32_Vector(
         file, SpongeH5MD::module_path::reaxff_eeq_charges_value);
     REQUIRE_TRUE(!charges.empty());
@@ -813,8 +811,7 @@ void Run_Manybody_Runtime_Parity(const std::filesystem::path& sponge_executable)
         legacy_source, "mdin.spg.toml", false, false);
     Require_Manybody_Not_Scrubbed(baseline);
     Run_SPONGE(sponge_executable, baseline);
-    SpongeH5InputMatrix::Require_Path_Exists(baseline.root /
-                                             "eeq_charges.txt");
+    SpongeH5InputMatrix::Require_Path_Exists(baseline.root / "eeq_charges.txt");
     Require_Mdout_Columns_Equivalent(baseline.mdout, baseline.mdout,
                                      Manybody_Columns());
     Require_Manybody_Results_Nontrivial(baseline.mdout);
@@ -857,8 +854,8 @@ void Run_Manybody_Runtime_Parity(const std::filesystem::path& sponge_executable)
             sidecar_source, "mdin.bundled.spg.toml", true, vds);
         Require_Manybody_Not_Scrubbed(bundled_out);
         Run_SPONGE(sponge_executable, bundled_out);
-        REQUIRE_TRUE(!std::filesystem::exists(bundled_out.root /
-                                              "eeq_charges.txt"));
+        REQUIRE_TRUE(
+            !std::filesystem::exists(bundled_out.root / "eeq_charges.txt"));
         Require_Mdout_Columns_Equivalent(baseline.mdout, bundled_out.mdout,
                                          Manybody_Columns());
         Require_Manybody_Results_Nontrivial(bundled_out.mdout);
@@ -905,23 +902,20 @@ void Run_Manybody_Runtime_Parity(const std::filesystem::path& sponge_executable)
         Require_H5_Observable_Columns_Match_Mdout(
             pure_bundled_out.h5_observable, pure_bundled_out.mdout, {0, 1},
             {1.0, 1.001}, Manybody_Columns());
-        Require_Reaxff_Eeq_Charge_Snapshot(
-            pure_bundled_out.h5_observable);
+        Require_Reaxff_Eeq_Charge_Snapshot(pure_bundled_out.h5_observable);
         SpongeH5InputMatrix::Require_Path_Exists(
             pure_bundled_out.h5_trajectory);
         if (vds)
         {
             Require_VDS_Wrapper_Finalized(pure_bundled_out.h5_trajectory);
-            Require_Reaxff_Eeq_Charge_Snapshot(
-                pure_bundled_out.h5_trajectory);
+            Require_Reaxff_Eeq_Charge_Snapshot(pure_bundled_out.h5_trajectory);
         }
         else
         {
             Require_H5_Observable_Columns_Match_Mdout(
                 pure_bundled_out.h5_trajectory, pure_bundled_out.mdout, {0, 1},
                 {1.0, 1.001}, Manybody_Columns());
-            Require_Reaxff_Eeq_Charge_Snapshot(
-                pure_bundled_out.h5_trajectory);
+            Require_Reaxff_Eeq_Charge_Snapshot(pure_bundled_out.h5_trajectory);
         }
     }
 

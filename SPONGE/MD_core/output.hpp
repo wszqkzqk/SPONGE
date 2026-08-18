@@ -150,8 +150,7 @@ bool Write_H5_Topology_Compatibility_If_Present(CONTROLLER* controller,
 
 bool Resolve_H5_Restart_Lineage(
     CONTROLLER* controller,
-    SpongeH5OutputPlan::RestartH5OutputPlan* restart_plan,
-    std::string* error)
+    SpongeH5OutputPlan::RestartH5OutputPlan* restart_plan, std::string* error)
 {
     constexpr const char* topology_key = "input_h5_topology_path";
     constexpr const char* protocol_key = "input_h5_protocol_path";
@@ -176,8 +175,9 @@ bool Resolve_H5_Restart_Lineage(
         {
             if (error != NULL)
             {
-                *error = "explicit restart lineage does not match the input "
-                         "H5 topology bundle";
+                *error =
+                    "explicit restart lineage does not match the input "
+                    "H5 topology bundle";
             }
             return false;
         }
@@ -198,8 +198,9 @@ bool Resolve_H5_Restart_Lineage(
         {
             if (error != NULL)
             {
-                *error = "input H5 protocol topology_hash does not match "
-                         "restart lineage";
+                *error =
+                    "input H5 protocol topology_hash does not match "
+                    "restart lineage";
             }
             return false;
         }
@@ -208,8 +209,9 @@ bool Resolve_H5_Restart_Lineage(
         {
             if (error != NULL)
             {
-                *error = "explicit restart protocol_hash does not match the "
-                         "input H5 protocol bundle";
+                *error =
+                    "explicit restart protocol_hash does not match the "
+                    "input H5 protocol bundle";
             }
             return false;
         }
@@ -238,8 +240,9 @@ bool Resolve_H5_Restart_Lineage(
     {
         if (error != NULL)
         {
-            *error = "H5 restart lineage hashes must use canonical "
-                     "sha256:<64 lowercase hex> encoding";
+            *error =
+                "H5 restart lineage hashes must use canonical "
+                "sha256:<64 lowercase hex> encoding";
         }
         return false;
     }
@@ -320,9 +323,9 @@ bool Write_H5_Restart_Dynamic_State_If_Present(
     {
         for (const auto& item : module.second)
         {
-            if (!writer->Write_Thermostat_State_Int64(
-                    module.first, item.first, item.second.data(),
-                    item.second.size()))
+            if (!writer->Write_Thermostat_State_Int64(module.first, item.first,
+                                                      item.second.data(),
+                                                      item.second.size()))
             {
                 return false;
             }
@@ -355,9 +358,9 @@ bool Write_H5_Restart_Dynamic_State_If_Present(
     {
         for (const auto& item : module.second)
         {
-            if (!writer->Write_Barostat_State_Int64(
-                    module.first, item.first, item.second.data(),
-                    item.second.size()))
+            if (!writer->Write_Barostat_State_Int64(module.first, item.first,
+                                                    item.second.data(),
+                                                    item.second.size()))
             {
                 return false;
             }
@@ -1061,8 +1064,8 @@ void MD_INFORMATION::trajectory_output::Initial_H5_Reaxff(
                 h5_trajectory_vds_enabled
                     ? h5_vds_trajectory_writer
                           ->Ensure_Reaxff_Eeq_Charge_Snapshot(eeq_atom_count)
-                    : h5_trajectory_writer
-                          ->Ensure_Reaxff_Eeq_Charge_Snapshot(eeq_atom_count);
+                    : h5_trajectory_writer->Ensure_Reaxff_Eeq_Charge_Snapshot(
+                          eeq_atom_count);
             if (!ok)
             {
                 const std::string error =
@@ -1080,8 +1083,7 @@ void MD_INFORMATION::trajectory_output::Initial_H5_Reaxff(
     if (h5_observable_enabled)
     {
         if (has_energy_terms &&
-            !h5_observable_writer->Ensure_Reaxff_Energy_Terms(
-                h5_reaxff_terms))
+            !h5_observable_writer->Ensure_Reaxff_Energy_Terms(h5_reaxff_terms))
         {
             controller->Throw_SPONGE_Error(
                 spongeErrorValueErrorCommand,
@@ -1428,11 +1430,10 @@ void MD_INFORMATION::trajectory_output::Write_H5_Reaxff_Eeq_Charge_Snapshot(
     if (values == NULL || atom_count == 0 ||
         atom_count != h5_reaxff_eeq_atom_count)
     {
-        controller->Throw_SPONGE_Error(
-            spongeErrorValueErrorCommand,
-            "MD_INFORMATION::trajectory_output::"
-            "Write_H5_Reaxff_Eeq_Charge_Snapshot",
-            "invalid ReaxFF EEQ charge snapshot");
+        controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand,
+                                       "MD_INFORMATION::trajectory_output::"
+                                       "Write_H5_Reaxff_Eeq_Charge_Snapshot",
+                                       "invalid ReaxFF EEQ charge snapshot");
     }
     if (h5_trajectory_enabled)
     {
@@ -1457,7 +1458,7 @@ void MD_INFORMATION::trajectory_output::Write_H5_Reaxff_Eeq_Charge_Snapshot(
     }
     if (h5_observable_enabled &&
         !h5_observable_writer->Write_Reaxff_Eeq_Charge_Snapshot(values,
-                                                                 atom_count))
+                                                                atom_count))
     {
         controller->Throw_SPONGE_Error(
             spongeErrorValueErrorCommand,

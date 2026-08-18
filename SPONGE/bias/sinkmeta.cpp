@@ -2338,9 +2338,8 @@ bool Meta_State_Almost_Equal(const float lhs, const float rhs)
 }
 }  // namespace
 
-bool META::Export_H5_Restart_State(
-    SpongeH5MD::RestartMetadynamicsState* state,
-    std::string* error_message)
+bool META::Export_H5_Restart_State(SpongeH5MD::RestartMetadynamicsState* state,
+                                   std::string* error_message)
 {
     if (state == NULL)
     {
@@ -2377,8 +2376,7 @@ bool META::Export_H5_Restart_State(
     if (mscatter != NULL)
     {
         mscatter->Sync_To_Host();
-        result.scatter_count =
-            static_cast<std::size_t>(mscatter->num_points);
+        result.scatter_count = static_cast<std::size_t>(mscatter->num_points);
         result.scatter_position = mscatter->coordinates_flat;
         result.scatter_potential = mscatter->potential;
         result.scatter_force = mscatter->force;
@@ -2396,8 +2394,7 @@ bool META::Export_H5_Restart_State(
             hill.periods_.size() != result.ndim)
         {
             if (error_message != NULL)
-                *error_message =
-                    "metadynamics hill dimension is inconsistent";
+                *error_message = "metadynamics hill dimension is inconsistent";
             return false;
         }
         result.hill_center.insert(result.hill_center.end(),
@@ -2445,27 +2442,28 @@ bool META::Apply_H5_Restart_State(
     }
     if (state.name != h5_object_name)
     {
-        return fail("metadynamics restart object does not match the active "
-                    "protocol object");
+        return fail(
+            "metadynamics restart object does not match the active "
+            "protocol object");
     }
     if (state.ndim != static_cast<std::size_t>(ndim) ||
         state.grid_count.size() != state.ndim ||
         state.grid_min.size() != state.ndim ||
         state.grid_max.size() != state.ndim)
     {
-        return fail("metadynamics restart grid dimension does not match the "
-                    "active protocol");
+        return fail(
+            "metadynamics restart grid dimension does not match the "
+            "active protocol");
     }
     for (std::size_t dim = 0; dim < state.ndim; ++dim)
     {
         if (state.grid_count[dim] != mgrid->num_points[dim] ||
-            !Meta_State_Almost_Equal(state.grid_min[dim],
-                                     mgrid->lower[dim]) ||
-            !Meta_State_Almost_Equal(state.grid_max[dim],
-                                     mgrid->upper[dim]))
+            !Meta_State_Almost_Equal(state.grid_min[dim], mgrid->lower[dim]) ||
+            !Meta_State_Almost_Equal(state.grid_max[dim], mgrid->upper[dim]))
         {
-            return fail("metadynamics restart grid does not match the active "
-                        "protocol");
+            return fail(
+                "metadynamics restart grid does not match the active "
+                "protocol");
         }
     }
     if (!Meta_State_Is_Finite(state.grid_min) ||
@@ -2486,22 +2484,23 @@ bool META::Apply_H5_Restart_State(
         return fail("metadynamics restart contains a non-finite value");
     }
 
-    const std::size_t grid_size =
-        static_cast<std::size_t>(mgrid->total_size);
+    const std::size_t grid_size = static_cast<std::size_t>(mgrid->total_size);
     if (usegrid || mask > 0)
     {
         if (state.potential_value.size() != grid_size)
         {
-            return fail("metadynamics restart grid potential size does not "
-                        "match the active protocol");
+            return fail(
+                "metadynamics restart grid potential size does not "
+                "match the active protocol");
         }
         mgrid->potential = state.potential_value;
         if (!mgrid->force.empty())
         {
             if (state.potential_force.size() != grid_size * state.ndim)
             {
-                return fail("metadynamics restart grid force size does not "
-                            "match the active protocol");
+                return fail(
+                    "metadynamics restart grid force size does not "
+                    "match the active protocol");
             }
             mgrid->force = state.potential_force;
         }
@@ -2510,29 +2509,33 @@ bool META::Apply_H5_Restart_State(
     {
         if (state.edge_log_normalization.size() != grid_size)
         {
-            return fail("metadynamics restart edge normalization size does "
-                        "not match the active protocol");
+            return fail(
+                "metadynamics restart edge normalization size does "
+                "not match the active protocol");
         }
         mgrid->normal_lse = state.edge_log_normalization;
     }
     else if (do_negative)
     {
-        return fail("sink metadynamics restart requires typed edge "
-                    "normalization state");
+        return fail(
+            "sink metadynamics restart requires typed edge "
+            "normalization state");
     }
     if (!state.edge_normal_force.empty())
     {
         if (state.edge_normal_force.size() != grid_size * state.ndim)
         {
-            return fail("metadynamics restart edge force size does not match "
-                        "the active protocol");
+            return fail(
+                "metadynamics restart edge force size does not match "
+                "the active protocol");
         }
         mgrid->normal_force = state.edge_normal_force;
     }
     else if (do_negative)
     {
-        return fail("sink metadynamics restart requires typed edge force "
-                    "state");
+        return fail(
+            "sink metadynamics restart requires typed edge force "
+            "state");
     }
 
     if (use_scatter)
@@ -2540,22 +2543,22 @@ bool META::Apply_H5_Restart_State(
         if (mscatter == NULL ||
             state.scatter_count !=
                 static_cast<std::size_t>(mscatter->num_points) ||
-            state.scatter_position.size() !=
-                state.scatter_count * state.ndim ||
+            state.scatter_position.size() != state.scatter_count * state.ndim ||
             state.scatter_potential.size() != state.scatter_count ||
-            state.scatter_force.size() !=
-                state.scatter_count * state.ndim)
+            state.scatter_force.size() != state.scatter_count * state.ndim)
         {
-            return fail("metadynamics restart scatter state does not match "
-                        "the active protocol");
+            return fail(
+                "metadynamics restart scatter state does not match "
+                "the active protocol");
         }
         for (std::size_t i = 0; i < state.scatter_position.size(); ++i)
         {
             if (!Meta_State_Almost_Equal(state.scatter_position[i],
                                          mscatter->coordinates_flat[i]))
             {
-                return fail("metadynamics restart scatter point order does "
-                            "not match the active protocol");
+                return fail(
+                    "metadynamics restart scatter point order does "
+                    "not match the active protocol");
             }
         }
         mscatter->potential = state.scatter_potential;
@@ -2573,8 +2576,9 @@ bool META::Apply_H5_Restart_State(
     if ((!state.hill_inverse_width.empty() || !state.hill_period.empty()) &&
         !has_typed_hill_shape)
     {
-        return fail("metadynamics restart hill shape state has invalid "
-                    "dimensions");
+        return fail(
+            "metadynamics restart hill shape state has invalid "
+            "dimensions");
     }
     hills.clear();
     hills.reserve(state.hill_count);
@@ -2590,8 +2594,7 @@ bool META::Apply_H5_Restart_State(
                 state.hill_inverse_width.begin() + index * state.ndim,
                 state.hill_inverse_width.begin() + (index + 1) * state.ndim);
             period.assign(state.hill_period.begin() + index * state.ndim,
-                          state.hill_period.begin() +
-                              (index + 1) * state.ndim);
+                          state.hill_period.begin() + (index + 1) * state.ndim);
         }
         else
         {
@@ -2606,21 +2609,22 @@ bool META::Apply_H5_Restart_State(
     if (state.has_runtime_state)
     {
         const std::vector<float> runtime_values = {
-            state.potential_max, state.sum_max, state.new_max, state.exit_tag,
-            state.rct,           state.rbias,   state.bias,
-            state.minus_beta_f,  state.minus_beta_f_plus_v};
+            state.potential_max, state.sum_max,      state.new_max,
+            state.exit_tag,      state.rct,          state.rbias,
+            state.bias,          state.minus_beta_f, state.minus_beta_f_plus_v};
         if (!Meta_State_Is_Finite(runtime_values))
         {
-            return fail("metadynamics restart runtime state contains a "
-                        "non-finite value");
+            return fail(
+                "metadynamics restart runtime state contains a "
+                "non-finite value");
         }
         if (use_scatter &&
             (state.max_index < 0 ||
-             state.max_index >=
-                 static_cast<std::int64_t>(state.scatter_count)))
+             state.max_index >= static_cast<std::int64_t>(state.scatter_count)))
         {
-            return fail("metadynamics restart maximum scatter index is "
-                        "invalid");
+            return fail(
+                "metadynamics restart maximum scatter index is "
+                "invalid");
         }
         potential_max = state.potential_max;
         sum_max = state.sum_max;
@@ -2639,9 +2643,8 @@ bool META::Apply_H5_Restart_State(
             use_scatter ? mscatter->potential : mgrid->potential;
         if (!active_potential.empty())
         {
-            potential_max =
-                *std::max_element(active_potential.begin(),
-                                  active_potential.end());
+            potential_max = *std::max_element(active_potential.begin(),
+                                              active_potential.end());
         }
         if (!mgrid->normal_lse.empty())
         {

@@ -39,6 +39,152 @@ static void Amber_Require_Section_Size(const std::vector<std::string>& values,
     }
 }
 
+template <typename T>
+static void Amber_Require_Exact_Section_Size(const std::vector<T>& values,
+                                             std::size_t expected_count,
+                                             CONTROLLER* controller,
+                                             const char* error_by,
+                                             const char* section_name)
+{
+    if (values.size() != expected_count)
+    {
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorBadFileFormat, error_by,
+            "Reason:\n\tAMBER section %s has %zu values; expected %zu\n",
+            section_name, values.size(), expected_count);
+    }
+}
+
+static std::vector<int> Amber_Build_Canonical_Nonbonded_Map(
+    int atom_type_numbers, const std::vector<int>& nonbonded_parm_index,
+    bool has_nonbonded_parm_index, const std::vector<float>& hbond_pair_A,
+    const std::vector<float>& hbond_pair_B, CONTROLLER* controller,
+    const char* error_by)
+{
+    if (atom_type_numbers < 0)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat, error_by,
+            "Reason:\n\tthe AMBER atom type count cannot be negative\n");
+    }
+
+    std::size_t type_numbers = static_cast<std::size_t>(atom_type_numbers);
+    std::size_t pair_type_numbers = type_numbers * (type_numbers + 1) / 2;
+    std::vector<int> source_index(pair_type_numbers, -1);
+    if (!has_nonbonded_parm_index)
+    {
+        if (atom_type_numbers > 1)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorBadFileFormat, error_by,
+                "Reason:\n\tNONBONDED_PARM_INDEX is required when AMBER "
+                "NTYPES is greater than 1\n");
+        }
+        for (std::size_t i = 0; i < pair_type_numbers; i++)
+        {
+            source_index[i] = static_cast<int>(i);
+        }
+        return source_index;
+    }
+
+    Amber_Require_Exact_Section_Size(nonbonded_parm_index,
+                                     type_numbers * type_numbers, controller,
+                                     error_by, "NONBONDED_PARM_INDEX");
+    for (int high = 0; high < atom_type_numbers; high++)
+    {
+        for (int low = 0; low <= high; low++)
+        {
+            int forward = nonbonded_parm_index[static_cast<std::size_t>(low) *
+                                                   type_numbers +
+                                               high];
+            int reverse = nonbonded_parm_index[static_cast<std::size_t>(high) *
+                                                   type_numbers +
+                                               low];
+            if (forward != reverse)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tNONBONDED_PARM_INDEX is asymmetric for atom "
+                    "types %d and %d\n",
+                    low + 1, high + 1);
+            }
+            std::size_t canonical_index =
+                static_cast<std::size_t>(high) * (high + 1) / 2 + low;
+            if (forward > 0)
+            {
+                if (static_cast<std::size_t>(forward) > pair_type_numbers)
+                {
+                    controller->Throw_Formatted_SPONGE_Error(
+                        spongeErrorBadFileFormat, error_by,
+                        "Reason:\n\tNONBONDED_PARM_INDEX value %d for atom "
+                        "types %d and %d is outside [1, %zu]\n",
+                        forward, low + 1, high + 1, pair_type_numbers);
+                }
+                source_index[canonical_index] = forward - 1;
+                continue;
+            }
+            if (forward == 0)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tNONBONDED_PARM_INDEX contains zero for atom "
+                    "types %d and %d\n",
+                    low + 1, high + 1);
+            }
+
+            long long hbond_index_value = -static_cast<long long>(forward) - 1;
+            if (hbond_index_value < 0 ||
+                static_cast<std::size_t>(hbond_index_value) >=
+                    hbond_pair_A.size() ||
+                static_cast<std::size_t>(hbond_index_value) >=
+                    hbond_pair_B.size())
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tNONBONDED_PARM_INDEX value %d for atom types "
+                    "%d and %d does not select a valid HBOND parameter\n",
+                    forward, low + 1, high + 1);
+            }
+            std::size_t hbond_index =
+                static_cast<std::size_t>(hbond_index_value);
+            if (hbond_pair_A[hbond_index] != 0.0f ||
+                hbond_pair_B[hbond_index] != 0.0f)
+            {
+                controller->Throw_Formatted_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tAMBER 10-12 nonbonded terms are not supported; "
+                    "atom types %d and %d select nonzero HBOND parameter %zu\n",
+                    low + 1, high + 1, hbond_index + 1);
+            }
+            source_index[canonical_index] = -1;
+        }
+    }
+    return source_index;
+}
+
+static void Amber_Remap_LJ_Pair_Matrix(
+    const std::vector<float>& raw_pair_A, const std::vector<float>& raw_pair_B,
+    const std::vector<int>& source_index, std::vector<float>* pair_A,
+    std::vector<float>* pair_B, CONTROLLER* controller, const char* error_by,
+    const char* section_A, const char* section_B)
+{
+    Amber_Require_Exact_Section_Size(raw_pair_A, source_index.size(),
+                                     controller, error_by, section_A);
+    Amber_Require_Exact_Section_Size(raw_pair_B, source_index.size(),
+                                     controller, error_by, section_B);
+    pair_A->assign(source_index.size(), 0.0f);
+    pair_B->assign(source_index.size(), 0.0f);
+    for (std::size_t i = 0; i < source_index.size(); i++)
+    {
+        int source = source_index[i];
+        if (source >= 0)
+        {
+            pair_A->at(i) = raw_pair_A.at(static_cast<std::size_t>(source));
+            pair_B->at(i) = raw_pair_B.at(static_cast<std::size_t>(source));
+        }
+    }
+}
+
 static int Amber_Get_Atom_Numbers(const System* system);
 static std::vector<std::string> Amber_Read_Section(
     const std::vector<std::string>& lines, std::size_t* index);
@@ -87,6 +233,7 @@ static void Amber_Load_Classical_Force_Field(System* system,
     int bond_type_numbers = 0;
     int angle_type_numbers = 0;
     int dihedral_type_numbers = 0;
+    int hbond_type_numbers = 0;
 
     std::vector<float> bond_type_k;
     std::vector<float> bond_type_r0;
@@ -97,6 +244,17 @@ static void Amber_Load_Classical_Force_Field(System* system,
     std::vector<float> dihedral_type_periodicity;
     std::vector<float> scee_scale_factor;
     std::vector<float> scnb_scale_factor;
+    std::vector<float> raw_lj_pair_A;
+    std::vector<float> raw_lj_pair_B;
+    std::vector<float> hbond_pair_A;
+    std::vector<float> hbond_pair_B;
+    std::vector<int> nonbonded_parm_index;
+
+    bool has_lj_pair_A = false;
+    bool has_lj_pair_B = false;
+    bool has_hbond_pair_A = false;
+    bool has_hbond_pair_B = false;
+    bool has_nonbonded_parm_index = false;
 
     std::vector<int> raw_dihedral_a;
     std::vector<int> raw_dihedral_b;
@@ -118,7 +276,7 @@ static void Amber_Load_Classical_Force_Field(System* system,
         if (current_flag == "POINTERS")
         {
             Amber_Require_Section_Size(
-                values, 18, controller,
+                values, 20, controller,
                 "Xponge::Amber_Load_Classical_Force_Field");
             atom_numbers = Amber_Parse_Int(values[0]);
             atom_type_numbers = Amber_Parse_Int(values[1]);
@@ -131,6 +289,14 @@ static void Amber_Load_Classical_Force_Field(System* system,
             bond_type_numbers = Amber_Parse_Int(values[15]);
             angle_type_numbers = Amber_Parse_Int(values[16]);
             dihedral_type_numbers = Amber_Parse_Int(values[17]);
+            hbond_type_numbers = Amber_Parse_Int(values[19]);
+            if (hbond_type_numbers < 0)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat,
+                    "Xponge::Amber_Load_Classical_Force_Field",
+                    "Reason:\n\tAMBER NPHB cannot be negative\n");
+            }
         }
         else if (current_flag == "BOND_FORCE_CONSTANT")
         {
@@ -358,33 +524,111 @@ static void Amber_Load_Classical_Force_Field(System* system,
                 ff->lj.atom_type[j] = Amber_Parse_Int(values[j]) - 1;
             }
         }
+        else if (current_flag == "NONBONDED_PARM_INDEX")
+        {
+            nonbonded_parm_index.resize(values.size());
+            for (std::size_t j = 0; j < values.size(); j++)
+            {
+                nonbonded_parm_index[j] = Amber_Parse_Int(values[j]);
+            }
+            has_nonbonded_parm_index = true;
+        }
+        else if (current_flag == "HBOND_ACOEF")
+        {
+            Amber_Require_Exact_Section_Size(
+                values, static_cast<std::size_t>(hbond_type_numbers),
+                controller, "Xponge::Amber_Load_Classical_Force_Field",
+                "HBOND_ACOEF");
+            hbond_pair_A.resize(hbond_type_numbers);
+            for (int j = 0; j < hbond_type_numbers; j++)
+            {
+                hbond_pair_A[j] = Amber_Parse_Float(values[j]);
+            }
+            has_hbond_pair_A = true;
+        }
+        else if (current_flag == "HBOND_BCOEF")
+        {
+            Amber_Require_Exact_Section_Size(
+                values, static_cast<std::size_t>(hbond_type_numbers),
+                controller, "Xponge::Amber_Load_Classical_Force_Field",
+                "HBOND_BCOEF");
+            hbond_pair_B.resize(hbond_type_numbers);
+            for (int j = 0; j < hbond_type_numbers; j++)
+            {
+                hbond_pair_B[j] = Amber_Parse_Float(values[j]);
+            }
+            has_hbond_pair_B = true;
+        }
         else if (current_flag == "LENNARD_JONES_ACOEF")
         {
             int pair_type_numbers =
                 atom_type_numbers * (atom_type_numbers + 1) / 2;
-            Amber_Require_Section_Size(
+            Amber_Require_Exact_Section_Size(
                 values, static_cast<std::size_t>(pair_type_numbers), controller,
-                "Xponge::Amber_Load_Classical_Force_Field");
-            ff->lj.pair_A.resize(pair_type_numbers);
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "LENNARD_JONES_ACOEF");
+            raw_lj_pair_A.resize(pair_type_numbers);
             for (int j = 0; j < pair_type_numbers; j++)
             {
-                ff->lj.pair_A[j] = 12.0f * Amber_Parse_Float(values[j]);
+                raw_lj_pair_A[j] = 12.0f * Amber_Parse_Float(values[j]);
             }
+            has_lj_pair_A = true;
         }
         else if (current_flag == "LENNARD_JONES_BCOEF")
         {
             int pair_type_numbers =
                 atom_type_numbers * (atom_type_numbers + 1) / 2;
-            Amber_Require_Section_Size(
+            Amber_Require_Exact_Section_Size(
                 values, static_cast<std::size_t>(pair_type_numbers), controller,
-                "Xponge::Amber_Load_Classical_Force_Field");
-            ff->lj.pair_B.resize(pair_type_numbers);
+                "Xponge::Amber_Load_Classical_Force_Field",
+                "LENNARD_JONES_BCOEF");
+            raw_lj_pair_B.resize(pair_type_numbers);
             for (int j = 0; j < pair_type_numbers; j++)
             {
-                ff->lj.pair_B[j] = 6.0f * Amber_Parse_Float(values[j]);
+                raw_lj_pair_B[j] = 6.0f * Amber_Parse_Float(values[j]);
             }
+            has_lj_pair_B = true;
         }
         i--;
+    }
+
+    if (has_lj_pair_A != has_lj_pair_B)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "Reason:\n\tLENNARD_JONES_ACOEF and LENNARD_JONES_BCOEF must "
+            "either both be present or both be absent\n");
+    }
+    if (has_hbond_pair_A != has_hbond_pair_B)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "Reason:\n\tHBOND_ACOEF and HBOND_BCOEF must either both be "
+            "present or both be absent\n");
+    }
+    if (hbond_type_numbers > 0 && !has_hbond_pair_A)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Xponge::Amber_Load_Classical_Force_Field",
+            "Reason:\n\tHBOND_ACOEF and HBOND_BCOEF are required when AMBER "
+            "NPHB is greater than zero\n");
+    }
+
+    std::vector<int> canonical_nonbonded_map =
+        Amber_Build_Canonical_Nonbonded_Map(
+            atom_type_numbers, nonbonded_parm_index, has_nonbonded_parm_index,
+            hbond_pair_A, hbond_pair_B, controller,
+            "Xponge::Amber_Load_Classical_Force_Field");
+    if (has_lj_pair_A)
+    {
+        Amber_Remap_LJ_Pair_Matrix(
+            raw_lj_pair_A, raw_lj_pair_B, canonical_nonbonded_map,
+            &ff->lj.pair_A, &ff->lj.pair_B, controller,
+            "Xponge::Amber_Load_Classical_Force_Field", "LENNARD_JONES_ACOEF",
+            "LENNARD_JONES_BCOEF");
     }
 
     ff->lj.atom_type_numbers = atom_type_numbers;

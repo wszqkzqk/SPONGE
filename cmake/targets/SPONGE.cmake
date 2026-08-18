@@ -121,8 +121,16 @@ set_source_files_properties(
 target_include_directories(sponge_toml PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
 target_link_libraries(sponge_toml PUBLIC tomlplusplus::tomlplusplus)
 
+add_library(
+  sponge_jit_header STATIC
+  ${PROJECT_ROOT_DIR}/SPONGE/third_party/jit/embedded_common_header.cpp)
+set_source_files_properties(
+  ${PROJECT_ROOT_DIR}/SPONGE/third_party/jit/embedded_common_header.cpp
+  PROPERTIES LANGUAGE CXX)
+target_include_directories(sponge_jit_header PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
+
 add_executable(${CURRENT_TARGET} ${SOURCES})
-target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_toml)
+target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_jit_header sponge_toml)
 if(TARGET HighFive::HighFive)
   target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive::HighFive)
 elseif(TARGET HighFive)

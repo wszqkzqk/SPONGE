@@ -1,9 +1,11 @@
 ﻿#pragma once
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <utility>
 
 #ifdef _WIN32
@@ -32,16 +34,28 @@ inline bool Atomic_Replace_File(const std::string& temporary_path,
                                 std::string* error_message = nullptr)
 {
 #ifdef _WIN32
-    if (MoveFileExA(temporary_path.c_str(), destination_path.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    constexpr int kSharingRetryCount = 50;
+    constexpr auto kSharingRetryDelay = std::chrono::milliseconds(10);
+    DWORD last_error = ERROR_SUCCESS;
+    for (int attempt = 0; attempt <= kSharingRetryCount; ++attempt)
     {
-        return true;
+        if (MoveFileExA(temporary_path.c_str(), destination_path.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            return true;
+        }
+        last_error = GetLastError();
+        const bool retryable = last_error == ERROR_SHARING_VIOLATION ||
+                               last_error == ERROR_LOCK_VIOLATION ||
+                               last_error == ERROR_ACCESS_DENIED;
+        if (!retryable || attempt == kSharingRetryCount) break;
+        std::this_thread::sleep_for(kSharingRetryDelay);
     }
     if (error_message != nullptr)
     {
         *error_message = "failed to atomically replace " + destination_path +
                          " with " + temporary_path + ": Windows error " +
-                         std::to_string(GetLastError());
+                         std::to_string(last_error);
     }
     return false;
 #else

@@ -1196,19 +1196,48 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
             static_cast<int64_t>(2));
     }
 
-    REQUIRE_TRUE(!Atomic_Replace_File(
-        temporary_path.string(), destination_path.string(), &error_message));
+    int64_t published_generation = 2;
+#ifdef _WIN32
+    write_generation(3);
+    HANDLE held_destination = CreateFileA(
+        destination_path.string().c_str(), GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    REQUIRE_TRUE(held_destination != INVALID_HANDLE_VALUE);
+    std::thread release_reader([held_destination]()
+                               {
+                                   std::this_thread::sleep_for(
+                                       std::chrono::milliseconds(50));
+                                   CloseHandle(held_destination);
+                               });
+    const bool replaced_after_retry = Atomic_Replace_File(
+        temporary_path.string(), destination_path.string(), &error_message);
+    release_reader.join();
+    REQUIRE_TRUE(replaced_after_retry);
+    published_generation = 3;
+    {
+        HighFive::File destination(destination_path.string(),
+                                   HighFive::File::ReadOnly);
+        REQUIRE_EQ(Read_Int64_Vector(destination,
+                                     path::output_restart_generation)
+                       .back(),
+                   static_cast<int64_t>(3));
+    }
+#endif
+
+    REQUIRE_TRUE(!Atomic_Replace_File(temporary_path.string(),
+                                      destination_path.string(),
+                                      &error_message));
     REQUIRE_TRUE(!error_message.empty());
     {
         HighFive::File destination(destination_path.string(),
                                    HighFive::File::ReadOnly);
-        REQUIRE_EQ(
-            Read_Int64_Vector(destination, path::output_restart_generation)
-                .back(),
-            static_cast<int64_t>(2));
+        REQUIRE_EQ(Read_Int64_Vector(destination,
+                                     path::output_restart_generation)
+                       .back(),
+                   published_generation);
     }
 
-    write_generation(3);
+    write_generation(published_generation + 1);
     {
         TemporaryFileGuard guard(temporary_path.string());
     }
@@ -1216,10 +1245,10 @@ static void Test_Atomic_File_Replacement_Preserves_Last_Published_File()
     {
         HighFive::File destination(destination_path.string(),
                                    HighFive::File::ReadOnly);
-        REQUIRE_EQ(
-            Read_Int64_Vector(destination, path::output_restart_generation)
-                .back(),
-            static_cast<int64_t>(2));
+        REQUIRE_EQ(Read_Int64_Vector(destination,
+                                     path::output_restart_generation)
+                       .back(),
+                   published_generation);
     }
 
     std::filesystem::remove_all(dir);

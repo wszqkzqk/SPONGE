@@ -627,11 +627,10 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Input_Check()
         if (no_warning)
         {
             controller->printf(
-                "\nWarning: CV inputs raised %d warning(s). If You know WHAT "
-                "YOU ARE DOING, press any key to continue. Set "
-                "dont_check_input = 1 to disable this warning.\n",
+                "\nWarning: CV inputs raised %d warning(s). Continuing "
+                "execution. Set dont_check_input = 1 to disable this "
+                "warning.\n",
                 no_warning);
-            getchar();
         }
     }
 }

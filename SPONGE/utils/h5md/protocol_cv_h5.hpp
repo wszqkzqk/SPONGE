@@ -56,6 +56,14 @@ class ProtocolCVH5Reader
         }
     }
 
+    bool Open_Protocol(const std::shared_ptr<HighFive::File>& file)
+    {
+        last_error_.clear();
+        if (file == nullptr) return Fail("protocol H5 file is null");
+        protocol_ = file;
+        return true;
+    }
+
     bool Open_Restart(const std::string& file_path)
     {
         try
@@ -673,7 +681,7 @@ class ProtocolCVH5Reader
         return false;
     }
 
-    std::unique_ptr<HighFive::File> protocol_;
+    std::shared_ptr<HighFive::File> protocol_;
     std::unique_ptr<HighFive::File> restart_;
     std::string last_error_;
 };

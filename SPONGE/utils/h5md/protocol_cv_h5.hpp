@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -26,6 +27,14 @@ struct ProtocolCVDefinition
     std::vector<float> period;
     std::vector<float> sigma;
     std::vector<float> reference_coordinates;
+};
+
+struct ProtocolVirtualAtomDefinition
+{
+    std::string name;
+    std::string type;
+    std::vector<int> atom_indices;
+    std::vector<float> weight;
 };
 
 class ProtocolCVH5Reader
@@ -74,18 +83,25 @@ class ProtocolCVH5Reader
         if (!protocol_->exist("/cv")) return true;
         try
         {
+            const std::set<std::string> virtual_atom_names =
+                Read_Enabled_Virtual_Atom_Names();
             std::vector<std::string> names =
                 protocol_->getGroup("/cv").listObjectNames();
             std::sort(names.begin(), names.end());
             for (const auto& name : names)
             {
                 const std::string root = "/cv/" + name;
-                if (name == "config" || protocol_->getObjectType(root) !=
-                                            HighFive::ObjectType::Group)
+                if (name == "config" || name == "virtual_atom" ||
+                    protocol_->getObjectType(root) !=
+                        HighFive::ObjectType::Group)
                 {
                     continue;
                 }
                 if (!Validate_Name(name, root) || !Read_Enabled(root)) continue;
+                if (virtual_atom_names.count(name))
+                    throw std::runtime_error(
+                        root +
+                        " conflicts with an enabled /cv/virtual_atom object");
 
                 ProtocolCVDefinition definition;
                 definition.name = name;
@@ -101,11 +117,25 @@ class ProtocolCVH5Reader
                 Add_Runtime_Parameter(&definition, "CV_type", definition.type,
                                       root + "/type");
                 const auto atom_indices = Read_Atom_Indices(root, atom_count);
+                const auto atom_refs =
+                    Read_Atom_Refs(root, atom_count, virtual_atom_names);
+                if (!atom_indices.empty() && !atom_refs.empty())
+                {
+                    throw std::runtime_error(
+                        root +
+                        "/atom_indices and /atom_refs are mutually exclusive");
+                }
                 if (!atom_indices.empty())
                 {
                     Add_Runtime_Parameter(&definition, "atom",
                                           Join_Values(atom_indices),
                                           root + "/atom_indices");
+                }
+                else if (!atom_refs.empty())
+                {
+                    Add_Runtime_Parameter(&definition, "atom",
+                                          Join_Values(atom_refs),
+                                          root + "/atom_refs");
                 }
                 Read_Parameter_Group(root, &definition);
                 Read_Direct_Runtime_Fields(root, &definition);
@@ -113,8 +143,11 @@ class ProtocolCVH5Reader
                     root + "/period", definition.dimension);
                 definition.sigma = Read_Optional_Float_Vector(
                     root + "/sigma", definition.dimension);
-                Read_Restart_Reference(root, atom_indices, &definition);
-                Validate_Current_Runtime_Shape(atom_indices, definition);
+                const std::size_t selected_atom_count =
+                    atom_indices.empty() ? atom_refs.size()
+                                         : atom_indices.size();
+                Read_Restart_Reference(root, selected_atom_count, &definition);
+                Validate_Current_Runtime_Shape(selected_atom_count, definition);
                 definitions->push_back(std::move(definition));
             }
             return true;
@@ -122,6 +155,58 @@ class ProtocolCVH5Reader
         catch (const std::exception& error)
         {
             return Fail(std::string("failed to read typed CV definitions: ") +
+                        error.what());
+        }
+    }
+
+    bool Read_Virtual_Atoms(
+        std::size_t atom_count,
+        std::vector<ProtocolVirtualAtomDefinition>* definitions)
+    {
+        if (definitions == nullptr)
+            return Fail("virtual atom definition output pointer is null");
+        definitions->clear();
+        if (protocol_ == nullptr) return Fail("protocol H5 reader is not open");
+        if (!protocol_->exist("/cv/virtual_atom")) return true;
+        try
+        {
+            std::vector<std::string> names =
+                protocol_->getGroup("/cv/virtual_atom").listObjectNames();
+            std::sort(names.begin(), names.end());
+            for (const auto& name : names)
+            {
+                const std::string root = "/cv/virtual_atom/" + name;
+                if (protocol_->getObjectType(root) !=
+                    HighFive::ObjectType::Group)
+                    throw std::runtime_error(root + " must be a group");
+                if (!Validate_Name(name, root) || !Read_Enabled(root)) continue;
+                ProtocolVirtualAtomDefinition definition;
+                definition.name = name;
+                definition.type = Read_Required_String(root, "type");
+                if (definition.type != "center" &&
+                    definition.type != "center_of_mass")
+                    throw std::runtime_error(
+                        root + "/type must be center or center_of_mass");
+                definition.atom_indices = Read_Atom_Indices(root, atom_count);
+                if (definition.atom_indices.empty())
+                    throw std::runtime_error(root +
+                                             "/atom_indices is required");
+                definition.weight = Read_Optional_Float_Vector(
+                    root + "/weight", definition.atom_indices.size());
+                if (definition.type == "center" && definition.weight.empty())
+                    throw std::runtime_error(root +
+                                             "/weight is required for center");
+                if (definition.type == "center_of_mass" &&
+                    !definition.weight.empty())
+                    throw std::runtime_error(
+                        root + "/weight must be absent for center_of_mass");
+                definitions->push_back(std::move(definition));
+            }
+            return true;
+        }
+        catch (const std::exception& error)
+        {
+            return Fail(std::string("failed to read typed virtual atoms: ") +
                         error.what());
         }
     }
@@ -219,6 +304,62 @@ class ProtocolCVH5Reader
             }
             result.push_back(static_cast<int>(value));
         }
+        if (std::set<int>(result.begin(), result.end()).size() != result.size())
+            throw std::runtime_error(path + " contains duplicate atom indices");
+        return result;
+    }
+
+    std::set<std::string> Read_Enabled_Virtual_Atom_Names()
+    {
+        std::set<std::string> result;
+        if (!protocol_->exist("/cv/virtual_atom")) return result;
+        for (const auto& name :
+             protocol_->getGroup("/cv/virtual_atom").listObjectNames())
+        {
+            const std::string root = "/cv/virtual_atom/" + name;
+            if (protocol_->getObjectType(root) == HighFive::ObjectType::Group &&
+                Read_Enabled(root))
+                result.insert(name);
+        }
+        return result;
+    }
+
+    std::vector<std::string> Read_Atom_Refs(
+        const std::string& root, std::size_t atom_count,
+        const std::set<std::string>& virtual_atom_names)
+    {
+        const std::string path = root + "/atom_refs";
+        if (!protocol_->exist(path)) return {};
+        const auto dims =
+            protocol_->getDataSet(path).getSpace().getDimensions();
+        if (dims.size() != 1 || dims[0] == 0)
+            throw std::runtime_error(path + " must have shape [n], n > 0");
+        std::vector<std::string> result;
+        protocol_->getDataSet(path).read(result);
+        for (const auto& value : result)
+        {
+            if (virtual_atom_names.count(value)) continue;
+            std::size_t used = 0;
+            long long atom = -1;
+            try
+            {
+                atom = std::stoll(value, &used);
+            }
+            catch (const std::exception&)
+            {
+                used = 0;
+            }
+            if (used != value.size() || atom < 0 ||
+                static_cast<std::size_t>(atom) >= atom_count)
+                throw std::runtime_error(
+                    path +
+                    " references a missing virtual atom or an "
+                    "out-of-range physical atom");
+        }
+        if (std::set<std::string>(result.begin(), result.end()).size() !=
+            result.size())
+            throw std::runtime_error(path +
+                                     " contains duplicate atom references");
         return result;
     }
 
@@ -279,7 +420,7 @@ class ProtocolCVH5Reader
     }
 
     void Read_Restart_Reference(const std::string& root,
-                                const std::vector<int>& atom_indices,
+                                std::size_t selected_atom_count,
                                 ProtocolCVDefinition* definition)
     {
         const std::string path = "/parameters/restart/references/cv/" +
@@ -300,12 +441,12 @@ class ProtocolCVH5Reader
                                      " is only supported for rmsd CV objects");
         }
         const auto dims = restart_->getDataSet(path).getSpace().getDimensions();
-        if (dims != std::vector<std::size_t>{atom_indices.size(), 3})
+        if (dims != std::vector<std::size_t>{selected_atom_count, 3})
         {
             throw std::runtime_error(path +
                                      " must have shape [atom_indices,3]");
         }
-        std::vector<float> values(atom_indices.size() * 3);
+        std::vector<float> values(selected_atom_count * 3);
         auto dataset = restart_->getDataSet(path);
         if (H5Dread(dataset.getId(), H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL,
                     H5P_DEFAULT, values.data()) < 0)
@@ -318,7 +459,7 @@ class ProtocolCVH5Reader
                               path);
     }
 
-    void Validate_Current_Runtime_Shape(const std::vector<int>& atom_indices,
+    void Validate_Current_Runtime_Shape(std::size_t selected_atom_count,
                                         const ProtocolCVDefinition& definition)
     {
         std::size_t expected = 0;
@@ -338,9 +479,9 @@ class ProtocolCVH5Reader
             expected = 3;
         else if (definition.type == "dihedral")
             expected = 4;
-        else if (definition.type == "rmsd" && atom_indices.empty())
+        else if (definition.type == "rmsd" && selected_atom_count == 0)
             throw std::runtime_error("native rmsd CV requires atom_indices");
-        if (expected != 0 && atom_indices.size() != expected)
+        if (expected != 0 && selected_atom_count != expected)
         {
             throw std::runtime_error("/cv/" + definition.name +
                                      "/atom_indices does not match CV type " +

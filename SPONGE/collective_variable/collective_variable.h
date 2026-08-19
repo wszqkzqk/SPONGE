@@ -115,6 +115,8 @@ struct COLLECTIVE_VARIABLE_CONTROLLER : public CONTROLLER
     std::map<std::string, std::vector<float>> protocol_cv_period;
     std::map<std::string, std::vector<float>> protocol_cv_sigma;
     std::map<std::string, std::vector<float>> protocol_cv_reference;
+    std::map<std::string, std::vector<int>> protocol_virtual_atom_indices;
+    std::map<std::string, std::vector<float>> protocol_virtual_atom_weight;
     // Runtime still consumes the `meta` section; this retains the stable
     // bundled object identity used by diagnostic and restart paths.
     std::string protocol_metadynamics_name;

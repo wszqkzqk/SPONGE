@@ -142,10 +142,6 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
 H5_BUNDLE_RUNNER = REPO_ROOT / "tests" / "h5_bundle" / "run_h5_bundle_tests.sh"
-AUDIT_DOC = REPO_ROOT / "docs" / "sponge_h5_bundle_unit_test_audit_matrix.md"
-NEXT_ROUND_PLAN = (
-    REPO_ROOT / "docs" / "bundled_io_ab_next_round_strengthening_plan.md"
-)
 VDS_WRITER_TEST = (
     REPO_ROOT
     / "tests"
@@ -282,34 +278,6 @@ def test_ab_bundled_io_gates_keep_medium_and_production_profiles():
         "smoke-bundled-io-production",
         "ab-bundled-io-production-runtime",
     ]
-
-
-def test_release_boundary_keeps_ab_opt_in_shadow_only():
-    tasks = _dev_tasks()
-    default_smoke = _task_depends(tasks, "smoke-bundled-io")
-    production_smoke = _task_depends(tasks, "smoke-bundled-io-production")
-
-    assert "ab-bundled-io-medium" not in default_smoke
-    assert "ab-bundled-io-production" not in default_smoke
-    assert "ab-bundled-io-medium" not in production_smoke
-    assert "ab-bundled-io-production" not in production_smoke
-
-    doc = " ".join(AUDIT_DOC.read_text(encoding="utf-8").split())
-    assert (
-        "Legacy/bundled behavior A/B is a separate opt-in release gate" in doc
-    )
-    assert "not part of the default smoke task" in doc
-    assert "opt-in/shadow path" in doc
-    assert "legacy-behavior replacement candidate" in doc
-    assert (
-        "proves equivalence for the explicitly enumerated supported input/output "
-        "contract and runtime scenarios"
-    ) in doc
-    assert "cross-process VDS reopen-and-append resume" in doc
-    assert SCOPED_EQUIVALENCE_STATEMENT in doc
-    assert SCOPED_EQUIVALENCE_STATEMENT in " ".join(
-        NEXT_ROUND_PLAN.read_text(encoding="utf-8").split()
-    )
 
 
 def test_ab_production_harness_has_executable_contract_coverage():

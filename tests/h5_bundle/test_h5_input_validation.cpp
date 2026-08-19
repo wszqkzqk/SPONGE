@@ -222,6 +222,40 @@ static void Test_Protocol_Reader_Loads_Native_CV_Objects()
     std::filesystem::remove_all(dir);
 }
 
+static void Test_Protocol_Reader_Loads_Typed_Virtual_Atoms()
+{
+    const auto dir = Unique_Temp_Path("protocol_virtual_atom");
+    std::filesystem::create_directories(dir);
+    const auto protocol_path = dir / "protocol.spgp.h5";
+    {
+        HighFive::File file(protocol_path.string(), HighFive::File::Overwrite);
+        Write_Scalar(file, "/cv/virtual_atom/dt/type", std::string("center"));
+        Write_Int64_Vector(file, "/cv/virtual_atom/dt/atom_indices", {0, 1});
+        Write_Float_Vector(file, "/cv/virtual_atom/dt/weight", {0.25f, 0.75f});
+        Write_Scalar(file, "/cv/distance/type", std::string("distance"));
+        Write_String_Vector(file, "/cv/distance/atom_refs", {"dt", "2"});
+    }
+    {
+        ProtocolCVH5Reader reader;
+        REQUIRE_TRUE(reader.Open_Protocol(protocol_path.string()));
+        std::vector<ProtocolVirtualAtomDefinition> virtual_atoms;
+        REQUIRE_TRUE(reader.Read_Virtual_Atoms(3, &virtual_atoms));
+        REQUIRE_EQ(virtual_atoms.size(), static_cast<std::size_t>(1));
+        REQUIRE_EQ(virtual_atoms[0].name, std::string("dt"));
+        REQUIRE_EQ(virtual_atoms[0].atom_indices, std::vector<int>({0, 1}));
+        REQUIRE_EQ(virtual_atoms[0].weight, std::vector<float>({0.25f, 0.75f}));
+        std::vector<ProtocolCVDefinition> definitions;
+        REQUIRE_TRUE(reader.Read_Definitions(3, &definitions));
+        REQUIRE_EQ(definitions.size(), static_cast<std::size_t>(1));
+        REQUIRE_TRUE(std::find(definitions[0].runtime_parameters.begin(),
+                               definitions[0].runtime_parameters.end(),
+                               std::make_pair(std::string("atom"),
+                                              std::string("dt 2"))) !=
+                     definitions[0].runtime_parameters.end());
+    }
+    std::filesystem::remove_all(dir);
+}
+
 static void Test_Protocol_Reader_Loads_Native_Metadynamics_Object()
 {
     const auto dir = Unique_Temp_Path("protocol_native_metadynamics");
@@ -1331,6 +1365,7 @@ int main()
         {
             Test_Protocol_Reader_Loads_Typed_CV_Restraint();
             Test_Protocol_Reader_Loads_Native_CV_Objects();
+            Test_Protocol_Reader_Loads_Typed_Virtual_Atoms();
             Test_Protocol_Reader_Loads_Native_Metadynamics_Object();
             Test_Protocol_Reader_Loads_Native_Steering_Object();
             Test_Positional_Restraint_Reader_Loads_Named_Object();

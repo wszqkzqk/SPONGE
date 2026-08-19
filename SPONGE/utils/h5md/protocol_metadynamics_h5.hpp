@@ -46,6 +46,14 @@ class ProtocolMetadynamicsH5Reader
         }
     }
 
+    bool Open(const std::shared_ptr<HighFive::File>& file)
+    {
+        last_error_.clear();
+        if (file == nullptr) return Fail("protocol H5 file is null");
+        file_ = file;
+        return true;
+    }
+
     bool Read_Definition(
         const std::vector<ProtocolCVDefinition>& cv_definitions,
         ProtocolMetadynamicsDefinition* definition, bool* found)
@@ -438,7 +446,7 @@ class ProtocolMetadynamicsH5Reader
         return false;
     }
 
-    std::unique_ptr<HighFive::File> file_;
+    std::shared_ptr<HighFive::File> file_;
     std::string last_error_;
 };
 }  // namespace SpongeH5MD

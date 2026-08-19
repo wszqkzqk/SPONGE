@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <highfive/highfive.hpp>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -161,16 +162,18 @@ static void Test_Protocol_Reader_Loads_Typed_CV_Restraint()
         Write_Float_Vector(file, "/restraint/disabled_cv/reference", {2.0f});
         Write_Scalar(file, "/restraint/disabled_cv/enabled_default", 0);
     }
-    ProtocolRestraintH5Reader reader;
-    REQUIRE_TRUE(reader.Open(path.string()));
-    std::vector<ProtocolCVRestraint> restraints;
-    REQUIRE_TRUE(reader.Read_CV_Restraints(&restraints));
-    REQUIRE_EQ(restraints.size(), static_cast<std::size_t>(1));
-    REQUIRE_EQ(restraints[0].name, std::string("umbrella"));
-    REQUIRE_EQ(restraints[0].cv_refs[0], std::string("torsion"));
-    REQUIRE_EQ(restraints[0].weight[1], 50.0f);
-    REQUIRE_EQ(restraints[0].start_step[1], static_cast<std::int64_t>(20));
-    REQUIRE_EQ(restraints[0].max_step[0], static_cast<std::int64_t>(0));
+    {
+        ProtocolRestraintH5Reader reader;
+        REQUIRE_TRUE(reader.Open(path.string()));
+        std::vector<ProtocolCVRestraint> restraints;
+        REQUIRE_TRUE(reader.Read_CV_Restraints(&restraints));
+        REQUIRE_EQ(restraints.size(), static_cast<std::size_t>(1));
+        REQUIRE_EQ(restraints[0].name, std::string("umbrella"));
+        REQUIRE_EQ(restraints[0].cv_refs[0], std::string("torsion"));
+        REQUIRE_EQ(restraints[0].weight[1], 50.0f);
+        REQUIRE_EQ(restraints[0].start_step[1], static_cast<std::int64_t>(20));
+        REQUIRE_EQ(restraints[0].max_step[0], static_cast<std::int64_t>(0));
+    }
     std::filesystem::remove_all(dir);
 }
 
@@ -201,24 +204,26 @@ static void Test_Protocol_Reader_Loads_Native_CV_Objects()
             file, "/parameters/restart/references/cv/backbone/coordinate",
             {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
     }
-    ProtocolCVH5Reader reader;
-    REQUIRE_TRUE(reader.Open_Protocol(protocol_path.string()));
-    REQUIRE_TRUE(reader.Open_Restart(restart_path.string()));
-    std::vector<ProtocolCVDefinition> definitions;
-    REQUIRE_TRUE(reader.Read_Definitions(2, &definitions));
-    REQUIRE_EQ(definitions.size(), static_cast<std::size_t>(2));
-    REQUIRE_EQ(definitions[0].name, std::string("backbone"));
-    REQUIRE_EQ(definitions[0].type, std::string("rmsd"));
-    REQUIRE_EQ(definitions[0].reference_coordinates,
-               std::vector<float>({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}));
-    REQUIRE_TRUE(std::find(definitions[0].runtime_parameters.begin(),
-                           definitions[0].runtime_parameters.end(),
-                           std::make_pair(std::string("coordinate"),
-                                          std::string("1 2 3 4 5 6"))) !=
-                 definitions[0].runtime_parameters.end());
-    REQUIRE_EQ(definitions[1].name, std::string("distance"));
-    REQUIRE_EQ(definitions[1].period[0], 0.0f);
-    REQUIRE_EQ(definitions[1].sigma[0], 0.5f);
+    {
+        ProtocolCVH5Reader reader;
+        REQUIRE_TRUE(reader.Open_Protocol(protocol_path.string()));
+        REQUIRE_TRUE(reader.Open_Restart(restart_path.string()));
+        std::vector<ProtocolCVDefinition> definitions;
+        REQUIRE_TRUE(reader.Read_Definitions(2, &definitions));
+        REQUIRE_EQ(definitions.size(), static_cast<std::size_t>(2));
+        REQUIRE_EQ(definitions[0].name, std::string("backbone"));
+        REQUIRE_EQ(definitions[0].type, std::string("rmsd"));
+        REQUIRE_EQ(definitions[0].reference_coordinates,
+                   std::vector<float>({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}));
+        REQUIRE_TRUE(std::find(definitions[0].runtime_parameters.begin(),
+                               definitions[0].runtime_parameters.end(),
+                               std::make_pair(std::string("coordinate"),
+                                              std::string("1 2 3 4 5 6"))) !=
+                     definitions[0].runtime_parameters.end());
+        REQUIRE_EQ(definitions[1].name, std::string("distance"));
+        REQUIRE_EQ(definitions[1].period[0], 0.0f);
+        REQUIRE_EQ(definitions[1].sigma[0], 0.5f);
+    }
     std::filesystem::remove_all(dir);
 }
 
@@ -305,13 +310,15 @@ static void Test_Protocol_Reader_Loads_Native_Metadynamics_Object()
         const int enabled = 1;
         file.getDataSet("/meta/disabled/enabled_default").write(enabled);
     }
-    ProtocolMetadynamicsH5Reader duplicate_reader;
-    REQUIRE_TRUE(duplicate_reader.Open(protocol_path.string()));
-    REQUIRE_TRUE(
-        !duplicate_reader.Read_Definition({distance}, &definition, &found));
-    REQUIRE_TRUE(duplicate_reader.Last_Error().find(
-                     "at most one enabled metadynamics object") !=
-                 std::string::npos);
+    {
+        ProtocolMetadynamicsH5Reader duplicate_reader;
+        REQUIRE_TRUE(duplicate_reader.Open(protocol_path.string()));
+        REQUIRE_TRUE(
+            !duplicate_reader.Read_Definition({distance}, &definition, &found));
+        REQUIRE_TRUE(duplicate_reader.Last_Error().find(
+                         "at most one enabled metadynamics object") !=
+                     std::string::npos);
+    }
     std::filesystem::remove_all(dir);
 }
 
@@ -330,24 +337,26 @@ static void Test_Protocol_Reader_Loads_Native_Steering_Object()
     distance.dimension = 1;
     ProtocolSteeringDefinition definition;
     bool found = false;
-    ProtocolSteeringH5Reader reader;
-    REQUIRE_TRUE(reader.Open(protocol_path.string()));
-    REQUIRE_TRUE(reader.Read_Definition({distance}, &definition, &found));
-    REQUIRE_TRUE(found);
-    REQUIRE_EQ(definition.cv_refs, std::vector<std::string>({"distance"}));
-    REQUIRE_EQ(definition.weight, std::vector<float>({2.0f}));
-    REQUIRE_TRUE(
-        std::find(definition.runtime_parameters.begin(),
-                  definition.runtime_parameters.end(),
-                  std::make_pair(std::string("CV"), std::string("distance"))) !=
-        definition.runtime_parameters.end());
+    {
+        ProtocolSteeringH5Reader reader;
+        REQUIRE_TRUE(reader.Open(protocol_path.string()));
+        REQUIRE_TRUE(reader.Read_Definition({distance}, &definition, &found));
+        REQUIRE_TRUE(found);
+        REQUIRE_EQ(definition.cv_refs, std::vector<std::string>({"distance"}));
+        REQUIRE_EQ(definition.weight, std::vector<float>({2.0f}));
+        REQUIRE_TRUE(std::find(definition.runtime_parameters.begin(),
+                               definition.runtime_parameters.end(),
+                               std::make_pair(std::string("CV"),
+                                              std::string("distance"))) !=
+                     definition.runtime_parameters.end());
 
-    ProtocolSteeringH5Reader invalid_reader;
-    REQUIRE_TRUE(invalid_reader.Open(protocol_path.string()));
-    REQUIRE_TRUE(!invalid_reader.Read_Definition({}, &definition, &found));
-    REQUIRE_TRUE(invalid_reader.Last_Error().find(
-                     "references missing or disabled /cv/distance") !=
-                 std::string::npos);
+        ProtocolSteeringH5Reader invalid_reader;
+        REQUIRE_TRUE(invalid_reader.Open(protocol_path.string()));
+        REQUIRE_TRUE(!invalid_reader.Read_Definition({}, &definition, &found));
+        REQUIRE_TRUE(invalid_reader.Last_Error().find(
+                         "references missing or disabled /cv/distance") !=
+                     std::string::npos);
+    }
     std::filesystem::remove_all(dir);
 }
 
@@ -1358,6 +1367,55 @@ static void Test_Protocol_Reader_Loads_Native_Hard_Wall()
     std::filesystem::remove_all(dir);
 }
 
+static void Test_Protocol_Readers_Share_One_File_Lifetime()
+{
+    const auto dir = Unique_Temp_Path("protocol_shared_reader_lifetime");
+    std::filesystem::create_directories(dir);
+    const auto protocol = dir / "protocol.spgp.h5";
+    {
+        HighFive::File file(protocol.string(), HighFive::File::Overwrite);
+        file.createGroup("/cv");
+    }
+
+    auto file = std::make_shared<HighFive::File>(protocol.string(),
+                                                 HighFive::File::ReadOnly);
+    const auto baseline_object_count =
+        H5Fget_obj_count(file->getId(), H5F_OBJ_ALL);
+    REQUIRE_TRUE(baseline_object_count >= 1);
+    {
+        ProtocolCVH5Reader cv_reader;
+        ProtocolRestraintH5Reader restraint_reader;
+        ProtocolMetadynamicsH5Reader metadynamics_reader;
+        ProtocolSteeringH5Reader steering_reader;
+        REQUIRE_TRUE(cv_reader.Open_Protocol(file));
+        REQUIRE_TRUE(restraint_reader.Open(file));
+        REQUIRE_TRUE(metadynamics_reader.Open(file));
+        REQUIRE_TRUE(steering_reader.Open(file));
+        REQUIRE_EQ(file.use_count(), static_cast<long>(5));
+
+        std::vector<ProtocolCVDefinition> cvs;
+        std::vector<ProtocolVirtualAtomDefinition> virtual_atoms;
+        std::vector<ProtocolCVRestraint> restraints;
+        ProtocolMetadynamicsDefinition metadynamics;
+        ProtocolSteeringDefinition steering;
+        bool has_metadynamics = false;
+        bool has_steering = false;
+        REQUIRE_TRUE(cv_reader.Read_Definitions(1, &cvs));
+        REQUIRE_TRUE(cv_reader.Read_Virtual_Atoms(1, &virtual_atoms));
+        REQUIRE_TRUE(restraint_reader.Read_CV_Restraints(&restraints));
+        REQUIRE_TRUE(metadynamics_reader.Read_Definition(cvs, &metadynamics,
+                                                         &has_metadynamics));
+        REQUIRE_TRUE(
+            steering_reader.Read_Definition(cvs, &steering, &has_steering));
+        REQUIRE_EQ(H5Fget_obj_count(file->getId(), H5F_OBJ_ALL),
+                   baseline_object_count);
+    }
+    REQUIRE_EQ(file.use_count(), static_cast<long>(1));
+    file.reset();
+    REQUIRE_TRUE(std::filesystem::remove(protocol));
+    std::filesystem::remove_all(dir);
+}
+
 int main()
 {
     return Run_Test(
@@ -1392,5 +1450,6 @@ int main()
             Test_EDIP_Reader_Loads_Dense_Runtime_Definition();
             Test_ReaxFF_Reader_Loads_Typed_Runtime_Definition();
             Test_Protocol_Reader_Loads_Native_Hard_Wall();
+            Test_Protocol_Readers_Share_One_File_Lifetime();
         });
 }

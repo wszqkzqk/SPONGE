@@ -203,19 +203,19 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
 
     try
     {
-        HighFive::File file(controller->Command(input_key),
-                            HighFive::File::ReadOnly);
+        auto file = std::make_shared<HighFive::File>(
+            controller->Command(input_key), HighFive::File::ReadOnly);
         constexpr const char* cv_root = "/cv/config";
         constexpr const char* restraint_root = "/restraint/config";
         constexpr const char* restraint_cv_root = "/restraint/cv/config";
-        const bool has_cv = file.exist(cv_root);
-        const bool has_restraint = file.exist(restraint_root);
-        const bool has_restraint_cv = file.exist(restraint_cv_root);
+        const bool has_cv = file->exist(cv_root);
+        const bool has_restraint = file->exist(restraint_root);
+        const bool has_restraint_cv = file->exist(restraint_cv_root);
         SpongeH5MD::ProtocolCVH5Reader cv_reader;
         std::vector<SpongeH5MD::ProtocolCVDefinition> typed_cvs;
         std::vector<SpongeH5MD::ProtocolVirtualAtomDefinition>
             typed_virtual_atoms;
-        if (!cv_reader.Open_Protocol(controller->Command(input_key)))
+        if (!cv_reader.Open_Protocol(file))
         {
             throw std::runtime_error(cv_reader.Last_Error());
         }
@@ -238,7 +238,7 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         }
         SpongeH5MD::ProtocolRestraintH5Reader restraint_reader;
         std::vector<SpongeH5MD::ProtocolCVRestraint> typed_restraints;
-        if (!restraint_reader.Open(controller->Command(input_key)) ||
+        if (!restraint_reader.Open(file) ||
             !restraint_reader.Read_CV_Restraints(&typed_restraints))
         {
             throw std::runtime_error(restraint_reader.Last_Error());
@@ -246,7 +246,7 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         SpongeH5MD::ProtocolMetadynamicsH5Reader metadynamics_reader;
         SpongeH5MD::ProtocolMetadynamicsDefinition typed_metadynamics;
         bool has_typed_metadynamics = false;
-        if (!metadynamics_reader.Open(controller->Command(input_key)) ||
+        if (!metadynamics_reader.Open(file) ||
             !metadynamics_reader.Read_Definition(typed_cvs, &typed_metadynamics,
                                                  &has_typed_metadynamics))
         {
@@ -255,7 +255,7 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         SpongeH5MD::ProtocolSteeringH5Reader steering_reader;
         SpongeH5MD::ProtocolSteeringDefinition typed_steering;
         bool has_typed_steering = false;
-        if (!steering_reader.Open(controller->Command(input_key)) ||
+        if (!steering_reader.Open(file) ||
             !steering_reader.Read_Definition(typed_cvs, &typed_steering,
                                              &has_typed_steering))
         {
@@ -280,9 +280,9 @@ bool Load_H5_CV_Config(CONTROLLER* controller,
         std::vector<CVConfigSection> sections;
         for (const auto& root : {cv_root, restraint_root, restraint_cv_root})
         {
-            if (file.exist(root))
+            if (file->exist(root))
             {
-                Merge_H5_CV_Config(root, Read_H5_CV_Config(&file, root),
+                Merge_H5_CV_Config(root, Read_H5_CV_Config(file.get(), root),
                                    &sections);
             }
         }
@@ -627,11 +627,10 @@ void COLLECTIVE_VARIABLE_CONTROLLER::Input_Check()
         if (no_warning)
         {
             controller->printf(
-                "\nWarning: CV inputs raised %d warning(s). If You know WHAT "
-                "YOU ARE DOING, press any key to continue. Set "
-                "dont_check_input = 1 to disable this warning.\n",
+                "\nWarning: CV inputs raised %d warning(s). Continuing "
+                "execution. Set dont_check_input = 1 to disable this "
+                "warning.\n",
                 no_warning);
-            getchar();
         }
     }
 }

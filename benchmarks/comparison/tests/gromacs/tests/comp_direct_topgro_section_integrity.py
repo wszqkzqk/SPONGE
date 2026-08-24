@@ -202,3 +202,74 @@ def test_explicit_exclusions_are_normalized_and_merged_with_nrexcl(tmp_path):
     assert _extract_mdout_term(with_mdout, "LJ_short") == pytest.approx(
         expected_at_0_7_nm, abs=0.011
     )
+
+
+def test_explicit_exclusions_override_pairs_14_interaction(tmp_path):
+    topology = """
+        [ defaults ]
+        1 2 yes 0.25 1.0
+
+        [ atomtypes ]
+        A A 12.0 0.0 A 0.20 0.4184
+        B B 12.0 0.0 A 0.20 0.4184
+
+        [ nonbond_params ]
+        A B 1 0.40 4.184
+
+        [ moleculetype ]
+        PAIR 1
+
+        [ atoms ]
+        1 A 1 PAIR A 1 0.0 12.0
+        2 B 1 PAIR B 2 0.0 12.0
+
+        [ bonds ]
+        1 2 1 0.50 0.0
+
+        [ pairs ]
+        1 2 1
+
+        {exclusions}
+
+        [ system ]
+        explicit exclusions override pairs
+
+        [ molecules ]
+        PAIR 1
+    """
+    atoms = (("A", 0.0), ("B", 0.5))
+    without_result, without_mdout = _run_topology(
+        tmp_path / "without",
+        topology.format(exclusions=""),
+        atoms=atoms,
+    )
+    with_result, with_mdout = _run_topology(
+        tmp_path / "with",
+        topology.format(
+            exclusions="""
+            [ exclusions ]
+            1 2
+            """
+        ),
+        atoms=atoms,
+    )
+
+    assert without_result.returncode == 0, (
+        without_result.stdout + "\n" + without_result.stderr
+    )
+    sigma_over_r = 0.40 / 0.5
+    expected_pair_14 = 0.25 * 4.0 * (sigma_over_r**12 - sigma_over_r**6)
+    assert _extract_mdout_term(without_mdout, "nb14_LJ") == pytest.approx(
+        expected_pair_14, abs=0.011
+    )
+    assert with_result.returncode == 0, (
+        with_result.stdout + "\n" + with_result.stderr
+    )
+    # The nb14 columns disappear entirely once every pair is overridden.
+    with_lines = with_mdout.read_text().splitlines()
+    with_terms = dict(zip(with_lines[0].split(), with_lines[1].split()))
+    assert float(with_terms.get("nb14_LJ", 0.0)) == pytest.approx(
+        0.0, abs=0.011
+    )
+    output = with_result.stdout + "\n" + with_result.stderr
+    assert "overridden by explicit [ exclusions ]" in output

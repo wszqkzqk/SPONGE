@@ -1290,6 +1290,7 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
 
     std::vector<std::string> global_atom_types;
     std::vector<std::vector<int>> molecule_local_to_global;
+    std::size_t pairs_overridden_by_exclusions = 0;
 
     for (const auto& item : topology.system_molecules)
     {
@@ -1762,6 +1763,14 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
             {
                 int ai_local = pair.ai - 1;
                 int aj_local = pair.aj - 1;
+                // GROMACS semantics: an explicit [ exclusions ] entry removes
+                // the special 1-4 interaction from [ pairs ] entirely.
+                if (molecule.exclusions.count({std::min(ai_local, aj_local),
+                                               std::max(ai_local, aj_local)}))
+                {
+                    pairs_overridden_by_exclusions += 1;
+                    continue;
+                }
                 const Gromacs_Molecule_Atom& atom_i = molecule.atoms[ai_local];
                 const Gromacs_Molecule_Atom& atom_j = molecule.atoms[aj_local];
                 std::pair<float, float> c6_c12{0.0f, 0.0f};
@@ -1803,6 +1812,13 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                 nb14.cf_scale_factor.push_back(topology.defaults.fudge_qq);
             }
         }
+    }
+    if (pairs_overridden_by_exclusions > 0)
+    {
+        controller->printf(
+            "WARNING: %llu GROMACS [ pairs ] interaction(s) overridden by "
+            "explicit [ exclusions ]\n",
+            static_cast<unsigned long long>(pairs_overridden_by_exclusions));
     }
 }
 

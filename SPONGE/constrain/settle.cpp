@@ -255,23 +255,170 @@ static __global__ void settle_triangle(
     }
 }
 
+static __device__ __forceinline__ unsigned int Settle_Float_Bits(float value)
+{
+#ifdef GPU_ARCH_NAME
+    return __float_as_uint(value);
+#elif defined(__GNUC__) || defined(__clang__)
+    unsigned int bits = 0;
+    static_assert(sizeof(bits) == sizeof(value),
+                  "SPONGE requires 32-bit IEEE-754 floats");
+    memcpy(&bits, &value, sizeof(value));
+    __asm__ __volatile__("" : "+r"(bits));
+    return bits;
+#else
+    unsigned int bits = 0;
+    memcpy(&bits, &value, sizeof(value));
+    return bits;
+#endif
+}
+
+static __device__ __forceinline__ unsigned long long Settle_Double_Bits(
+    double value)
+{
+#ifdef GPU_ARCH_NAME
+    return static_cast<unsigned long long>(__double_as_longlong(value));
+#else
+    unsigned long long bits = 0;
+    static_assert(sizeof(bits) == sizeof(value),
+                  "SPONGE requires 64-bit IEEE-754 doubles");
+    memcpy(&bits, &value, sizeof(value));
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("" : "+r"(bits));
+#endif
+    return bits;
+#endif
+}
+
+static __device__ __forceinline__ bool Settle_Double_Is_Finite(double value)
+{
+    const unsigned long long bits = Settle_Double_Bits(value);
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
+
+static __device__ __forceinline__ bool Settle_Double_Is_Finite_Nonnegative(
+    double value)
+{
+    const unsigned long long bits = Settle_Double_Bits(value);
+    const unsigned long long magnitude = bits & 0x7fffffffffffffffULL;
+    return (magnitude & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL &&
+           ((bits & 0x8000000000000000ULL) == 0ULL || magnitude == 0ULL);
+}
+
+static __device__ __forceinline__ double Settle_Pair_Precise_Radicand(
+    const VECTOR& r1, const VECTOR& r2, const float target,
+    double* perpendicular_squared)
+{
+    const double r1x = static_cast<double>(r1.x);
+    const double r1y = static_cast<double>(r1.y);
+    const double r1z = static_cast<double>(r1.z);
+    const double r2x = static_cast<double>(r2.x);
+    const double r2y = static_cast<double>(r2.y);
+    const double r2z = static_cast<double>(r2.z);
+    const double cross_x = r1y * r2z - r1z * r2y;
+    const double cross_y = r1z * r2x - r1x * r2z;
+    const double cross_z = r1x * r2y - r1y * r2x;
+    const double cross_squared =
+        cross_x * cross_x + cross_y * cross_y + cross_z * cross_z;
+    const double r2_squared = r2x * r2x + r2y * r2y + r2z * r2z;
+    const double target_double = static_cast<double>(target);
+    if (perpendicular_squared != NULL)
+    {
+        perpendicular_squared[0] = cross_squared / r2_squared;
+    }
+    return r2_squared * target_double * target_double - cross_squared;
+}
+
+// Keep the ordinary float path away from the tangent boundary.  Recompute an
+// uncertain discriminant so cancellation is not mistaken for either a valid
+// or a physically impossible constraint update.
+static __device__ __noinline__ bool Settle_Try_Precise_Pair_Solution(
+    const VECTOR& r1, const VECTOR& r2, const float target, float* k)
+{
+    const double radicand = Settle_Pair_Precise_Radicand(r1, r2, target, NULL);
+    const double r1r2 = static_cast<double>(r1.x) * r2.x +
+                        static_cast<double>(r1.y) * r2.y +
+                        static_cast<double>(r1.z) * r2.z;
+    const double r2r2 = static_cast<double>(r2.x) * r2.x +
+                        static_cast<double>(r2.y) * r2.y +
+                        static_cast<double>(r2.z) * r2.z;
+    if (!Settle_Double_Is_Finite_Nonnegative(radicand) ||
+        !Settle_Double_Is_Finite_Nonnegative(r2r2) || !(r2r2 > 0.0))
+    {
+        return false;
+    }
+    const double precise_k = (sqrt(radicand) - r1r2) / r2r2;
+    const double maximum_float = static_cast<double>(FLT_MAX);
+    if (!Settle_Double_Is_Finite(precise_k) || precise_k > maximum_float ||
+        precise_k < -maximum_float)
+    {
+        return false;
+    }
+    const float narrowed_k = static_cast<float>(precise_k);
+    if ((Settle_Float_Bits(narrowed_k) & 0x7f800000U) == 0x7f800000U)
+    {
+        return false;
+    }
+    k[0] = narrowed_k;
+    return true;
+}
+
+static __device__ __forceinline__ void Settle_Fail_Invalid_Pair(
+    const int pair_i, const CONSTRAIN_PAIR& pair, const int* atom_local,
+    const VECTOR& r1, const VECTOR& r2, const float radicand, const float dt,
+    int* invalid_pair)
+{
+#ifdef GPU_ARCH_NAME
+    double perpendicular_squared = 0.0;
+    const double precise_radicand = Settle_Pair_Precise_Radicand(
+        r1, r2, pair.constant_r, &perpendicular_squared);
+    const double perpendicular =
+        Settle_Double_Is_Finite_Nonnegative(perpendicular_squared)
+            ? sqrt(perpendicular_squared)
+            : -1.0;
+    printf(
+        "Fatal SPONGE SETTLE error: global atoms %d %d cannot produce a "
+        "finite real position-constraint update (target %.9g, "
+        "perpendicular %.17g, "
+        "radicand float/precise %.9g/%.17g, dt %.9g). "
+        "Reduce the timestep or minimize/equilibrate the input state.\n",
+        atom_local[pair.atom_i_serial], atom_local[pair.atom_j_serial],
+        static_cast<double>(pair.constant_r), perpendicular,
+        static_cast<double>(radicand), precise_radicand,
+        static_cast<double>(dt));
+#if defined(USE_CUDA)
+    asm volatile("trap;");
+#elif defined(USE_HIP)
+    __builtin_trap();
+#endif
+#else
+    (void)pair;
+    (void)atom_local;
+    (void)r1;
+    (void)r2;
+    (void)radicand;
+    (void)dt;
+    atomicExch(invalid_pair, pair_i);
+#endif
+}
+
 static __global__ void settle_pair(int num_task_local, CONSTRAIN_PAIR* pairs,
-                                   const float* d_mass, VECTOR* crd,
-                                   LTMatrix3 cell, LTMatrix3 rcell,
+                                   const int* atom_local, const float* d_mass,
+                                   VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell,
                                    VECTOR* last_pair_AB, float dt,
                                    float exp_gamma,
                                    float half_exp_gamma_plus_half, VECTOR* vel,
-                                   LTMatrix3* virial_tensor)
+                                   LTMatrix3* virial_tensor, int* invalid_pair)
 {
     CONSTRAIN_PAIR pair;
     VECTOR r1, r2, kr2;
-    float mA, mB, r0r0, r1r1, r1r2, r2r2, k;
+    float mA, mB, r0r0, r1r1, r1r2, r2r2, radicand, k;
 #ifdef USE_GPU
     int pair_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (pair_i < num_task_local)
 #else
 #pragma omp parallel for private(pair, r1, r2, kr2, mA, mB, r0r0, r1r1, r1r2, \
-                                     r2r2, k)
+                                     r2r2, radicand, k)
     for (int pair_i = 0; pair_i < num_task_local; pair_i++)
 #endif
     {
@@ -288,7 +435,43 @@ static __global__ void settle_pair(int num_task_local, CONSTRAIN_PAIR* pairs,
         r1r2 = r1 * r2;
         r2r2 = r2 * r2;
 
-        k = (sqrt(r1r2 * r1r2 - r1r1 * r2r2 + r2r2 * r0r0) - r1r2) / r2r2;
+        const float projection_squared = r1r2 * r1r2;
+        const float length_product = r1r1 * r2r2;
+        const float target_product = r2r2 * r0r0;
+        radicand = projection_squared - length_product + target_product;
+        const float radicand_error_bound =
+            8.0f * FLT_EPSILON *
+            (projection_squared + length_product + target_product);
+        const unsigned int radicand_bits = Settle_Float_Bits(radicand);
+        const unsigned int radicand_magnitude = radicand_bits & 0x7fffffffU;
+        const unsigned int r2r2_bits = Settle_Float_Bits(r2r2);
+        const unsigned int r2r2_magnitude = r2r2_bits & 0x7fffffffU;
+        const bool finite_radicand =
+            (radicand_magnitude & 0x7f800000U) != 0x7f800000U;
+        const bool valid_r2r2 = (r2r2_bits & 0x80000000U) == 0U &&
+                                r2r2_magnitude != 0U &&
+                                (r2r2_magnitude & 0x7f800000U) != 0x7f800000U;
+        bool solved = false;
+        if (finite_radicand && valid_r2r2 && radicand > radicand_error_bound)
+        {
+            k = (sqrt(radicand) - r1r2) / r2r2;
+            solved = (Settle_Float_Bits(k) & 0x7f800000U) != 0x7f800000U;
+        }
+        else if (finite_radicand && valid_r2r2)
+        {
+            solved =
+                Settle_Try_Precise_Pair_Solution(r1, r2, pair.constant_r, &k);
+        }
+        if (!solved)
+        {
+            Settle_Fail_Invalid_Pair(pair_i, pair, atom_local, r1, r2, radicand,
+                                     dt, invalid_pair);
+#ifdef USE_GPU
+            return;
+#else
+            continue;
+#endif
+        }
         kr2 = k * r2;
 
         r1 = -mB * pair.constrain_k * kr2;
@@ -656,19 +839,61 @@ void SETTLE::Get_Local(const int* atom_local_id, const char* atom_local_label,
                  deviceMemcpyDeviceToHost);
 }
 
-void SETTLE::Do_SETTLE(const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
+void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
+                       const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
                        const LTMatrix3 rcell, VECTOR* vel,
                        const int need_pressure, LTMatrix3* d_stress)
 {
     if (!is_initialized) return;
+#ifndef GPU_ARCH_NAME
+    int invalid_pair = -1;
+    int* invalid_pair_buffer = &invalid_pair;
+#else
+    int* invalid_pair_buffer = NULL;
+#endif
     Launch_Device_Kernel(settle_pair,
                          (num_pair_local + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, num_pair_local,
-                         d_pairs_local, d_mass, crd, cell, rcell, last_pair_AB,
-                         constrain->dt, constrain->v_factor,
+                         d_pairs_local, atom_local, d_mass, crd, cell, rcell,
+                         last_pair_AB, constrain->dt, constrain->v_factor,
                          constrain->x_factor, vel,
-                         virial_tensor + triangle_numbers);
+                         virial_tensor + triangle_numbers, invalid_pair_buffer);
+
+#ifndef GPU_ARCH_NAME
+    if (invalid_pair >= 0)
+    {
+        const CONSTRAIN_PAIR pair = d_pairs_local[invalid_pair];
+        const VECTOR r2 = last_pair_AB[invalid_pair];
+        const VECTOR r1 = Get_Periodic_Displacement(
+            crd[pair.atom_j_serial], crd[pair.atom_i_serial], cell, rcell);
+        const float r1r1 = r1 * r1;
+        const float r1r2 = r1 * r2;
+        const float r2r2 = r2 * r2;
+        const float target_squared = pair.constant_r * pair.constant_r;
+        const float radicand =
+            r1r2 * r1r2 - r1r1 * r2r2 + r2r2 * target_squared;
+        double perpendicular_squared = 0.0;
+        const double precise_radicand = Settle_Pair_Precise_Radicand(
+            r1, r2, pair.constant_r, &perpendicular_squared);
+        const double perpendicular =
+            Settle_Double_Is_Finite_Nonnegative(perpendicular_squared)
+                ? sqrt(perpendicular_squared)
+                : -1.0;
+        controller->Throw_Formatted_SPONGE_Error(
+            spongeErrorSimulationBreakDown, "SETTLE::Do_SETTLE",
+            "Reason:\n\tSETTLE global atoms %d %d cannot produce a finite "
+            "real position-constraint update (target %.9g, perpendicular "
+            "%.17g, radicand float/precise %.9g/%.17g, dt %.9g).\n"
+            "\tReduce the timestep or minimize/equilibrate the input "
+            "state.\n",
+            atom_local[pair.atom_i_serial], atom_local[pair.atom_j_serial],
+            static_cast<double>(pair.constant_r), perpendicular,
+            static_cast<double>(radicand), precise_radicand,
+            static_cast<double>(constrain->dt));
+        return;
+    }
+#endif
 
     Launch_Device_Kernel(
         settle_triangle,

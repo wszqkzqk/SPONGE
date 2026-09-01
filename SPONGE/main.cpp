@@ -1783,9 +1783,9 @@ void Main_Iteration()
                                            md_info.sys.freedom);
             }
 
-            settle.Do_SETTLE(dd.d_mass, dd.crd, md_info.pbc.cell,
-                             md_info.pbc.rcell, dd.vel, md_info.need_pressure,
-                             md_info.sys.d_stress);
+            settle.Do_SETTLE(&controller, dd.atom_local, dd.d_mass, dd.crd,
+                             md_info.pbc.cell, md_info.pbc.rcell, dd.vel,
+                             md_info.need_pressure, md_info.sys.d_stress);
             shake.Constrain(dd.atom_numbers, dd.crd, dd.vel, dd.d_mass_inverse,
                             dd.d_mass, md_info.pbc.cell, md_info.pbc.rcell,
                             md_info.need_pressure, md_info.sys.d_stress);

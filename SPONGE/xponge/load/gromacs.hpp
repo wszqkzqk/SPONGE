@@ -164,6 +164,7 @@ struct Gromacs_Molecule
     std::vector<Gromacs_Dihedral> dihedrals;
     std::vector<Gromacs_Settle> settles;
     std::vector<Gromacs_Constraint> constraints;
+    std::set<std::pair<int, int>> exclusions;
     std::vector<Gromacs_CMap> cmaps;
 };
 
@@ -184,6 +185,13 @@ struct Gromacs_Topology
     std::vector<Gromacs_CMap_Type> cmap_types;
     std::unordered_map<std::string, Gromacs_Molecule> molecules;
     std::vector<std::pair<std::string, int>> system_molecules;
+};
+
+struct Gromacs_Source_Line
+{
+    std::string text;
+    fs::path file_path;
+    std::size_t line_number = 0;
 };
 
 static std::string Gromacs_Trim(const std::string& value)
@@ -279,7 +287,7 @@ static fs::path Gromacs_Resolve_Include(
 static void Gromacs_Preprocess_File(const fs::path& file_path,
                                     std::set<std::string>* macros,
                                     const std::vector<fs::path>& include_dirs,
-                                    std::vector<std::string>* lines,
+                                    std::vector<Gromacs_Source_Line>* lines,
                                     CONTROLLER* controller,
                                     const char* error_by)
 {
@@ -311,8 +319,11 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
 
     std::string raw_line;
     std::string continued_line;
+    std::size_t line_number = 0;
     while (std::getline(fin, raw_line))
     {
+        line_number++;
+        std::size_t logical_line_number = line_number;
         std::string line = Gromacs_Trim(raw_line);
         if (!line.empty() && line[0] == '#')
         {
@@ -425,6 +436,7 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
                     spongeErrorBadFileFormat, error_by,
                     "Reason:\n\tunterminated GROMACS line continuation\n");
             }
+            line_number++;
             std::string next_line =
                 Gromacs_Strip_Comment(Gromacs_Trim(raw_line));
             if (!next_line.empty())
@@ -435,7 +447,7 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
         }
         if (!continued_line.empty())
         {
-            lines->push_back(continued_line);
+            lines->push_back({continued_line, file_path, logical_line_number});
             continued_line.clear();
         }
     }
@@ -446,6 +458,23 @@ static void Gromacs_Preprocess_File(const fs::path& file_path,
             spongeErrorBadFileFormat, error_by,
             "Reason:\n\tunterminated GROMACS preprocessor conditional\n");
     }
+}
+
+static bool Gromacs_Is_Parsed_Section(const std::string& section)
+{
+    static const std::set<std::string> parsed_sections = {
+        "defaults",      "atomtypes", "bondtypes",      "angletypes",
+        "dihedraltypes", "pairtypes", "nonbond_params", "cmaptypes",
+        "moleculetype",  "atoms",     "bonds",          "pairs",
+        "angles",        "dihedrals", "settles",        "constraints",
+        "exclusions",    "cmap",      "molecules"};
+    return parsed_sections.count(section) > 0;
+}
+
+static bool Gromacs_Is_Ignored_Metadata_Section(const std::string& section)
+{
+    static const std::set<std::string> ignored_metadata_sections = {"system"};
+    return ignored_metadata_sections.count(section) > 0;
 }
 
 static float Gromacs_To_Kcal(float value_in_kj) { return value_in_kj / 4.184f; }
@@ -699,7 +728,7 @@ static Gromacs_Topology Gromacs_Parse_Topology(CONTROLLER* controller)
         }
     }
 
-    std::vector<std::string> lines;
+    std::vector<Gromacs_Source_Line> lines;
     Gromacs_Preprocess_File(top_path, &macros, include_dirs, &lines, controller,
                             error_by);
 
@@ -707,11 +736,23 @@ static Gromacs_Topology Gromacs_Parse_Topology(CONTROLLER* controller)
     std::string current_section;
     Gromacs_Molecule* current_molecule = NULL;
 
-    for (const std::string& line : lines)
+    for (const Gromacs_Source_Line& source_line : lines)
     {
+        const std::string& line = source_line.text;
         if (line.front() == '[' && line.back() == ']')
         {
             current_section = Gromacs_Trim(line.substr(1, line.size() - 2));
+            if (!Gromacs_Is_Parsed_Section(current_section) &&
+                !Gromacs_Is_Ignored_Metadata_Section(current_section))
+            {
+                std::string reason =
+                    "Reason:\n\tunsupported GROMACS topology section [ " +
+                    current_section + " ] at " +
+                    source_line.file_path.string() + ":" +
+                    std::to_string(source_line.line_number) + "\n";
+                controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                               error_by, reason.c_str());
+            }
             continue;
         }
 
@@ -1078,6 +1119,33 @@ static Gromacs_Topology Gromacs_Parse_Topology(CONTROLLER* controller)
             }
             current_molecule->constraints.push_back(constraint);
         }
+        else if (current_section == "exclusions")
+        {
+            if (current_molecule == NULL || tokens.size() < 2)
+            {
+                controller->Throw_SPONGE_Error(
+                    spongeErrorBadFileFormat, error_by,
+                    "Reason:\n\tinvalid [ exclusions ] entry in GROMACS "
+                    "topology\n");
+            }
+            int atom_i = std::stoi(tokens[0]) - 1;
+            for (std::size_t i = 1; i < tokens.size(); i++)
+            {
+                int atom_j = std::stoi(tokens[i]) - 1;
+                if (atom_i < 0 || atom_j < 0 || atom_i == atom_j ||
+                    atom_i >=
+                        static_cast<int>(current_molecule->atoms.size()) ||
+                    atom_j >= static_cast<int>(current_molecule->atoms.size()))
+                {
+                    controller->Throw_SPONGE_Error(
+                        spongeErrorBadFileFormat, error_by,
+                        "Reason:\n\tinvalid atom pair in GROMACS [ exclusions "
+                        "]\n");
+                }
+                current_molecule->exclusions.insert(
+                    {std::min(atom_i, atom_j), std::max(atom_i, atom_j)});
+            }
+        }
         else if (current_section == "cmap")
         {
             if (current_molecule == NULL || tokens.size() < 6)
@@ -1222,6 +1290,7 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
 
     std::vector<std::string> global_atom_types;
     std::vector<std::vector<int>> molecule_local_to_global;
+    std::size_t pairs_overridden_by_exclusions = 0;
 
     for (const auto& item : topology.system_molecules)
     {
@@ -1380,6 +1449,13 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                 }
             };
 
+            std::set<std::pair<int, int>> exclusion_pairs = molecule.exclusions;
+            for (const std::pair<int, int>& exclusion : exclusion_pairs)
+            {
+                require_local_atom(exclusion.first);
+                require_local_atom(exclusion.second);
+            }
+
             auto append_bond =
                 [&](int ai_local, int aj_local, float k, float r0)
             {
@@ -1501,10 +1577,15 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                 {
                     if (distance[j] > 0 && distance[j] <= molecule.nrexcl)
                     {
-                        system->exclusions.excluded_atoms[local_to_global[i]]
-                            .push_back(local_to_global[j]);
+                        exclusion_pairs.insert({i, j});
                     }
                 }
+            }
+            for (const std::pair<int, int>& exclusion : exclusion_pairs)
+            {
+                system->exclusions
+                    .excluded_atoms[local_to_global[exclusion.first]]
+                    .push_back(local_to_global[exclusion.second]);
             }
 
             for (const Gromacs_CMap& cmap_item : molecule.cmaps)
@@ -1682,6 +1763,14 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
             {
                 int ai_local = pair.ai - 1;
                 int aj_local = pair.aj - 1;
+                // GROMACS semantics: an explicit [ exclusions ] entry removes
+                // the special 1-4 interaction from [ pairs ] entirely.
+                if (molecule.exclusions.count({std::min(ai_local, aj_local),
+                                               std::max(ai_local, aj_local)}))
+                {
+                    pairs_overridden_by_exclusions += 1;
+                    continue;
+                }
                 const Gromacs_Molecule_Atom& atom_i = molecule.atoms[ai_local];
                 const Gromacs_Molecule_Atom& atom_j = molecule.atoms[aj_local];
                 std::pair<float, float> c6_c12{0.0f, 0.0f};
@@ -1723,6 +1812,13 @@ static void Gromacs_Instantiate_System(const Gromacs_Topology& topology,
                 nb14.cf_scale_factor.push_back(topology.defaults.fudge_qq);
             }
         }
+    }
+    if (pairs_overridden_by_exclusions > 0)
+    {
+        controller->printf(
+            "WARNING: %llu GROMACS [ pairs ] interaction(s) overridden by "
+            "explicit [ exclusions ]\n",
+            static_cast<unsigned long long>(pairs_overridden_by_exclusions));
     }
 }
 

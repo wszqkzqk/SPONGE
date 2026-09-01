@@ -34,6 +34,7 @@ struct CONSTRAIN
 
     // 在实际计算中使用，体系总的constrain pair
     int constrain_pair_numbers = 0;
+    int maximum_constraint_degree = 0;
     CONSTRAIN_PAIR* h_constrain_pair = NULL;
     CONSTRAIN_PAIR* d_constrain_pair = NULL;
 

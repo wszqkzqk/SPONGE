@@ -1,5 +1,7 @@
 ﻿#include "shake.h"
 
+#include "velocity_projection.h"
+
 static __global__ void Constrain_Force_Cycle(
     const int constrain_pair_numbers, const VECTOR* crd, const LTMatrix3 cell,
     const LTMatrix3 rcell, const CONSTRAIN_PAIR* constrain_pair,
@@ -198,8 +200,10 @@ static __device__ __host__ __forceinline__ bool
 compute_velocity_constraint_correction_shake(
     const int atom_i, const int atom_j, const VECTOR* crd, const LTMatrix3 cell,
     const LTMatrix3 rcell, const float* mass_inverse, const VECTOR* vel,
-    VECTOR* correction_i, VECTOR* correction_j)
+    VECTOR* correction_i, VECTOR* correction_j, const float relative_tolerance,
+    bool* constraint_violated)
 {
+    if (constraint_violated != NULL) *constraint_violated = false;
     float mass_i_inverse = mass_inverse[atom_i];
     float mass_j_inverse = mass_inverse[atom_j];
     if (mass_i_inverse == 0.0f && mass_j_inverse == 0.0f) return false;
@@ -207,13 +211,30 @@ compute_velocity_constraint_correction_shake(
     VECTOR dr =
         Get_Periodic_Displacement(crd[atom_i], crd[atom_j], cell, rcell);
     float dr2 = dr * dr;
-    if (dr2 < 1e-12f) return false;
+    if (dr2 < 1e-12f)
+    {
+        if (constraint_violated != NULL) *constraint_violated = true;
+        return false;
+    }
 
-    VECTOR v_diff = vel[atom_i] - vel[atom_j];
+    const VECTOR velocity_i = vel[atom_i];
+    const VECTOR velocity_j = vel[atom_j];
+    VECTOR v_diff = velocity_i - velocity_j;
     float denom = (mass_i_inverse + mass_j_inverse) * dr2;
-    if (denom < 1e-20f) return false;
+    if (denom < 1e-20f)
+    {
+        if (constraint_violated != NULL) *constraint_violated = true;
+        return false;
+    }
 
-    float lambda = (dr * v_diff) / denom;
+    const float projection = dr * v_diff;
+    if (constraint_violated != NULL)
+    {
+        const float tolerance = Velocity_Constraint_Residual_Tolerance(
+            dr2, velocity_i, velocity_j, v_diff, relative_tolerance);
+        *constraint_violated = fabsf(projection) > tolerance;
+    }
+    float lambda = projection / denom;
     correction_i[0] = (-mass_i_inverse * lambda) * dr;
     correction_j[0] = (mass_j_inverse * lambda) * dr;
     return true;
@@ -222,7 +243,8 @@ compute_velocity_constraint_correction_shake(
 static __global__ void project_velocity_to_shake_pairs(
     const int pair_numbers, const CONSTRAIN_PAIR* pairs, const VECTOR* crd,
     const LTMatrix3 cell, const LTMatrix3 rcell, const float* mass_inverse,
-    const VECTOR* vel, VECTOR* delta_vel)
+    const VECTOR* vel, VECTOR* delta_vel, const float relative_tolerance,
+    int* violation)
 {
 #ifdef USE_GPU
     int pair_i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -234,9 +256,12 @@ static __global__ void project_velocity_to_shake_pairs(
     {
         CONSTRAIN_PAIR cp = pairs[pair_i];
         VECTOR correction_i, correction_j;
+        bool constraint_violated = false;
         if (compute_velocity_constraint_correction_shake(
                 cp.atom_i_serial, cp.atom_j_serial, crd, cell, rcell,
-                mass_inverse, vel, &correction_i, &correction_j))
+                mass_inverse, vel, &correction_i, &correction_j,
+                relative_tolerance,
+                violation != NULL ? &constraint_violated : NULL))
         {
             atomicAdd(&delta_vel[cp.atom_i_serial].x, correction_i.x);
             atomicAdd(&delta_vel[cp.atom_i_serial].y, correction_i.y);
@@ -245,12 +270,14 @@ static __global__ void project_velocity_to_shake_pairs(
             atomicAdd(&delta_vel[cp.atom_j_serial].y, correction_j.y);
             atomicAdd(&delta_vel[cp.atom_j_serial].z, correction_j.z);
         }
+        if (constraint_violated && violation != NULL) atomicExch(violation, 1);
     }
 }
 
 static __global__ void apply_shake_velocity_correction(
     const int local_atom_numbers, VECTOR* vel, VECTOR* crd,
-    const VECTOR* delta_vel, const float half_dt)
+    const VECTOR* delta_vel, const float velocity_factor,
+    const float coordinate_factor)
 {
 #ifdef USE_GPU
     int atom_i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -260,25 +287,46 @@ static __global__ void apply_shake_velocity_correction(
     for (int atom_i = 0; atom_i < local_atom_numbers; atom_i++)
 #endif
     {
-        VECTOR delta = delta_vel[atom_i];
+        VECTOR delta = velocity_factor * delta_vel[atom_i];
         vel[atom_i] = vel[atom_i] + delta;
-        crd[atom_i] = crd[atom_i] + half_dt * delta;
+        if (coordinate_factor != 0.0f)
+        {
+            crd[atom_i] = crd[atom_i] + coordinate_factor * delta;
+        }
     }
 }
 
-void SHAKE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
-                                                    const float* mass_inverse,
-                                                    const LTMatrix3 cell,
-                                                    const LTMatrix3 rcell,
-                                                    int local_atom_numbers)
+bool SHAKE::Project_Velocity_To_Constraint_Manifold(
+    VECTOR* vel, VECTOR* crd, const float* mass_inverse, const LTMatrix3 cell,
+    const LTMatrix3 rcell, int local_atom_numbers, bool update_coordinates)
 {
     if (!is_initialized || local_atom_numbers <= 0 ||
         constrain->num_pair_local <= 0)
-        return;
+        return true;
 
-    constexpr int projection_iterations = 8;
+    constexpr int legacy_projection_iterations = 8;
+    constexpr int maximum_velocity_only_iterations = 512;
+    constexpr float relative_tolerance = 1.0e-5f;
+    const int projection_iterations = update_coordinates
+                                          ? legacy_projection_iterations
+                                          : maximum_velocity_only_iterations;
+    // A constraint row overlaps at most 2(d - 1) other rows, so the normalized
+    // pair-overlap matrix has lambda_max <= 2d - 1.  Damping by 1/d therefore
+    // keeps the parallel Richardson/Jacobi update stable.  The degree was
+    // measured before SETTLE pairs were removed, so it is conservative here.
+    const float velocity_factor =
+        update_coordinates
+            ? 1.0f
+            : 1.0f / static_cast<float>(
+                         std::max(1, constrain->maximum_constraint_degree));
+    int* d_violation = NULL;
+    if (!update_coordinates &&
+        !Device_Malloc_Safely((void**)&d_violation, sizeof(int)))
+        return false;
+    bool converged = update_coordinates;
     for (int iter = 0; iter < projection_iterations; ++iter)
     {
+        if (!update_coordinates) deviceMemset(d_violation, 0, sizeof(int));
         deviceMemset(constrain_frc, 0, sizeof(VECTOR) * local_atom_numbers);
         Launch_Device_Kernel(
             project_velocity_to_shake_pairs,
@@ -286,14 +334,28 @@ void SHAKE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, constrain->num_pair_local,
             constrain->constrain_pair_local, crd, cell, rcell, mass_inverse,
-            vel, constrain_frc);
+            vel, constrain_frc, relative_tolerance, d_violation);
+        if (!update_coordinates)
+        {
+            int violation = 0;
+            deviceMemcpy(&violation, d_violation, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            if (violation == 0)
+            {
+                converged = true;
+                break;
+            }
+        }
         Launch_Device_Kernel(
             apply_shake_velocity_correction,
             (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, local_atom_numbers, vel,
-            crd, constrain_frc, 0.5f * constrain->dt);
+            crd, constrain_frc, velocity_factor,
+            update_coordinates ? 0.5f * constrain->dt : 0.0f);
     }
+    if (d_violation != NULL) deviceFree(d_violation);
+    return converged;
 }
 
 static __global__ void Constrain_Force_Cycle_With_Virial(

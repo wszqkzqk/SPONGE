@@ -44,10 +44,10 @@ struct SETTLE
                    const float* d_mass, VECTOR* crd, const LTMatrix3 cell,
                    const LTMatrix3 rcell, VECTOR* vel, const int need_pressure,
                    LTMatrix3* d_stress);
-    void Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
-                                                 const float* mass_inverse,
-                                                 const LTMatrix3 cell,
-                                                 const LTMatrix3 rcell);
+    bool Project_Velocity_To_Constraint_Manifold(
+        VECTOR* vel, VECTOR* crd, const float* mass_inverse,
+        const LTMatrix3 cell, const LTMatrix3 rcell,
+        bool update_coordinates = true);
 
     int local_atom_numbers = 0;
     int num_triangle_local = 0;

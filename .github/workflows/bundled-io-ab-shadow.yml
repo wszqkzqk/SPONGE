@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - master
+      - 'lab/**'
     paths:
       - "SPONGE/**"
       - "benchmarks/bundled_io/**"

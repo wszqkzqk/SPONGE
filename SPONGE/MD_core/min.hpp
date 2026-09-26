@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 static __global__ void MD_Iteration_Gradient_Descent(
     const int atom_numbers, VECTOR* crd, VECTOR* frc, const float* mass_inverse,
@@ -261,8 +261,7 @@ void MD_INFORMATION::MINIMIZATION_iteration::Scale_Force_For_Dynamic_Dt(
     if (md_info->mode == MINIMIZATION && dynamic_dt)
     {
 #ifdef USE_VULKAN
-        const double bias_step =
-            static_cast<double>(md_info->sys.steps) + 1.0;
+        const double bias_step = static_cast<double>(md_info->sys.steps) + 1.0;
         struct
         {
             int atom_numbers;
@@ -275,10 +274,10 @@ void MD_INFORMATION::MINIMIZATION_iteration::Scale_Force_For_Dynamic_Dt(
                  beta1,
                  beta2,
                  epsilon,
+                 static_cast<float>(1.0 -
+                                    pow(static_cast<double>(beta1), bias_step)),
                  static_cast<float>(
-                     1.0 - pow(static_cast<double>(beta1), bias_step)),
-                 static_cast<float>(sqrt(
-                     1.0 - pow(static_cast<double>(beta2), bias_step)))};
+                     sqrt(1.0 - pow(static_cast<double>(beta2), bias_step)))};
         static_assert(sizeof(params) == 24,
                       "minimization_adam_force params must match the GLSL "
                       "push constant layout");

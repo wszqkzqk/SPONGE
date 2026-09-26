@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Frc { Vec3 frc[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float dt;
+    float max_move;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    Vec3 move = v3_scale(frc[i], pc.dt);
+    if (pc.max_move > 0.0) move = v3_clamp_len(move, pc.max_move);
+    crd[i] = v3_add(crd[i], move);
+}

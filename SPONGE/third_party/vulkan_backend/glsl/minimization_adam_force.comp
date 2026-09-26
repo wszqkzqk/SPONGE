@@ -8,21 +8,32 @@ layout(push_constant) uniform Params
     float beta1;
     float beta2;
     float epsilon;
-    float t;
+    float first_bias;
+    float second_bias_sqrt;
 }
 pc;
+float adam_step(float f, float m_inv, inout float moment, inout float root)
+{
+    float m = pc.beta1 * moment + (1.0 - pc.beta1) * m_inv * f;
+    float s = max(abs(root), abs(f));
+    float r = s > 0.0 ? s * sqrt(pc.beta2 * (root / s) * (root / s) +
+                                 (1.0 - pc.beta2) * (f / s) * (f / s))
+                      : 0.0;
+    moment = m;
+    root = r;
+    return (m / pc.first_bias) / (r / pc.second_bias_sqrt + pc.epsilon);
+}
 void main()
 {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.atom_numbers) return;
+    float m_inv = mass_inverse[i];
     Vec3 f = frc[i];
-    Vec3 f2 = v3_mul(f, f);
-    vel[i] = v3_add(v3_scale(vel[i], pc.beta1),
-                    v3_scale(v3_scale(f, mass_inverse[i]), 1.0 - pc.beta1));
-    acc[i] = v3_add(v3_scale(acc[i], pc.beta2), v3_scale(f2, 1.0 - pc.beta2));
-    f = v3_scale(vel[i], 1.0 / (1.0 - pow(pc.beta1, pc.t + 1.0)));
-    f2 = v3_scale(acc[i], 1.0 / (1.0 - pow(pc.beta2, pc.t + 1.0)));
-    frc[i] = Vec3(f.x / (sqrt(f2.x) + pc.epsilon),
-                  f.y / (sqrt(f2.y) + pc.epsilon),
-                  f.z / (sqrt(f2.z) + pc.epsilon));
+    Vec3 moment = vel[i];
+    Vec3 root = acc[i];
+    frc[i] = Vec3(adam_step(f.x, m_inv, moment.x, root.x),
+                  adam_step(f.y, m_inv, moment.y, root.y),
+                  adam_step(f.z, m_inv, moment.z, root.z));
+    vel[i] = moment;
+    acc[i] = root;
 }

@@ -67,7 +67,7 @@ else()
 endif()
 
 set(SPONGE_VULKAN_GLSL_DIR
-    "${PROJECT_ROOT_DIR}/SPONGE/third_party/vulkan_backend/glsl")
+    "${PROJECT_ROOT_DIR}/SPONGE/vulkan_backend/glsl")
 set(SPONGE_VULKAN_GENERATED "${CMAKE_BINARY_DIR}/vulkan_shader_sources.cpp")
 file(GLOB SPONGE_VULKAN_SHADER_FILES CONFIGURE_DEPENDS
      "${SPONGE_VULKAN_GLSL_DIR}/*.comp" "${SPONGE_VULKAN_GLSL_DIR}/*.glsl")
@@ -81,8 +81,8 @@ add_custom_command(
           ${PROJECT_ROOT_DIR}/cmake/utils/embed_vulkan_shaders.cmake
   COMMENT "Embedding Vulkan GLSL kernels")
 set(SPONGE_VULKAN_BACKEND_SOURCES
-    ${PROJECT_ROOT_DIR}/SPONGE/third_party/vulkan_backend/vulkan_runtime.cpp
-    ${PROJECT_ROOT_DIR}/SPONGE/third_party/vulkan_backend/vulkan_fft.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/vulkan_backend/vulkan_runtime.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/vulkan_backend/vulkan_fft.cpp
     ${SPONGE_VULKAN_GENERATED})
 set_source_files_properties(${SPONGE_VULKAN_BACKEND_SOURCES}
                             PROPERTIES LANGUAGE CXX)
@@ -92,7 +92,7 @@ find_path(
   HINTS "$ENV{CONDA_PREFIX}"
   PATH_SUFFIXES "include/glslang/Include" "include")
 set_source_files_properties(
-  ${PROJECT_ROOT_DIR}/SPONGE/third_party/vulkan_backend/vulkan_fft.cpp
+  ${PROJECT_ROOT_DIR}/SPONGE/vulkan_backend/vulkan_fft.cpp
   PROPERTIES COMPILE_DEFINITIONS "VKFFT_BACKEND=0"
              INCLUDE_DIRECTORIES
              "${PROJECT_ROOT_DIR}/SPONGE/third_party/vkfft;${PROJECT_ROOT_DIR}/SPONGE/third_party/vkfft/vkFFT;${GLSLANG_C_INTERFACE_INCLUDE_DIR}"

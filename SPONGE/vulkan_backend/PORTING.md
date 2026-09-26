@@ -1,7 +1,7 @@
 # Vulkan Backend Porting Guide
 
 How to port a SPONGE module to the Vulkan compute backend. The bond module
-(`SPONGE/bond/bond.cpp` + `SPONGE/third_party/vulkan_backend/glsl/bond_force.comp`)
+(`SPONGE/bond/bond.cpp` + `SPONGE/vulkan_backend/glsl/bond_force.comp`)
 is the reference implementation — read it first.
 
 ## Architecture
@@ -11,10 +11,10 @@ is the reference implementation — read it first.
   (deviceMalloc/deviceMemcpy/deviceMemset/deviceFree/streams), `VK_LAUNCH`,
   and the `Launch_Device_Kernel` fallback (runs the C++ kernel on CPU after a
   `sponge_vk::HostBarrier()`).
-- `SPONGE/third_party/vulkan_backend/vulkan_runtime.cpp` — runtime: device
+- `SPONGE/vulkan_backend/vulkan_runtime.cpp` — runtime: device
   init, host-visible coherent buffers (device pointer == host mapped pointer),
   stream-ordered command recording, glslang-based runtime GLSL compilation.
-- `SPONGE/third_party/vulkan_backend/glsl/*.comp` — GLSL compute kernels.
+- `SPONGE/vulkan_backend/glsl/*.comp` — GLSL compute kernels.
   Every `.comp` file is one kernel named by its file name (e.g.
   `bond_force.comp` → kernel `bond_force`). At build time
   `cmake/utils/embed_vulkan_shaders.cmake` embeds all sources; at runtime each
@@ -107,8 +107,8 @@ ENV=.pixi/envs/dev-vulkan
   echo "#extension GL_KHR_shader_subgroup_shuffle : enable";
   echo "#define SPONGE_VK_ATOMIC_FLOAT 1"; echo "#define SPONGE_VK_FP64 0";
   echo "#define SPONGE_VK_SUBGROUP_SIZE 32";
-  cat SPONGE/third_party/vulkan_backend/glsl/sponge_common.glsl;
-  cat SPONGE/third_party/vulkan_backend/glsl/my_kernel.comp; } > /tmp/t.comp
+  cat SPONGE/vulkan_backend/glsl/sponge_common.glsl;
+  cat SPONGE/vulkan_backend/glsl/my_kernel.comp; } > /tmp/t.comp
 $ENV/bin/glslangValidator --target-env vulkan1.1 -V /tmp/t.comp -o /dev/null
 ```
 

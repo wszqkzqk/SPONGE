@@ -1,0 +1,46 @@
+struct VType3
+{
+    int virtual_atom;
+    int from_1;
+    int from_2;
+    int from_3;
+    float d;
+    float k;
+};
+layout(set = 0, binding = 0, std430) buffer VInfo { VType3 v_info[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer GeometryError { int geometry_error[]; };
+layout(push_constant) uniform Params
+{
+    int virtual_numbers;
+    Boundary boundary;
+}
+pc;
+const float VGEOM_EPS = 1.0e-6;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.virtual_numbers) return;
+    VType3 v_temp = v_info[i];
+    Vec3 r1 = crd[v_temp.from_1];
+    Vec3 r2 = crd[v_temp.from_2];
+    Vec3 r3 = crd[v_temp.from_3];
+    Vec3 r21 = get_displacement(r2, r1, pc.boundary);
+    Vec3 r32 = get_displacement(r3, r2, pc.boundary);
+    Vec3 direction = v3_add(r21, v3_scale(r32, v_temp.k));
+    float norm2 = v3_dot(direction, direction);
+    Vec3 position = r1;
+    if (abs(v_temp.d) > VGEOM_EPS)
+    {
+        if (norm2 <= VGEOM_EPS * VGEOM_EPS)
+        {
+            atomicExchange(geometry_error[0], v_temp.virtual_atom);
+        }
+        else
+        {
+            position =
+                v3_add(r1, v3_scale(direction, v_temp.d / sqrt(norm2)));
+        }
+    }
+    crd[v_temp.virtual_atom] = position;
+}

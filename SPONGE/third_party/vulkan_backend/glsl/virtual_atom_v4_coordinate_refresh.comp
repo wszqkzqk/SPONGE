@@ -1,0 +1,22 @@
+layout(set = 0, binding = 0, std430) buffer FromAtoms { int from_atoms[]; };
+layout(set = 0, binding = 1, std430) buffer Weight { float weight[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int virtual_atom;
+}
+pc;
+void main()
+{
+    int i = int(gl_LocalInvocationID.x);
+    Vec3 new_position = Vec3(0.0, 0.0, 0.0);
+    if (i < pc.atom_numbers)
+    {
+        new_position = v3_scale(crd[from_atoms[i]], weight[i]);
+    }
+    new_position.x = block_sum(new_position.x);
+    new_position.y = block_sum(new_position.y);
+    new_position.z = block_sum(new_position.z);
+    if (gl_LocalInvocationID.x == 0u) crd[pc.virtual_atom] = new_position;
+}

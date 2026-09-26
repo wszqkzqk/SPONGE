@@ -1,0 +1,62 @@
+struct VType3
+{
+    int virtual_atom;
+    int from_1;
+    int from_2;
+    int from_3;
+    float d;
+    float k;
+};
+layout(set = 0, binding = 0, std430) buffer VInfo { VType3 v_info[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 3, std430) buffer GeometryError { int geometry_error[]; };
+layout(push_constant) uniform Params
+{
+    int virtual_numbers;
+    Boundary boundary;
+}
+pc;
+const float VGEOM_EPS = 1.0e-6;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.virtual_numbers) return;
+    VType3 v_temp = v_info[i];
+    Vec3 force_v = frc[v_temp.virtual_atom];
+    Vec3 force_1 = force_v;
+    Vec3 force_2 = Vec3(0.0, 0.0, 0.0);
+    Vec3 force_3 = Vec3(0.0, 0.0, 0.0);
+    if (abs(v_temp.d) > VGEOM_EPS)
+    {
+        Vec3 r1 = crd[v_temp.from_1];
+        Vec3 r2 = crd[v_temp.from_2];
+        Vec3 r3 = crd[v_temp.from_3];
+        Vec3 r21 = get_displacement(r2, r1, pc.boundary);
+        Vec3 r32 = get_displacement(r3, r2, pc.boundary);
+        Vec3 direction = v3_add(r21, v3_scale(r32, v_temp.k));
+        float norm2 = v3_dot(direction, direction);
+        if (norm2 <= VGEOM_EPS * VGEOM_EPS)
+        {
+            force_1 = Vec3(0.0, 0.0, 0.0);
+            atomicExchange(geometry_error[0], v_temp.virtual_atom);
+        }
+        else
+        {
+            float inverse_norm = 1.0 / sqrt(norm2);
+            Vec3 unit = v3_scale(direction, inverse_norm);
+            Vec3 perpendicular =
+                v3_sub(force_v,
+                       v3_scale(unit, v3_dot(unit, force_v)));
+            Vec3 correction =
+                v3_scale(perpendicular, v_temp.d * inverse_norm);
+            force_1 = v3_sub(force_v, correction);
+            force_2 = v3_scale(correction, 1.0 - v_temp.k);
+            force_3 = v3_scale(correction, v_temp.k);
+        }
+    }
+    aadd_v3(frc[v_temp.from_1], force_1);
+    aadd_v3(frc[v_temp.from_2], force_2);
+    aadd_v3(frc[v_temp.from_3], force_3);
+    frc[v_temp.virtual_atom] = Vec3(0.0, 0.0, 0.0);
+}

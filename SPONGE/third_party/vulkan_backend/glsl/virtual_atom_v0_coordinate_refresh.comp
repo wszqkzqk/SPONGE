@@ -1,0 +1,18 @@
+struct VType0
+{
+    int virtual_atom;
+    int from_1;
+    float h;
+};
+layout(set = 0, binding = 0, std430) buffer VInfo { VType0 v_info[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(push_constant) uniform Params { int virtual_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.virtual_numbers) return;
+    VType0 v_temp = v_info[i];
+    Vec3 source = crd[v_temp.from_1];
+    source.z = 2.0 * v_temp.h - source.z;
+    crd[v_temp.virtual_atom] = source;
+}

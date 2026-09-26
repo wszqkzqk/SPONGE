@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 2, std430) buffer AtomToGroup { int atom_to_group[]; };
+layout(set = 0, binding = 3, std430) buffer Mass { float mass[]; };
+layout(set = 0, binding = 4, std430) buffer SumMass { float sum_mass[]; };
+layout(set = 0, binding = 5, std430) buffer SumPos { Vec3 sum_pos[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int atom_global = atom_local[i];
+    int group = atom_to_group[atom_global];
+    float m = mass[atom_global];
+    afadd(sum_mass[group], m);
+    aadd_v3(sum_pos[group], v3_scale(crd[i], m));
+}

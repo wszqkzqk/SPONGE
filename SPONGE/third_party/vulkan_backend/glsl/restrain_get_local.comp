@@ -1,0 +1,41 @@
+layout(set = 0, binding = 0, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 1, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 2, std430) buffer Lists { int d_lists[]; };
+layout(set = 0, binding = 3, std430) buffer LocalList { int local_restrain_list[]; };
+layout(set = 0, binding = 4, std430) buffer CrdRef { Vec3 crd_ref[]; };
+layout(set = 0, binding = 5, std430) buffer LocalCrdRef { Vec3 local_crd_ref[]; };
+layout(set = 0, binding = 6, std430) buffer Weights { Vec3 d_weights[]; };
+layout(set = 0, binding = 7, std430) buffer LocalWeights { Vec3 local_weights[]; };
+layout(set = 0, binding = 8, std430) buffer LocalNumbers
+{
+    int d_local_restrain_numbers[];
+};
+layout(push_constant) uniform Params
+{
+    int restrain_numbers;
+    int if_single_weight;
+}
+pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    d_local_restrain_numbers[0] = 0;
+    for (int i = 0; i < pc.restrain_numbers; i++)
+    {
+        if (label_at(d_lists[i]) == 1u)
+        {
+            int slot = d_local_restrain_numbers[0];
+            local_restrain_list[slot] = atom_local_id[d_lists[i]];
+            local_crd_ref[slot] = crd_ref[i];
+            if (pc.if_single_weight == 0)
+            {
+                local_weights[slot] = d_weights[i];
+            }
+            d_local_restrain_numbers[0] = slot + 1;
+        }
+    }
+}

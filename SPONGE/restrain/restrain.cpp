@@ -2,6 +2,36 @@
 
 #include "../xponge/ir/protocol.h"
 
+#ifdef USE_VULKAN
+struct RestrainForceVkParams
+{
+    int restrain_numbers;
+    int if_single_weight;
+    float single_weight;
+    Boundary boundary;
+    int need_atom_energy;
+    int need_virial;
+    int refcoord_scaling;
+};
+static_assert(sizeof(RestrainForceVkParams) == 76,
+              "RestrainForceVkParams must match the GLSL push constant layout");
+
+struct RestrainRescaleRefVkParams
+{
+    int numbers;
+    LTMatrix3 g;
+    float dt;
+};
+static_assert(sizeof(RestrainRescaleRefVkParams) == 32,
+              "RestrainRescaleRefVkParams must match the GLSL push constant "
+              "layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
+
 void RESTRAIN_INFORMATION::Init_Com_Cache_If_Needed(
     const int atom_numbers, const MD_INFORMATION& md_info)
 {
@@ -156,12 +186,25 @@ void RESTRAIN_INFORMATION::Update_Group_COM(
 {
     deviceMemset(d_sum_mass, 0, sizeof(float) * group_numbers);
     deviceMemset(d_sum_pos, 0, sizeof(VECTOR) * group_numbers);
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+    } params{local_atom_numbers};
+    const void* buffers[] = {crd,      atom_local, atom_to_group,
+                             mass,     d_sum_mass, d_sum_pos};
+    VK_LAUNCH(restrain_accumulate_group_com,
+              (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         Accumulate_Group_COM_Sum,
         (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, local_atom_numbers, crd,
         atom_local, atom_to_group, mass, d_sum_mass, d_sum_pos);
+#endif
 
     deviceMemcpy(h_sum_mass, d_sum_mass, sizeof(float) * group_numbers,
                  deviceMemcpyDeviceToHost);
@@ -623,12 +666,25 @@ void RESTRAIN_INFORMATION::Initial(CONTROLLER* controller,
 
         Device_Malloc_Safely((void**)&crd_ref,
                              sizeof(VECTOR) * this->restrain_numbers);
+#ifdef USE_VULKAN
+        struct
+        {
+            int restrain_numbers;
+        } params{this->restrain_numbers};
+        const void* buffers[] = {this->d_lists, this->d_ref_crd_all,
+                                 this->crd_ref};
+        VK_LAUNCH(restrain_gather_ref,
+                  (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Gather_Ref_From_All_Device,
             (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, this->restrain_numbers,
             this->d_lists, this->d_ref_crd_all, this->crd_ref);
+#endif
 
         // ---------------- initialize restrain weight information
         // -------------------------------------
@@ -812,12 +868,24 @@ void RESTRAIN_INFORMATION::Initial(
     }
     Device_Malloc_Safely((void**)&this->crd_ref,
                          sizeof(VECTOR) * this->restrain_numbers);
+#ifdef USE_VULKAN
+    struct
+    {
+        int restrain_numbers;
+    } params{this->restrain_numbers};
+    const void* buffers[] = {this->d_lists, this->d_ref_crd_all, this->crd_ref};
+    VK_LAUNCH(restrain_gather_ref,
+              (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         Gather_Ref_From_All_Device,
         (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, this->restrain_numbers,
         this->d_lists, this->d_ref_crd_all, this->crd_ref);
+#endif
 
     this->single_weight = 20.0f;
     if (controller->Command_Exist(this->module_name, "single_weight"))
@@ -916,12 +984,24 @@ bool RESTRAIN_INFORMATION::Apply_H5_Reference_Coordinates(
     }
     deviceMemcpy(d_ref_crd_all, coordinates.data(),
                  sizeof(VECTOR) * atom_numbers, deviceMemcpyHostToDevice);
+#ifdef USE_VULKAN
+    struct
+    {
+        int restrain_numbers;
+    } params{restrain_numbers};
+    const void* buffers[] = {d_lists, d_ref_crd_all, crd_ref};
+    VK_LAUNCH(restrain_gather_ref,
+              (restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         Gather_Ref_From_All_Device,
         (restrain_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, restrain_numbers, d_lists,
         d_ref_crd_all, crd_ref);
+#endif
     return true;
 }
 
@@ -939,12 +1019,24 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
     switch (refcoord_scaling)
     {
         case REFCOORD_SCALING_ALL:
+#ifdef USE_VULKAN
+        {
+            RestrainRescaleRefVkParams params{atom_numbers, g, dt};
+            const void* buffers[] = {d_ref_crd_all};
+            VK_LAUNCH(restrain_rescale_ref_all,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+        }
+#else
             Launch_Device_Kernel(
                 Rescale_Ref_All_Device,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, atom_numbers, g, dt,
                 d_ref_crd_all);
+#endif
             break;
         case REFCOORD_SCALING_COM_RES:
             if (!md_info->res.is_initialized ||
@@ -955,6 +1047,21 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
                 printf("restrain refcoord_scaling com_res is not ready.\n");
                 return;
             }
+#ifdef USE_VULKAN
+        {
+            RestrainRescaleRefVkParams params{md_info->res.residue_numbers, g,
+                                              dt};
+            const void* buffers[] = {md_info->res.d_res_start,
+                                     md_info->res.d_res_end, d_ref_crd_all,
+                                     md_info->d_mass};
+            VK_LAUNCH(restrain_rescale_ref_by_group_range,
+                      (md_info->res.residue_numbers +
+                       CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+        }
+#else
             Launch_Device_Kernel(Rescale_Ref_By_Group_Range_Device,
                                  (md_info->res.residue_numbers +
                                   CONTROLLER::device_max_thread - 1) /
@@ -964,6 +1071,7 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
                                  md_info->res.d_res_start,
                                  md_info->res.d_res_end, d_ref_crd_all,
                                  md_info->d_mass, g, dt, d_ref_crd_all);
+#endif
             break;
         case REFCOORD_SCALING_COM_MOL:
             if (!md_info->mol.is_initialized ||
@@ -974,6 +1082,21 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
                 printf("restrain refcoord_scaling com_mol is not ready.\n");
                 return;
             }
+#ifdef USE_VULKAN
+        {
+            RestrainRescaleRefVkParams params{md_info->mol.molecule_numbers, g,
+                                              dt};
+            const void* buffers[] = {md_info->mol.d_atom_start,
+                                     md_info->mol.d_atom_end, d_ref_crd_all,
+                                     md_info->d_mass};
+            VK_LAUNCH(restrain_rescale_ref_by_group_range,
+                      (md_info->mol.molecule_numbers +
+                       CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+        }
+#else
             Launch_Device_Kernel(Rescale_Ref_By_Group_Range_Device,
                                  (md_info->mol.molecule_numbers +
                                   CONTROLLER::device_max_thread - 1) /
@@ -983,6 +1106,7 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
                                  md_info->mol.d_atom_start,
                                  md_info->mol.d_atom_end, d_ref_crd_all,
                                  md_info->d_mass, g, dt, d_ref_crd_all);
+#endif
             break;
         case REFCOORD_SCALING_COM_UG:
             if (md_info->ug.ug_numbers <= 0 || md_info->ug.d_ug == NULL ||
@@ -1003,12 +1127,24 @@ void RESTRAIN_INFORMATION::Update_Refcoord_Scaling(
             return;
     }
 
+#ifdef USE_VULKAN
+    struct
+    {
+        int restrain_numbers;
+    } params{this->restrain_numbers};
+    const void* buffers[] = {this->d_lists, this->d_ref_crd_all, this->crd_ref};
+    VK_LAUNCH(restrain_gather_ref,
+              (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         Gather_Ref_From_All_Device,
         (this->restrain_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, this->restrain_numbers,
         this->d_lists, this->d_ref_crd_all, this->crd_ref);
+#endif
 
     if (atom_local_label != NULL && atom_local_id != NULL)
     {
@@ -1051,12 +1187,30 @@ void RESTRAIN_INFORMATION::Get_Local(int* atom_local, int local_atom_numbers,
 {
     if (!is_initialized) return;
     local_restrain_numbers = 0;
+#ifdef USE_VULKAN
+    struct
+    {
+        int restrain_numbers;
+        int if_single_weight;
+    } params{restrain_numbers, this->if_single_weight};
+    const void* buffers[] = {atom_local_label,
+                             atom_local_id,
+                             this->d_lists,
+                             this->d_local_restrain_list,
+                             this->crd_ref,
+                             this->local_crd_ref,
+                             vk_or_dummy(this->d_weights, this->crd_ref),
+                             vk_or_dummy(this->local_weights, this->crd_ref),
+                             this->d_local_restrain_numbers};
+    VK_LAUNCH(restrain_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL, restrain_numbers,
                          atom_local_label, atom_local_id, this->d_lists,
                          this->d_local_restrain_list, this->crd_ref,
                          this->local_crd_ref, this->d_weights,
                          this->local_weights, this->d_local_restrain_numbers,
                          this->if_single_weight);
+#endif
     deviceMemcpy(&local_restrain_numbers, this->d_local_restrain_numbers,
                  sizeof(int), deviceMemcpyDeviceToHost);
 }
@@ -1154,6 +1308,30 @@ void RESTRAIN_INFORMATION::Restraint(const VECTOR* crd, Boundary boundary,
             }
         }
 
+#ifdef USE_VULKAN
+        RestrainForceVkParams params{local_restrain_numbers,
+                                     this->if_single_weight,
+                                     this->single_weight,
+                                     boundary,
+                                     need_potential,
+                                     need_virial,
+                                     effective_scaling};
+        const void* buffers[] = {this->d_local_restrain_list,
+                                 crd,
+                                 this->local_crd_ref,
+                                 vk_or_dummy(this->local_weights, crd),
+                                 vk_or_dummy(atom_energy, crd),
+                                 vk_or_dummy(atom_virial, crd),
+                                 frc,
+                                 this->d_restrain_ene,
+                                 vk_or_dummy(atom_local, crd),
+                                 vk_or_dummy(atom_to_group, crd),
+                                 vk_or_dummy(group_com, crd)};
+        VK_LAUNCH(restrain_force,
+                  (local_restrain_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             restrain_force_with_atom_energy_and_virial,
             (local_restrain_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1164,6 +1342,7 @@ void RESTRAIN_INFORMATION::Restraint(const VECTOR* crd, Boundary boundary,
             boundary, need_potential, atom_energy, need_virial, atom_virial,
             frc, this->d_restrain_ene, effective_scaling, atom_local,
             atom_to_group, group_com);
+#endif
     }
 }
 

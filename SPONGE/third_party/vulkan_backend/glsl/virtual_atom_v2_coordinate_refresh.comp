@@ -1,0 +1,28 @@
+struct VType2
+{
+    int virtual_atom;
+    int from_1;
+    int from_2;
+    int from_3;
+    float a;
+    float b;
+};
+layout(set = 0, binding = 0, std430) buffer VInfo { VType2 v_info[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(push_constant) uniform Params
+{
+    int virtual_numbers;
+    Boundary boundary;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.virtual_numbers) return;
+    VType2 v_temp = v_info[i];
+    Vec3 r1 = crd[v_temp.from_1];
+    Vec3 dr21 = get_displacement(crd[v_temp.from_2], r1, pc.boundary);
+    Vec3 dr31 = get_displacement(crd[v_temp.from_3], r1, pc.boundary);
+    crd[v_temp.virtual_atom] =
+        v3_add(r1, v3_add(v3_scale(dr21, v_temp.a), v3_scale(dr31, v_temp.b)));
+}

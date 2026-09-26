@@ -1,0 +1,10 @@
+layout(set = 0, binding = 0, std430) buffer Lists { int d_lists[]; };
+layout(set = 0, binding = 1, std430) buffer RefAll { Vec3 ref_all[]; };
+layout(set = 0, binding = 2, std430) buffer RefList { Vec3 ref_list[]; };
+layout(push_constant) uniform Params { int restrain_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.restrain_numbers) return;
+    ref_list[i] = ref_all[d_lists[i]];
+}

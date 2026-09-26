@@ -1,0 +1,21 @@
+layout(set = 0, binding = 0, std430) buffer FromAtoms { int from_atoms[]; };
+layout(set = 0, binding = 1, std430) buffer Weight { float weight[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int virtual_atom;
+}
+pc;
+void main()
+{
+    Vec3 new_force = frc[pc.virtual_atom];
+    for (int i = int(gl_LocalInvocationID.x); i < pc.atom_numbers;
+         i += int(gl_WorkGroupSize.x))
+    {
+        aadd_v3(frc[from_atoms[i]], v3_scale(new_force, weight[i]));
+    }
+    barrier();
+    if (gl_LocalInvocationID.x == 0u)
+        frc[pc.virtual_atom] = Vec3(0.0, 0.0, 0.0);
+}

@@ -3,6 +3,19 @@
 #include "../utils/float_classification.hpp"
 #include "../xponge/load/native/hard_wall_h5.hpp"
 
+#ifdef USE_VULKAN
+struct HardWallReflectVkParams
+{
+    int atom_numbers;
+    float boundary;
+    int low_boundary;
+    int xyz;
+};
+static_assert(sizeof(HardWallReflectVkParams) == 16,
+              "HardWallReflectVkParams must match the GLSL push constant "
+              "layout");
+#endif
+
 static bool Has_Legacy_Hard_Wall(CONTROLLER* controller,
                                  const char* module_name)
 {
@@ -172,6 +185,25 @@ void HARD_WALL::Reflect(int atom_numbers, VECTOR* crd, VECTOR* vel)
 {
     if (!this->is_initialized) return;
 
+#ifdef USE_VULKAN
+    const unsigned int grid =
+        (atom_numbers + CONTROLLER::device_max_thread - 1) /
+        CONTROLLER::device_max_thread;
+    const void* buffers[] = {(const void*)crd, (void*)vel};
+    auto reflect = [&](float boundary, int low_boundary, int xyz)
+    {
+        HardWallReflectVkParams params{atom_numbers, boundary, low_boundary,
+                                       xyz};
+        VK_LAUNCH(hard_wall_reflect, grid, 1, CONTROLLER::device_max_thread, 1,
+                  buffers, &params, NULL);
+    };
+    if (!SpongeFloat::Is_Inf(this->x_high)) reflect(this->x_high, 0, 0);
+    if (!SpongeFloat::Is_Inf(this->y_high)) reflect(this->y_high, 0, 1);
+    if (!SpongeFloat::Is_Inf(this->z_high)) reflect(this->z_high, 0, 2);
+    if (!SpongeFloat::Is_Inf(this->x_low)) reflect(this->x_low, 1, 0);
+    if (!SpongeFloat::Is_Inf(this->y_low)) reflect(this->y_low, 1, 1);
+    if (!SpongeFloat::Is_Inf(this->z_low)) reflect(this->z_low, 1, 2);
+#else
     auto f = Hard_Wall_Reflection_Device<false, 0>;
 
     if (!SpongeFloat::Is_Inf(this->x_high))
@@ -234,4 +266,5 @@ void HARD_WALL::Reflect(int atom_numbers, VECTOR* crd, VECTOR* vel)
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers, (float*)crd,
             (float*)vel, this->z_low);
     }
+#endif
 }

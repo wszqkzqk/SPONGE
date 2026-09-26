@@ -1,0 +1,44 @@
+layout(set = 0, binding = 0, std430) buffer GroupStart { int group_start[]; };
+layout(set = 0, binding = 1, std430) buffer GroupEnd { int group_end[]; };
+layout(set = 0, binding = 2, std430) buffer RefAll { Vec3 ref_all[]; };
+layout(set = 0, binding = 3, std430) buffer Mass { float mass[]; };
+layout(push_constant) uniform Params
+{
+    int group_numbers;
+    float g11, g21, g22, g31, g32, g33;
+    float dt;
+}
+pc;
+void main()
+{
+    int gidx = int(gl_GlobalInvocationID.x);
+    if (gidx >= pc.group_numbers) return;
+    float msum = 0.0;
+    Vec3 com = Vec3(0.0, 0.0, 0.0);
+    for (int atom = group_start[gidx]; atom < group_end[gidx]; atom++)
+    {
+        float m = mass[atom];
+        com.x += ref_all[atom].x * m;
+        com.y += ref_all[atom].y * m;
+        com.z += ref_all[atom].z * m;
+        msum += m;
+    }
+    if (msum > 0.0)
+    {
+        com.x /= msum;
+        com.y /= msum;
+        com.z /= msum;
+    }
+    Vec3 com_dash;
+    com_dash.x =
+        com.x + pc.dt * (com.x * pc.g11 + com.y * pc.g21 + com.z * pc.g31);
+    com_dash.y = com.y + pc.dt * (com.y * pc.g22 + com.z * pc.g32);
+    com_dash.z = com.z + pc.dt * com.z * pc.g33;
+    Vec3 delta = v3_sub(com_dash, com);
+    for (int atom = group_start[gidx]; atom < group_end[gidx]; atom++)
+    {
+        ref_all[atom].x += delta.x;
+        ref_all[atom].y += delta.y;
+        ref_all[atom].z += delta.z;
+    }
+}

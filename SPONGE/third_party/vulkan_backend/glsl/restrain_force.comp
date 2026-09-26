@@ -1,0 +1,71 @@
+layout(set = 0, binding = 0, std430) buffer RestrainList { int restrain_list[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer CrdRef { Vec3 crd_ref[]; };
+layout(set = 0, binding = 3, std430) buffer WeightList { Vec3 weight_list[]; };
+layout(set = 0, binding = 4, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 5, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 6, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 7, std430) buffer ResEne { float res_ene[]; };
+layout(set = 0, binding = 8, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 9, std430) buffer AtomToGroup { int atom_to_group[]; };
+layout(set = 0, binding = 10, std430) buffer GroupCom { Vec3 group_com[]; };
+layout(push_constant) uniform Params
+{
+    int restrain_numbers;
+    int if_single_weight;
+    float single_weight;
+    Boundary boundary;
+    int need_atom_energy;
+    int need_virial;
+    int refcoord_scaling;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.restrain_numbers) return;
+    int atom_i = restrain_list[i];
+    Vec3 r_i = crd[atom_i];
+    Vec3 dr = get_displacement(crd_ref[i], r_i, pc.boundary);
+    Vec3 temp_force;
+    if (pc.if_single_weight != 0)
+    {
+        temp_force = v3_scale(dr, pc.single_weight);
+    }
+    else
+    {
+        temp_force = v3_mul(weight_list[i], dr);
+    }
+    if (pc.need_atom_energy != 0)
+    {
+        float ene = 0.5 * v3_dot(temp_force, dr);
+        atom_energy[atom_i] += ene;
+        res_ene[i] = ene;
+    }
+    if (pc.need_virial != 0)
+    {
+        if (pc.refcoord_scaling == 1)
+        {
+            atom_virial[atom_i] =
+                lt_sub(atom_virial[atom_i],
+                       virial_from_force_dis(temp_force, dr));
+        }
+        else if (pc.refcoord_scaling >= 2)
+        {
+            int atom_global = atom_local[atom_i];
+            int group = atom_to_group[atom_global];
+            Vec3 com = group_com[group];
+            Vec3 dr_com = get_displacement(com, r_i, pc.boundary);
+            atom_virial[atom_i] =
+                lt_sub(atom_virial[atom_i],
+                       virial_from_force_dis(temp_force, dr_com));
+        }
+        else
+        {
+            atom_virial[atom_i] =
+                lt_sub(atom_virial[atom_i],
+                       virial_from_force_dis(temp_force, r_i));
+        }
+    }
+    frc[atom_i] = v3_add(frc[atom_i], temp_force);
+}

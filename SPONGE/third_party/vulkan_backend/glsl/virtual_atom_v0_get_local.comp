@@ -1,0 +1,48 @@
+struct VType0
+{
+    int virtual_atom;
+    int from_1;
+    float h;
+};
+layout(set = 0, binding = 0, std430) buffer LocalNumbers { int local_numbers[]; };
+layout(set = 0, binding = 1, std430) buffer VInfo { VType0 d_virtual_type_0[]; };
+layout(set = 0, binding = 2, std430) buffer VLocal { VType0 l_virtual_type_0[]; };
+layout(set = 0, binding = 3, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 4, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 5, std430) buffer LocError { int localization_error[]; };
+layout(push_constant) uniform Params
+{
+    int virtual_numbers;
+    int local_atom_numbers;
+}
+pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    local_numbers[0] = 0;
+    for (int cluster = 0; cluster < pc.virtual_numbers; cluster++)
+    {
+        int vatom = d_virtual_type_0[cluster].virtual_atom;
+        int from1 = d_virtual_type_0[cluster].from_1;
+        if (label_at(vatom) != 0u)
+        {
+            if (atom_local_id[vatom] < 0 ||
+                atom_local_id[vatom] >= pc.local_atom_numbers ||
+                atom_local_id[from1] < 0 ||
+                atom_local_id[from1] >= pc.local_atom_numbers)
+            {
+                atomicExchange(localization_error[0], vatom);
+                continue;
+            }
+            int slot = local_numbers[0];
+            l_virtual_type_0[slot] = d_virtual_type_0[cluster];
+            l_virtual_type_0[slot].virtual_atom = atom_local_id[vatom];
+            l_virtual_type_0[slot].from_1 = atom_local_id[from1];
+            local_numbers[0] = slot + 1;
+        }
+    }
+}

@@ -3,6 +3,17 @@
 #include "../xponge/load/native/virtual_atoms.hpp"
 #include "../xponge/xponge.h"
 
+#ifdef USE_VULKAN
+struct VirtualAtomBoundaryVkParams
+{
+    int virtual_numbers;
+    Boundary boundary;
+};
+static_assert(
+    sizeof(VirtualAtomBoundaryVkParams) == 56,
+    "VirtualAtomBoundaryVkParams must match the GLSL push constant layout");
+#endif
+
 static __global__ void v0_Coordinate_Refresh(const int virtual_numbers,
                                              const VIRTUAL_TYPE_0* v_info,
                                              VECTOR* crd, Boundary boundary)
@@ -879,12 +890,27 @@ void VIRTUAL_INFORMATION::Coordinate_Refresh(VECTOR* crd, Boundary boundary)
                 local_state_ready ? temp_vl->v0_info.l_virtual_type_0
                                   : temp_vl->v0_info.d_virtual_type_0;
             if (v0_numbers > 0)
+            {
+#ifdef USE_VULKAN
+                struct
+                {
+                    int virtual_numbers;
+                } params{v0_numbers};
+                const void* buffers[] = {v0_info, crd};
+                VK_LAUNCH(virtual_atom_v0_coordinate_refresh,
+                          (v0_numbers + CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(
                     v0_Coordinate_Refresh,
                     (v0_numbers + CONTROLLER::device_max_thread - 1) /
                         CONTROLLER::device_max_thread,
                     CONTROLLER::device_max_thread, 0, NULL, v0_numbers, v0_info,
                     crd, boundary);
+#endif
+            }
 
             const int v1_numbers = local_state_ready
                                        ? temp_vl->v1_info.local_numbers
@@ -893,12 +919,24 @@ void VIRTUAL_INFORMATION::Coordinate_Refresh(VECTOR* crd, Boundary boundary)
                 local_state_ready ? temp_vl->v1_info.l_virtual_type_1
                                   : temp_vl->v1_info.d_virtual_type_1;
             if (v1_numbers > 0)
+            {
+#ifdef USE_VULKAN
+                VirtualAtomBoundaryVkParams params{v1_numbers, boundary};
+                const void* buffers[] = {v1_info, crd};
+                VK_LAUNCH(virtual_atom_v1_coordinate_refresh,
+                          (v1_numbers + CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(
                     v1_Coordinate_Refresh,
                     (v1_numbers + CONTROLLER::device_max_thread - 1) /
                         CONTROLLER::device_max_thread,
                     CONTROLLER::device_max_thread, 0, NULL, v1_numbers, v1_info,
                     crd, boundary);
+#endif
+            }
 
             const int v2_numbers = local_state_ready
                                        ? temp_vl->v2_info.local_numbers
@@ -907,12 +945,24 @@ void VIRTUAL_INFORMATION::Coordinate_Refresh(VECTOR* crd, Boundary boundary)
                 local_state_ready ? temp_vl->v2_info.l_virtual_type_2
                                   : temp_vl->v2_info.d_virtual_type_2;
             if (v2_numbers > 0)
+            {
+#ifdef USE_VULKAN
+                VirtualAtomBoundaryVkParams params{v2_numbers, boundary};
+                const void* buffers[] = {v2_info, crd};
+                VK_LAUNCH(virtual_atom_v2_coordinate_refresh,
+                          (v2_numbers + CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(
                     v2_Coordinate_Refresh,
                     (v2_numbers + CONTROLLER::device_max_thread - 1) /
                         CONTROLLER::device_max_thread,
                     CONTROLLER::device_max_thread, 0, NULL, v2_numbers, v2_info,
                     crd, boundary);
+#endif
+            }
 
             const int v3_numbers = local_state_ready
                                        ? temp_vl->v3_info.local_numbers
@@ -921,12 +971,24 @@ void VIRTUAL_INFORMATION::Coordinate_Refresh(VECTOR* crd, Boundary boundary)
                 local_state_ready ? temp_vl->v3_info.l_virtual_type_3
                                   : temp_vl->v3_info.d_virtual_type_3;
             if (v3_numbers > 0)
+            {
+#ifdef USE_VULKAN
+                VirtualAtomBoundaryVkParams params{v3_numbers, boundary};
+                const void* buffers[] = {v3_info, crd, d_runtime_error};
+                VK_LAUNCH(virtual_atom_v3_coordinate_refresh,
+                          (v3_numbers + CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(
                     v3_Coordinate_Refresh,
                     (v3_numbers + CONTROLLER::device_max_thread - 1) /
                         CONTROLLER::device_max_thread,
                     CONTROLLER::device_max_thread, 0, NULL, v3_numbers, v3_info,
                     crd, boundary, d_runtime_error);
+#endif
+            }
         }
     }
 }
@@ -942,6 +1004,20 @@ void VIRTUAL_INFORMATION::Force_Redistribute(const VECTOR* crd,
             VIRTUAL_LAYER_INFORMATION* temp_vl = &virtual_layer_info[layer];
             if (temp_vl->v0_info.local_numbers > 0)
             {
+#ifdef USE_VULKAN
+                struct
+                {
+                    int virtual_numbers;
+                } params{temp_vl->v0_info.local_numbers};
+                const void* buffers[] = {temp_vl->v0_info.l_virtual_type_0,
+                                         crd, frc};
+                VK_LAUNCH(virtual_atom_v0_force_redistribute,
+                          (temp_vl->v0_info.local_numbers +
+                           CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(v0_Force_Redistribute,
                                      (temp_vl->v0_info.local_numbers +
                                       CONTROLLER::device_max_thread - 1) /
@@ -950,9 +1026,24 @@ void VIRTUAL_INFORMATION::Force_Redistribute(const VECTOR* crd,
                                      temp_vl->v0_info.local_numbers,
                                      temp_vl->v0_info.l_virtual_type_0, crd,
                                      boundary, frc);
+#endif
             }
             if (temp_vl->v1_info.local_numbers > 0)
             {
+#ifdef USE_VULKAN
+                struct
+                {
+                    int virtual_numbers;
+                } params{temp_vl->v1_info.local_numbers};
+                const void* buffers[] = {temp_vl->v1_info.l_virtual_type_1,
+                                         crd, frc};
+                VK_LAUNCH(virtual_atom_v1_force_redistribute,
+                          (temp_vl->v1_info.local_numbers +
+                           CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(v1_Force_Redistribute,
                                      (temp_vl->v1_info.local_numbers +
                                       CONTROLLER::device_max_thread - 1) /
@@ -961,9 +1052,22 @@ void VIRTUAL_INFORMATION::Force_Redistribute(const VECTOR* crd,
                                      temp_vl->v1_info.local_numbers,
                                      temp_vl->v1_info.l_virtual_type_1, crd,
                                      boundary, frc);
+#endif
             }
             if (temp_vl->v3_info.local_numbers > 0)
             {
+#ifdef USE_VULKAN
+                VirtualAtomBoundaryVkParams params{
+                    temp_vl->v3_info.local_numbers, boundary};
+                const void* buffers[] = {temp_vl->v3_info.l_virtual_type_3,
+                                         crd, frc, d_runtime_error};
+                VK_LAUNCH(virtual_atom_v3_force_redistribute,
+                          (temp_vl->v3_info.local_numbers +
+                           CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, buffers,
+                          &params, NULL);
+#else
                 Launch_Device_Kernel(v3_Force_Redistribute,
                                      (temp_vl->v3_info.local_numbers +
                                       CONTROLLER::device_max_thread - 1) /
@@ -972,6 +1076,7 @@ void VIRTUAL_INFORMATION::Force_Redistribute(const VECTOR* crd,
                                      temp_vl->v3_info.local_numbers,
                                      temp_vl->v3_info.l_virtual_type_3, crd,
                                      boundary, frc, d_runtime_error);
+#endif
             }
 
             if (temp_vl->v2_info.local_numbers > 0)
@@ -979,6 +1084,26 @@ void VIRTUAL_INFORMATION::Force_Redistribute(const VECTOR* crd,
                 const int blocks = (temp_vl->v2_info.local_numbers +
                                     CONTROLLER::device_max_thread - 1) /
                                    CONTROLLER::device_max_thread;
+#ifdef USE_VULKAN
+                struct
+                {
+                    int virtual_numbers;
+                } params{temp_vl->v2_info.local_numbers};
+                const void* buffers[] = {temp_vl->v2_info.l_virtual_type_2,
+                                         crd, frc};
+                if (temp_vl->v2_info.need_atomic)
+                {
+                    VK_LAUNCH(virtual_atom_v2_force_redistribute, blocks, 1,
+                              CONTROLLER::device_max_thread, 1, buffers,
+                              &params, NULL);
+                }
+                else
+                {
+                    VK_LAUNCH(virtual_atom_v2_force_redistribute_no_atomic,
+                              blocks, 1, CONTROLLER::device_max_thread, 1,
+                              buffers, &params, NULL);
+                }
+#else
                 if (temp_vl->v2_info.need_atomic)
                 {
                     Launch_Device_Kernel(v2_Force_Redistribute, blocks,
@@ -995,6 +1120,7 @@ void VIRTUAL_INFORMATION::Force_Redistribute(const VECTOR* crd,
                         temp_vl->v2_info.local_numbers,
                         temp_vl->v2_info.l_virtual_type_2, crd, boundary, frc);
                 }
+#endif
             }
         }
     }
@@ -1038,10 +1164,22 @@ void VIRTUAL_INFORMATION::Coordinate_Refresh_CV(VECTOR* crd, Boundary boundary)
             for (int iv4 = 0; iv4 < temp_vl->v4_info.virtual_numbers; iv4++)
             {
                 temp_vl4 = temp_vl->v4_info.h_virtual_type_4 + iv4;
+#ifdef USE_VULKAN
+                struct
+                {
+                    int atom_numbers;
+                    int virtual_atom;
+                } params{temp_vl4->atom_numbers, temp_vl4->virtual_atom};
+                const void* buffers[] = {temp_vl4->d_from, temp_vl4->d_weight,
+                                         crd};
+                VK_LAUNCH(virtual_atom_v4_coordinate_refresh, 1, 1,
+                          CONTROLLER::device_warp, 1, buffers, &params, NULL);
+#else
                 Launch_Device_Kernel(
                     v4_Coordinate_Refresh, 1, CONTROLLER::device_warp, 0, NULL,
                     temp_vl4->atom_numbers, temp_vl4->virtual_atom,
                     temp_vl4->d_from, temp_vl4->d_weight, crd);
+#endif
             }
         }
     }
@@ -1061,10 +1199,22 @@ void VIRTUAL_INFORMATION::Force_Redistribute_CV(const VECTOR* crd,
             for (int iv4 = 0; iv4 < temp_vl->v4_info.virtual_numbers; iv4++)
             {
                 temp_vl4 = temp_vl->v4_info.h_virtual_type_4 + iv4;
+#ifdef USE_VULKAN
+                struct
+                {
+                    int atom_numbers;
+                    int virtual_atom;
+                } params{temp_vl4->atom_numbers, temp_vl4->virtual_atom};
+                const void* buffers[] = {temp_vl4->d_from, temp_vl4->d_weight,
+                                         frc};
+                VK_LAUNCH(virtual_atom_v4_force_redistribute, 1, 1,
+                          CONTROLLER::device_warp, 1, buffers, &params, NULL);
+#else
                 Launch_Device_Kernel(
                     v4_Force_Redistribute, 1, CONTROLLER::device_warp, 0, NULL,
                     temp_vl4->atom_numbers, temp_vl4->virtual_atom,
                     temp_vl4->d_from, temp_vl4->d_weight, frc);
+#endif
             }
         }
     }
@@ -1228,6 +1378,20 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
 
         if (temp_vl->v0_info.virtual_numbers > 0)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int virtual_numbers;
+                int local_atom_numbers;
+            } params{temp_vl->v0_info.virtual_numbers, local_atom_numbers};
+            const void* buffers[] = {temp_vl->v0_info.d_local_numbers,
+                                     temp_vl->v0_info.d_virtual_type_0,
+                                     temp_vl->v0_info.l_virtual_type_0,
+                                     atom_local_id, atom_local_label,
+                                     d_runtime_error};
+            VK_LAUNCH(virtual_atom_v0_get_local, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(get_local_device_V0, 1, 1, 0, NULL,
                                  temp_vl->v0_info.virtual_numbers,
                                  temp_vl->v0_info.d_local_numbers,
@@ -1235,6 +1399,7 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
                                  temp_vl->v0_info.l_virtual_type_0,
                                  atom_local_id, atom_local_label,
                                  local_atom_numbers, d_runtime_error);
+#endif
             deviceMemcpy(&temp_vl->v0_info.local_numbers,
                          temp_vl->v0_info.d_local_numbers, sizeof(int),
                          deviceMemcpyDeviceToHost);
@@ -1242,6 +1407,20 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
 
         if (temp_vl->v1_info.virtual_numbers > 0)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int virtual_numbers;
+                int local_atom_numbers;
+            } params{temp_vl->v1_info.virtual_numbers, local_atom_numbers};
+            const void* buffers[] = {temp_vl->v1_info.d_local_numbers,
+                                     temp_vl->v1_info.d_virtual_type_1,
+                                     temp_vl->v1_info.l_virtual_type_1,
+                                     atom_local_id, atom_local_label,
+                                     d_runtime_error};
+            VK_LAUNCH(virtual_atom_v1_get_local, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(get_local_device_V1, 1, 1, 0, NULL,
                                  temp_vl->v1_info.virtual_numbers,
                                  temp_vl->v1_info.d_local_numbers,
@@ -1249,6 +1428,7 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
                                  temp_vl->v1_info.l_virtual_type_1,
                                  atom_local_id, atom_local_label,
                                  local_atom_numbers, d_runtime_error);
+#endif
             deviceMemcpy(&temp_vl->v1_info.local_numbers,
                          temp_vl->v1_info.d_local_numbers, sizeof(int),
                          deviceMemcpyDeviceToHost);
@@ -1256,6 +1436,20 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
 
         if (temp_vl->v2_info.virtual_numbers > 0)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int virtual_numbers;
+                int local_atom_numbers;
+            } params{temp_vl->v2_info.virtual_numbers, local_atom_numbers};
+            const void* buffers[] = {temp_vl->v2_info.d_local_numbers,
+                                     temp_vl->v2_info.d_virtual_type_2,
+                                     temp_vl->v2_info.l_virtual_type_2,
+                                     atom_local_id, atom_local_label,
+                                     d_runtime_error};
+            VK_LAUNCH(virtual_atom_v2_get_local, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(get_local_device_V2, 1, 1, 0, NULL,
                                  temp_vl->v2_info.virtual_numbers,
                                  temp_vl->v2_info.d_local_numbers,
@@ -1263,6 +1457,7 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
                                  temp_vl->v2_info.l_virtual_type_2,
                                  atom_local_id, atom_local_label,
                                  local_atom_numbers, d_runtime_error);
+#endif
             deviceMemcpy(&temp_vl->v2_info.local_numbers,
                          temp_vl->v2_info.d_local_numbers, sizeof(int),
                          deviceMemcpyDeviceToHost);
@@ -1270,6 +1465,20 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
 
         if (temp_vl->v3_info.virtual_numbers > 0)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int virtual_numbers;
+                int local_atom_numbers;
+            } params{temp_vl->v3_info.virtual_numbers, local_atom_numbers};
+            const void* buffers[] = {temp_vl->v3_info.d_local_numbers,
+                                     temp_vl->v3_info.d_virtual_type_3,
+                                     temp_vl->v3_info.l_virtual_type_3,
+                                     atom_local_id, atom_local_label,
+                                     d_runtime_error};
+            VK_LAUNCH(virtual_atom_v3_get_local, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(get_local_device_V3, 1, 1, 0, NULL,
                                  temp_vl->v3_info.virtual_numbers,
                                  temp_vl->v3_info.d_local_numbers,
@@ -1277,6 +1486,7 @@ void VIRTUAL_INFORMATION::Get_Local(const int* atom_local_id,
                                  temp_vl->v3_info.l_virtual_type_3,
                                  atom_local_id, atom_local_label,
                                  local_atom_numbers, d_runtime_error);
+#endif
             deviceMemcpy(&temp_vl->v3_info.local_numbers,
                          temp_vl->v3_info.d_local_numbers, sizeof(int),
                          deviceMemcpyDeviceToHost);

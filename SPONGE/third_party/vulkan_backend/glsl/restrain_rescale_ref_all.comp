@@ -1,0 +1,20 @@
+layout(set = 0, binding = 0, std430) buffer RefAll { Vec3 ref_all[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float g11, g21, g22, g31, g32, g33;
+    float dt;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    Vec3 r = ref_all[atom_i];
+    Vec3 r_dash;
+    r_dash.x =
+        r.x + pc.dt * (r.x * pc.g11 + r.y * pc.g21 + r.z * pc.g31);
+    r_dash.y = r.y + pc.dt * (r.y * pc.g22 + r.z * pc.g32);
+    r_dash.z = r.z + pc.dt * r.z * pc.g33;
+    ref_all[atom_i] = r_dash;
+}

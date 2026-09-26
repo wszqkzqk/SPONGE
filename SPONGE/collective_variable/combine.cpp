@@ -1,4 +1,4 @@
-﻿#include "combine.h"
+#include "combine.h"
 
 REGISTER_CV_STRUCTURE(CV_COMBINE, "combination", 0);
 
@@ -147,6 +147,9 @@ void CV_COMBINE::Compute(int atom_numbers, VECTOR* crd, const Boundary boundary,
         {
             deviceStreamSynchronize(cv->device_stream);
         }
+#ifdef USE_VULKAN
+        sponge_vk::HostBarrier();
+#endif
         first_step({1, 1, 1}, {1, 1, 1}, this->device_stream, 0,
                    {&d_cv_values, &cv_virials, &d_value, &df_dcv, &virial});
         unsigned int blocks = (atom_numbers + 1023u) / 1024u;

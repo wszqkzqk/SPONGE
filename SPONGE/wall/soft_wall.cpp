@@ -1,4 +1,4 @@
-﻿#include "soft_wall.h"
+#include "soft_wall.h"
 
 #include "../xponge/load/native/soft_wall_h5.hpp"
 
@@ -219,6 +219,9 @@ void SOFT_WALL::Initial(int atom_numbers)
 void SOFT_WALL::Compute_Force(int atom_numbers, VECTOR* crd, VECTOR* frc,
                               int need_potential, float* atom_energy)
 {
+#ifdef USE_VULKAN
+    sponge_vk::HostBarrier();
+#endif
     force_function({(atom_numbers + 1023u) / 1024u, 1, 1}, {1024, 1, 1}, 0, 0,
                    {&atom_numbers, &crd, &frc, &atom_energy, &item_energy,
                     &need_potential});

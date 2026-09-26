@@ -655,6 +655,10 @@ void PAIRWISE_FORCE::Compute_Force(ATOM_GROUP* nl, const VECTOR* crd,
     dim3 blockSize = {CONTROLLER::device_warp,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     dim3 gridSize = (total_local_numbers + blockSize.y - 1) / blockSize.y;
+#ifdef USE_VULKAN
+    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
+    sponge_vk::HostBarrier();
+#endif
     force_function(gridSize, blockSize, 0, 0, launch_args);
 
     if (need_energy)
@@ -708,6 +712,10 @@ float PAIRWISE_FORCE::Get_Energy(ATOM_GROUP* nl, const VECTOR* crd,
     dim3 blockSize = {CONTROLLER::device_warp,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     dim3 gridSize = (total_local_numbers + blockSize.y - 1) / blockSize.y;
+#ifdef USE_VULKAN
+    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
+    sponge_vk::HostBarrier();
+#endif
     force_function(gridSize, blockSize, 0, 0, launch_args);
     Sum_Of_List(item_energy, sum_energy, local_atom_numbers);
     float h_energy = NAN;
@@ -727,9 +735,20 @@ void PAIRWISE_FORCE::Get_Local(int* atom_local, int local_atom_numbers,
     if (total <= 0) return;
     this->local_atom_numbers = local_atom_numbers;
     this->total_local_numbers = total;
+#ifdef USE_VULKAN
+    struct
+    {
+        int total_numbers;
+    } params{total};
+    const void* buffers[] = {atom_local, gpu_pairwise_types,
+                             gpu_pairwise_types_local};
+    VK_LAUNCH(pairwise_force_scatter_types, (total + 255) / 256, 1, 256, 1,
+              buffers, &params, NULL);
+#else
     Launch_Device_Kernel(pairwise_force_scatter_types, (total + 255) / 256, 256,
                          0, NULL, total, atom_local, gpu_pairwise_types,
                          gpu_pairwise_types_local);
+#endif
 }
 
 void PAIRWISE_FORCE::Step_Print(CONTROLLER* controller)

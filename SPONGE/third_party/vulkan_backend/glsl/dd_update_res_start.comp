@@ -1,0 +1,18 @@
+layout(set = 0, binding = 0, std430) buffer ResStart { int res_start[]; };
+layout(set = 0, binding = 1, std430) buffer ResLen { int res_len[]; };
+layout(set = 0, binding = 2, std430) buffer StartIdx { int start_idx[]; };
+layout(push_constant) uniform Params
+{
+    int start_idx_res;
+    int res_numbers;
+}
+pc;
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    for (int j = pc.start_idx_res; j < pc.res_numbers; ++j)
+    {
+        res_start[j] = start_idx[0];
+        start_idx[0] += res_len[j];
+    }
+}

@@ -1,0 +1,46 @@
+layout(set = 0, binding = 0, std430) buffer ResStart { int res_start[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer Plan { uint plan[]; };
+layout(push_constant) uniform Params
+{
+    int res_numbers;
+    LTMat rcell;
+    float min_corner_x, min_corner_y, min_corner_z;
+    float max_corner_x, max_corner_y, max_corner_z;
+    float cutoff;
+    float box_length_x, box_length_y, box_length_z;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.res_numbers) return;
+    Vec3 c = crd[res_start[i]];
+    Vec3 frac_crd_i =
+        v3_mul_lt(c, pc.rcell.a11, pc.rcell.a21, pc.rcell.a22, pc.rcell.a31,
+                  pc.rcell.a32, pc.rcell.a33);
+    frac_crd_i = v3_sub(frac_crd_i, v3_floor(frac_crd_i));
+    Vec3 crd_i = Vec3(frac_crd_i.x * pc.box_length_x,
+                      frac_crd_i.y * pc.box_length_y,
+                      frac_crd_i.z * pc.box_length_z);
+    Vec3 dr1 = Vec3(crd_i.x - pc.max_corner_x + pc.cutoff,
+                    crd_i.y - pc.max_corner_y + pc.cutoff,
+                    crd_i.z - pc.max_corner_z + pc.cutoff);
+    Vec3 dr2 = Vec3(pc.box_length_x + pc.cutoff - crd_i.x,
+                    pc.box_length_y + pc.cutoff - crd_i.y,
+                    pc.box_length_z + pc.cutoff - crd_i.z);
+    uint plan_res = 0u;
+    if (crd_i.x < pc.min_corner_x + pc.cutoff)
+        plan_res |= 2u;
+    else if (crd_i.x > pc.max_corner_x - pc.cutoff)
+        plan_res |= 1u << (dr1.x > dr2.x ? 1 : 0);
+    if (crd_i.y < pc.min_corner_y + pc.cutoff)
+        plan_res |= 8u;
+    else if (crd_i.y > pc.max_corner_y - pc.cutoff)
+        plan_res |= 4u << (dr1.y > dr2.y ? 1 : 0);
+    if (crd_i.z < pc.min_corner_z + pc.cutoff)
+        plan_res |= 32u;
+    else if (crd_i.z > pc.max_corner_z - pc.cutoff)
+        plan_res |= 16u << (dr1.z > dr2.z ? 1 : 0);
+    plan[i] = plan_res;
+}

@@ -1,0 +1,19 @@
+layout(set = 0, binding = 0, std430) buffer GhostId
+{
+    int ghost_id_buffer[];
+};
+layout(set = 0, binding = 1, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 2, std430) buffer FrcBuffer { Vec3 frc_buffer[]; };
+layout(push_constant) uniform Params
+{
+    int ghost_number_dir;
+    int id_offset;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.ghost_number_dir) return;
+    int atom_i = ghost_id_buffer[pc.id_offset + i];
+    frc[atom_i] = v3_add(frc[atom_i], frc_buffer[i]);
+}

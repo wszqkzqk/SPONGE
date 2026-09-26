@@ -1,0 +1,18 @@
+layout(set = 0, binding = 0, std430) buffer GhostId
+{
+    int ghost_id_buffer[];
+};
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer CrdBuffer { Vec3 crd_buffer[]; };
+layout(push_constant) uniform Params
+{
+    int ghost_number_dir;
+    int id_offset;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.ghost_number_dir) return;
+    crd_buffer[i] = crd[ghost_id_buffer[pc.id_offset + i]];
+}

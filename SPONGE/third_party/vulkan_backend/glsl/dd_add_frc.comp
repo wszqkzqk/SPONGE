@@ -1,0 +1,9 @@
+layout(set = 0, binding = 0, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 1, std430) buffer FrcOther { Vec3 frc_other[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    frc[i] = v3_add(frc[i], frc_other[i]);
+}

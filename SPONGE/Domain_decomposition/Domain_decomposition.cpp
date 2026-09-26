@@ -1,5 +1,54 @@
 ﻿#include "Domain_decomposition.h"
 
+#ifdef USE_VULKAN
+struct DdGetAtomVkParams
+{
+    int ug_numbers;
+    LTMatrix3 rcell;
+    float min_corner_x, min_corner_y, min_corner_z;
+    float dom_box_length_x, dom_box_length_y, dom_box_length_z;
+    float box_length_x, box_length_y, box_length_z;
+};
+static_assert(sizeof(DdGetAtomVkParams) == 64,
+              "DdGetAtomVkParams must match the GLSL push constant layout");
+
+struct DdPlanDeciderVkParams
+{
+    int res_numbers;
+    LTMatrix3 rcell;
+    float min_corner_x, min_corner_y, min_corner_z;
+    float max_corner_x, max_corner_y, max_corner_z;
+    float cutoff;
+    float box_length_x, box_length_y, box_length_z;
+};
+static_assert(sizeof(DdPlanDeciderVkParams) == 68,
+              "DdPlanDeciderVkParams must match the GLSL push constant layout");
+
+struct DdMapOriginVkParams
+{
+    int res_numbers;
+    LTMatrix3 g;
+    float dt;
+};
+static_assert(sizeof(DdMapOriginVkParams) == 32,
+              "DdMapOriginVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+// ug[i].atom_serial 指向同一块连续设备内存且按组序排列（见
+// MD_core/ug.hpp 的 Copy_UG_To_Device），组0的指针即为整块serial池的基址。
+// Vulkan下device指针即host映射指针，需在拷贝落盘后读取。
+static const void* dd_ug_serial_pool(MD_INFORMATION* md_info)
+{
+    if (md_info->ug.ug_numbers <= 0 || md_info->ug.d_ug == NULL) return NULL;
+    sponge_vk::HostBarrier();
+    return reinterpret_cast<const ATOM_GROUP*>(md_info->ug.d_ug)[0].atom_serial;
+}
+#endif
+
 static bool is_orthogonal_box(const VECTOR& box_angle, float tolerance)
 {
     return std::fabs(box_angle.x - 90.0f) <= tolerance &&
@@ -414,8 +463,19 @@ void DOMAIN_INFORMATION::Get_Atoms(CONTROLLER* controller,
     // 局域粒子的label，如果粒子在当前区域中，即设为1，反之为0
     Device_Malloc_Safely((void**)&atom_local_label,
                          sizeof(char) * max_atom_numbers);
+#ifdef USE_VULKAN
+    struct
+    {
+        int size;
+        int value;
+    } set_label_params{max_atom_numbers, 0};
+    const void* set_label_buffers[] = {atom_local_label};
+    VK_LAUNCH(dd_set_char_array, (max_atom_numbers + 255) / 256, 1, 256, 1,
+              set_label_buffers, &set_label_params, NULL);
+#else
     Launch_Device_Kernel(set_char_array, (max_atom_numbers + 255) / 256, 256, 0,
                          NULL, atom_local_label, max_atom_numbers, 0);
+#endif
     // 局域粒子的local_id，如果不在当前区域内，则置为-1
     Device_Malloc_Safely((void**)&atom_local_id,
                          sizeof(int) * max_atom_numbers);
@@ -511,6 +571,42 @@ void DOMAIN_INFORMATION::Get_Atoms(CONTROLLER* controller,
     if (CONTROLLER::PP_MPI_size != 1)  // if (CONTROLLER::PP_MPI_rank != 1)  //
                                        // if (CONTROLLER::PP_MPI_size != 1)
     {
+#ifdef USE_VULKAN
+        const void* serial_pool = dd_ug_serial_pool(md_info);
+        DdGetAtomVkParams params{md_info->ug.ug_numbers,
+                                 md_info->pbc.boundary.rcell,
+                                 min_corner.x,
+                                 min_corner.y,
+                                 min_corner.z,
+                                 dom_box_length.x,
+                                 dom_box_length.y,
+                                 dom_box_length.z,
+                                 md_info->sys.box_length.x,
+                                 md_info->sys.box_length.y,
+                                 md_info->sys.box_length.z};
+        const void* buffers[] = {
+            vk_or_dummy(md_info->ug.d_ug, this->crd),
+            vk_or_dummy(serial_pool, this->crd),
+            md_info->crd,
+            md_info->vel,
+            md_info->d_mass,
+            md_info->d_mass_inverse,
+            md_info->d_charge,
+            this->res_start,
+            this->res_len,
+            this->d_res_numbers,
+            this->atom_local,
+            this->atom_local_label,
+            this->atom_local_id,
+            this->d_atom_numbers,
+            this->crd,
+            this->vel,
+            this->d_mass,
+            this->d_mass_inverse,
+            this->d_charge};
+        VK_LAUNCH(dd_get_atom_and_residues, 1, 1, 1, 1, buffers, &params,
+                  NULL);
+#else
         Launch_Device_Kernel(
             get_atom_and_residues, 1, 1, 0, NULL, dom_dec_split_num,
             md_info->ug.ug_numbers, md_info->ug.d_ug, md_info->crd,
@@ -521,9 +617,39 @@ void DOMAIN_INFORMATION::Get_Atoms(CONTROLLER* controller,
             this->atom_local, this->atom_local_label, this->atom_local_id,
             this->d_atom_numbers, this->crd, this->vel, this->d_mass,
             this->d_mass_inverse, this->d_charge, md_info->sys.box_length);
+#endif
     }
     else
     {
+#ifdef USE_VULKAN
+        const void* serial_pool = dd_ug_serial_pool(md_info);
+        struct
+        {
+            int ug_numbers;
+        } params{md_info->ug.ug_numbers};
+        const void* buffers[] = {
+            vk_or_dummy(md_info->ug.d_ug, this->crd),
+            vk_or_dummy(serial_pool, this->crd),
+            md_info->crd,
+            md_info->vel,
+            md_info->d_mass,
+            md_info->d_mass_inverse,
+            md_info->d_charge,
+            this->res_start,
+            this->res_len,
+            this->d_res_numbers,
+            this->atom_local,
+            this->atom_local_label,
+            this->atom_local_id,
+            this->d_atom_numbers,
+            this->crd,
+            this->vel,
+            this->d_mass,
+            this->d_mass_inverse,
+            this->d_charge};
+        VK_LAUNCH(dd_get_atom_and_residues_single_domain, 1, 1, 1, 1, buffers,
+                  &params, NULL);
+#else
         Launch_Device_Kernel(
             get_atom_and_residues_single_domain, 1, 1, 0, NULL,
             dom_dec_split_num, md_info->ug.ug_numbers, md_info->ug.d_ug,
@@ -534,6 +660,7 @@ void DOMAIN_INFORMATION::Get_Atoms(CONTROLLER* controller,
             this->atom_local, this->atom_local_label, this->atom_local_id,
             this->d_atom_numbers, this->crd, this->vel, this->d_mass,
             this->d_mass_inverse, this->d_charge, md_info->atom_numbers);
+#endif
     }
 
     deviceMemcpy(&this->atom_numbers, d_atom_numbers, sizeof(int),
@@ -675,11 +802,29 @@ void DOMAIN_INFORMATION::Get_Ghost(CONTROLLER* controller,
     unsigned int* plan;
     Device_Malloc_Safely((void**)&plan, max_res_numbers * sizeof(unsigned int));
 
+#ifdef USE_VULKAN
+    DdPlanDeciderVkParams plan_params{res_numbers,
+                                      md_info->pbc.boundary.rcell,
+                                      min_corner.x,
+                                      min_corner.y,
+                                      min_corner.z,
+                                      max_corner.x,
+                                      max_corner.y,
+                                      max_corner.z,
+                                      cutoff,
+                                      box_length.x,
+                                      box_length.y,
+                                      box_length.z};
+    const void* plan_buffers[] = {res_start, crd, plan};
+    VK_LAUNCH(dd_plan_decider, (max_res_numbers + 255) / 256, 1, 256, 1,
+              plan_buffers, &plan_params, NULL);
+#else
     Launch_Device_Kernel(plan_decider, (max_res_numbers + 255) / 256, 256, 0,
                          NULL, res_numbers, res_start, res_len, crd,
                          md_info->pbc.boundary.rcell,
                          md_info->pbc.boundary.cell, min_corner, max_corner,
                          cutoff, box_length, plan);
+#endif
 
     deviceMemset(d_num_ghost_dir, 0, sizeof(int) * 6);
     deviceMemset(d_num_ghost_res_dir, 0, sizeof(int) * 6);
@@ -811,15 +956,41 @@ void DOMAIN_INFORMATION::Get_Ghost(CONTROLLER* controller,
         ghost_res_numbers +=
             h_num_ghost_res_dir_re[recv_dir];  // 更新ghost残基数目
 
+#ifdef USE_VULKAN
+        struct
+        {
+            int res_numbers;
+            int ghost_res_numbers;
+            int start_idx;
+            int res_start_idx;
+        } refresh_res_params{res_numbers, ghost_res_numbers, start_idx,
+                             res_start_idx};
+        const void* refresh_res_buffers[] = {res_start, res_len};
+        VK_LAUNCH(dd_refresh_res, 1, 1, 1, 1, refresh_res_buffers,
+                  &refresh_res_params, NULL);
+#else
         Launch_Device_Kernel(refresh_res, 1, 1, 0, NULL, res_numbers,
                              ghost_res_numbers, res_start, res_len, start_idx,
                              res_start_idx);
+#endif
     }
 
     int total_atom_numbers = atom_numbers + ghost_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+        int total_atom_numbers;
+    } save_ghost_params{atom_numbers, total_atom_numbers};
+    const void* save_ghost_buffers[] = {atom_local, atom_local_id, d_charge,
+                                        md_info->d_charge};
+    VK_LAUNCH(dd_save_ghost_id, (max_atom_numbers + 255) / 256, 1, 256, 1,
+              save_ghost_buffers, &save_ghost_params, NULL);
+#else
     Launch_Device_Kernel(save_ghost_id, (max_atom_numbers + 255) / 256, 256, 0,
                          NULL, atom_numbers, total_atom_numbers, atom_local,
                          atom_local_id, d_charge, md_info->d_charge);
+#endif
 #endif
 }
 
@@ -857,11 +1028,27 @@ static __global__ void device_get_excluded(
 void DOMAIN_INFORMATION::Get_Excluded(CONTROLLER* controller,
                                       MD_INFORMATION* md_info)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+    } params{atom_numbers};
+    const void* buffers[] = {d_excluded_numbers,
+                             d_excluded_list_start,
+                             d_excluded_list,
+                             atom_local,
+                             atom_local_id,
+                             md_info->nb.d_excluded_numbers,
+                             md_info->nb.d_excluded_list_start,
+                             md_info->nb.d_excluded_list};
+    VK_LAUNCH(dd_get_excluded, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         device_get_excluded, 1, 1, 0, NULL, d_excluded_numbers,
         d_excluded_list_start, d_excluded_list, atom_local, atom_local_id,
         atom_numbers, md_info->nb.d_excluded_numbers,
         md_info->nb.d_excluded_list_start, md_info->nb.d_excluded_list);
+#endif
 }
 
 static __global__ void set_crd_buffer(int ghost_number_dir,
@@ -893,10 +1080,21 @@ void DOMAIN_INFORMATION::Update_Ghost(CONTROLLER* controller)
         int ghost_number_dir = h_num_ghost_dir[dir];
         Device_Malloc_Safely((void**)&crd_buffer,
                              sizeof(VECTOR) * ghost_number_dir);
+#ifdef USE_VULKAN
+        struct
+        {
+            int ghost_number_dir;
+            int id_offset;
+        } set_crd_params{ghost_number_dir, dir * max_atom_numbers};
+        const void* set_crd_buffers[] = {d_num_ghost_dir_id, crd, crd_buffer};
+        VK_LAUNCH(dd_set_crd_buffer, (ghost_number_dir + 255) / 256, 1, 256, 1,
+                  set_crd_buffers, &set_crd_params, NULL);
+#else
         int* ghost_id_buffer = d_num_ghost_dir_id + dir * max_atom_numbers;
         Launch_Device_Kernel(set_crd_buffer, (ghost_number_dir + 255) / 256,
                              256, 0, NULL, ghost_number_dir, ghost_id_buffer,
                              crd, crd_buffer);
+#endif
         int send_dir = dir;
         int recv_dir = dir % 2 ? (dir - 1) : (dir + 1);
         int send_neighbor = h_neighbor_dir[send_dir][0];
@@ -967,11 +1165,23 @@ void DOMAIN_INFORMATION::Sync_Local_Charge_From_Global(
     {
         return;
     }
+#ifdef USE_VULKAN
+    struct
+    {
+        int local_atom_numbers;
+    } params{atom_numbers};
+    const void* buffers[] = {atom_local, global_charge, d_charge};
+    VK_LAUNCH(dd_sync_local_charge,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(sync_local_charge_from_global_charge_device,
                          (atom_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
                          atom_local, global_charge, d_charge);
+#endif
 }
 
 // 似乎在pp进程已被弃用，pm进程还有同名函数
@@ -1016,16 +1226,37 @@ void DOMAIN_INFORMATION::Distribute_Ghost_Information(CONTROLLER* controller,
         for (int _i = 0; _i < 2; ++_i) deviceStreamDestroy(d_reqs[_i]);
 #endif
         int num_ghost_dir_recv = h_num_ghost_dir[recv_dir];
+        // 将接收到的粒子受力更新到力的buffer中
+#ifdef USE_VULKAN
+        struct
+        {
+            int ghost_number_dir;
+            int id_offset;
+        } set_frc_params{num_ghost_dir_recv, recv_dir * max_atom_numbers};
+        const void* set_frc_buffers[] = {d_num_ghost_dir_id, frc_, frc_buffer};
+        VK_LAUNCH(dd_set_frc_buffer, (num_ghost_dir_recv + 255) / 256, 1, 256,
+                  1, set_frc_buffers, &set_frc_params, NULL);
+#else
         int* num_ghost_dir_id_recv =
             d_num_ghost_dir_id + recv_dir * max_atom_numbers;
-        // 将接收到的粒子受力更新到力的buffer中
         Launch_Device_Kernel(set_frc_buffer, (num_ghost_dir_recv + 255) / 256,
                              256, 0, NULL, num_ghost_dir_recv,
                              num_ghost_dir_id_recv, frc_, frc_buffer);
+#endif
     }
     // 将力更新回本地粒子
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+    } add_frc_params{atom_numbers};
+    const void* add_frc_buffers[] = {this->frc, frc_};
+    VK_LAUNCH(dd_add_frc, (atom_numbers + 255) / 256, 1, 256, 1,
+              add_frc_buffers, &add_frc_params, NULL);
+#else
     Launch_Device_Kernel(add_frc, (atom_numbers + 255) / 256, 256, 0, NULL,
                          atom_numbers, this->frc, frc_);
+#endif
 #endif
 }
 
@@ -1251,17 +1482,47 @@ void DOMAIN_INFORMATION::Exchange_Particles(CONTROLLER* controller,
 #endif
         res_numbers += recv_res_dir;
 
+#ifdef USE_VULKAN
+        struct
+        {
+            int start_idx;
+            int atom_numbers;
+        } reset_local_params{start_idx, atom_numbers};
+        const void* reset_local_buffers[] = {atom_local,
+                                             atom_local_label,
+                                             atom_local_id,
+                                             d_charge,
+                                             d_mass,
+                                             d_mass_inverse,
+                                             md_info->d_charge,
+                                             md_info->d_mass,
+                                             md_info->d_mass_inverse};
+        VK_LAUNCH(dd_reset_local, (atom_numbers - start_idx + 255) / 256, 1,
+                  256, 1, reset_local_buffers, &reset_local_params, NULL);
+#else
         Launch_Device_Kernel(
             reset_local, (atom_numbers - start_idx + 255) / 256, 256, 0, NULL,
             start_idx, atom_numbers, atom_local, atom_local_label,
             atom_local_id, d_charge, d_mass, d_mass_inverse, md_info->d_charge,
             md_info->d_mass, md_info->d_mass_inverse);
+#endif
 
         int* d_start_idx;
         Device_Malloc_And_Copy_Safely((void**)&d_start_idx, &start_idx,
                                       sizeof(int));
+#ifdef USE_VULKAN
+        struct
+        {
+            int start_idx_res;
+            int res_numbers;
+        } update_res_params{start_idx_res, res_numbers};
+        const void* update_res_buffers[] = {res_start, res_len, d_start_idx};
+        VK_LAUNCH(dd_update_res_start, 1, 1, 1, 1, update_res_buffers,
+                  &update_res_params, NULL);
+#else
         Launch_Device_Kernel(update_res_start, 1, 1, 0, NULL, start_idx_res,
                              res_numbers, res_start, res_len, d_start_idx);
+#endif
         deviceMemcpy(&start_idx, d_start_idx, sizeof(int),
                      deviceMemcpyDeviceToHost);
 #ifndef USE_CPU
@@ -1360,12 +1621,24 @@ void DOMAIN_INFORMATION::Get_Ek_and_Temperature(CONTROLLER* controller,
 {
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {d_ek, vel, d_mass};
+        VK_LAUNCH(md_atom_ek,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             MD_Atom_Ek,
             (atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers, d_ek, vel,
             d_mass);
+#endif
 
         Sum_Of_List(d_ek, d_ek_local, atom_numbers);
     }
@@ -1501,6 +1774,27 @@ static __global__ void Map_Origin(const int res_numbers, const int* res_start,
 
 void DOMAIN_INFORMATION::Res_Crd_Map(LTMatrix3 g, float dt)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int res_numbers;
+    } get_origin_params{res_numbers};
+    const void* get_origin_buffers[] = {res_start, res_len, crd,
+                                        d_center_of_mass};
+    VK_LAUNCH(dd_get_origin,
+              (res_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, get_origin_buffers,
+              &get_origin_params, NULL);
+    DdMapOriginVkParams map_origin_params{res_numbers, g, dt};
+    const void* map_origin_buffers[] = {res_start, res_len, d_center_of_mass,
+                                        crd};
+    VK_LAUNCH(dd_map_origin,
+              (res_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, map_origin_buffers,
+              &map_origin_params, NULL);
+#else
     Launch_Device_Kernel(Get_Origin,
                          (res_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
@@ -1511,4 +1805,5 @@ void DOMAIN_INFORMATION::Res_Crd_Map(LTMatrix3 g, float dt)
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, res_numbers,
                          res_start, res_len, d_center_of_mass, g, dt, crd);
+#endif
 }

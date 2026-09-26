@@ -1,0 +1,11 @@
+layout(set = 0, binding = 0, std430) buffer Arr { uint data[]; };
+layout(push_constant) uniform Params { int size; int value; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.size) return;
+    uint shift = (uint(i) & 3u) * 8u;
+    uint word = uint(i) >> 2;
+    atomicAnd(data[word], ~(0xFFu << shift));
+    atomicOr(data[word], (uint(pc.value) & 0xFFu) << shift);
+}

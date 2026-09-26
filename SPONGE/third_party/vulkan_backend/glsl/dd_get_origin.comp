@@ -1,0 +1,19 @@
+layout(set = 0, binding = 0, std430) buffer ResStart { int res_start[]; };
+layout(set = 0, binding = 1, std430) buffer ResLen { int res_len[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer Com { Vec3 com[]; };
+layout(push_constant) uniform Params { int res_numbers; } pc;
+void main()
+{
+    int r = int(gl_GlobalInvocationID.x);
+    if (r >= pc.res_numbers) return;
+    Vec3 origin = Vec3(3.402823466e38, 3.402823466e38, 3.402823466e38);
+    for (int i = 0; i < res_len[r]; ++i)
+    {
+        Vec3 c = crd[res_start[r] + i];
+        origin.x = min(origin.x, c.x);
+        origin.y = min(origin.y, c.y);
+        origin.z = min(origin.z, c.z);
+        com[r] = origin;
+    }
+}

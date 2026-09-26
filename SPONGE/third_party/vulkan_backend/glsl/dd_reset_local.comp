@@ -1,0 +1,36 @@
+layout(set = 0, binding = 0, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 1, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 2, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 3, std430) buffer Charge { float d_charge[]; };
+layout(set = 0, binding = 4, std430) buffer Mass { float d_mass[]; };
+layout(set = 0, binding = 5, std430) buffer MassInv
+{
+    float d_mass_inverse[];
+};
+layout(set = 0, binding = 6, std430) buffer MdCharge { float md_charge[]; };
+layout(set = 0, binding = 7, std430) buffer MdMass { float md_mass[]; };
+layout(set = 0, binding = 8, std430) buffer MdMassInv
+{
+    float md_mass_inverse[];
+};
+layout(push_constant) uniform Params
+{
+    int start_idx;
+    int atom_numbers;
+}
+pc;
+void main()
+{
+    int j = int(gl_GlobalInvocationID.x);
+    if (j >= pc.atom_numbers - pc.start_idx) return;
+    int idx = j + pc.start_idx;
+    int atom_j = atom_local[idx];
+    d_charge[idx] = md_charge[atom_j];
+    d_mass[idx] = md_mass[atom_j];
+    d_mass_inverse[idx] = md_mass_inverse[atom_j];
+    uint shift = (uint(atom_j) & 3u) * 8u;
+    uint word = uint(atom_j) >> 2;
+    atomicAnd(label[word], ~(0xFFu << shift));
+    atomicOr(label[word], 1u << shift);
+    atom_local_id[atom_j] = idx;
+}

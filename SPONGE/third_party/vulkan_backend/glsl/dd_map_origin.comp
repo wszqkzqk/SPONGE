@@ -1,0 +1,25 @@
+layout(set = 0, binding = 0, std430) buffer ResStart { int res_start[]; };
+layout(set = 0, binding = 1, std430) buffer ResLen { int res_len[]; };
+layout(set = 0, binding = 2, std430) buffer Com { Vec3 com[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { Vec3 crd[]; };
+layout(push_constant) uniform Params
+{
+    int res_numbers;
+    LTMat g;
+    float dt;
+}
+pc;
+void main()
+{
+    int r = int(gl_GlobalInvocationID.x);
+    if (r >= pc.res_numbers) return;
+    Vec3 o = com[r];
+    Vec3 trans_vec =
+        Vec3(pc.dt * (o.x * pc.g.a11 + o.y * pc.g.a21 + o.z * pc.g.a31),
+             pc.dt * (o.y * pc.g.a22 + o.z * pc.g.a32), pc.dt * o.z * pc.g.a33);
+    for (int i = 0; i < res_len[r]; ++i)
+    {
+        int atom_i = res_start[r] + i;
+        crd[atom_i] = v3_add(crd[atom_i], trans_vec);
+    }
+}

@@ -971,6 +971,10 @@ void LISTED_FORCE::Compute_Force(int atom_numbers, VECTOR* crd,
     launch_args[parameter_name.size() + 8] = &need_virial;
     launch_args[parameter_name.size() + 9] = &ONLY_ENERGY;
     launch_args[parameter_name.size() + 10] = &interaction_numbers;
+#ifdef USE_VULKAN
+    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
+    sponge_vk::HostBarrier();
+#endif
     force_function({(interaction_numbers + 1023u) / 1024u, 1u, 1u},
                    {1024u, 1u, 1u}, NULL, 0, launch_args);
     if (need_energy)
@@ -1015,7 +1019,10 @@ float LISTED_FORCE::Get_Energy(VECTOR* crd, Boundary boundary)
     launch_args[parameter_name.size() + 8] = &ZERO;
     launch_args[parameter_name.size() + 9] = &TRUE_;
     launch_args[parameter_name.size() + 10] = &interaction_numbers;
-
+#ifdef USE_VULKAN
+    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
+    sponge_vk::HostBarrier();
+#endif
     force_function({(interaction_numbers + 1023u) / 1024u, 1u, 1u},
                    {1024u, 1u, 1u}, NULL, 0, launch_args);
     Sum_Of_List(item_energy, sum_energy, interaction_numbers);

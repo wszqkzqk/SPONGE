@@ -1,0 +1,65 @@
+layout(set = 0, binding = 0, std430) buffer UG { AtomGroup ug[]; };
+layout(set = 0, binding = 1, std430) buffer SerialPool { int serial_pool[]; };
+layout(set = 0, binding = 2, std430) buffer MdCrd { Vec3 md_crd[]; };
+layout(set = 0, binding = 3, std430) buffer MdVel { Vec3 md_vel[]; };
+layout(set = 0, binding = 4, std430) buffer MdMass { float md_mass[]; };
+layout(set = 0, binding = 5, std430) buffer MdMassInv
+{
+    float md_mass_inverse[];
+};
+layout(set = 0, binding = 6, std430) buffer MdCharge { float md_charge[]; };
+layout(set = 0, binding = 7, std430) buffer ResStart { int res_start[]; };
+layout(set = 0, binding = 8, std430) buffer ResLen { int res_len[]; };
+layout(set = 0, binding = 9, std430) buffer ResNumbers { int res_numbers[]; };
+layout(set = 0, binding = 10, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 11, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 12, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 13, std430) buffer AtomNumbers
+{
+    int atom_numbers[];
+};
+layout(set = 0, binding = 14, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 15, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 16, std430) buffer Mass { float d_mass[]; };
+layout(set = 0, binding = 17, std430) buffer MassInv
+{
+    float d_mass_inverse[];
+};
+layout(set = 0, binding = 18, std430) buffer Charge { float d_charge[]; };
+layout(push_constant) uniform Params { int ug_numbers; } pc;
+void set_label(int i)
+{
+    uint shift = (uint(i) & 3u) * 8u;
+    uint word = uint(i) >> 2;
+    uint w = label[word];
+    w = (w & ~(0xFFu << shift)) | (1u << shift);
+    label[word] = w;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    res_numbers[0] = 0;
+    atom_numbers[0] = 0;
+    int serial_offset = 0;
+    for (int idx = 0; idx < pc.ug_numbers; ++idx)
+    {
+        int n = ug[idx].atom_numbers;
+        res_start[res_numbers[0]] = atom_numbers[0];
+        res_len[res_numbers[0]] = n;
+        res_numbers[0] += 1;
+        for (int a = 0; a < n; a++)
+        {
+            int atom_i = serial_pool[serial_offset + a];
+            atom_local[atom_numbers[0]] = atom_i;
+            crd[atom_numbers[0]] = md_crd[atom_i];
+            vel[atom_numbers[0]] = md_vel[atom_i];
+            d_mass[atom_numbers[0]] = md_mass[atom_i];
+            d_mass_inverse[atom_numbers[0]] = md_mass_inverse[atom_i];
+            d_charge[atom_numbers[0]] = md_charge[atom_i];
+            set_label(atom_i);
+            atom_local_id[atom_i] = atom_numbers[0];
+            atom_numbers[0] += 1;
+        }
+        serial_offset += n;
+    }
+}

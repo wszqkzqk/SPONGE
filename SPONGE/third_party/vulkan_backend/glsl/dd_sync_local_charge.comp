@@ -1,0 +1,16 @@
+layout(set = 0, binding = 0, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 1, std430) buffer GlobalCharge
+{
+    float global_charge[];
+};
+layout(set = 0, binding = 2, std430) buffer LocalCharge
+{
+    float local_charge[];
+};
+layout(push_constant) uniform Params { int local_atom_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.local_atom_numbers) return;
+    local_charge[i] = global_charge[atom_local[i]];
+}

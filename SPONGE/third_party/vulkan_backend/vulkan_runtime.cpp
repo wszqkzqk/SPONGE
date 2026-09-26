@@ -434,6 +434,15 @@ void CopyHostToDevice(void* dst, const void* src, size_t size,
 void CopyDeviceToHost(void* dst, const void* src, size_t size,
                       StreamState* stream)
 {
+    SubmitAndWaitImpl(&g_default_stream);
+    for (auto& [_, other] : g_streams) SubmitAndWaitImpl(other);
+    const auto* alloc = sponge_vk::AllocationOf(src);
+    memcpy(dst, alloc->mapped, size);
+}
+
+void CopyDeviceToHostAsync(void* dst, const void* src, size_t size,
+                           StreamState* stream)
+{
     SubmitAndWaitImpl(stream);
     const auto* alloc = sponge_vk::AllocationOf(src);
     memcpy(dst, alloc->mapped, size);
@@ -832,7 +841,7 @@ deviceError_t deviceMemcpyAsync(void* to, const void* from, size_t size,
             CopyHostToDevice(to, from, size, stream);
             break;
         case deviceMemcpyDeviceToHost:
-            CopyDeviceToHost(to, from, size, stream);
+            CopyDeviceToHostAsync(to, from, size, stream);
             break;
         case deviceMemcpyDeviceToDevice:
             CopyDeviceToDevice(to, from, size, stream);

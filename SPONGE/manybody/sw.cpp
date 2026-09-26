@@ -1,4 +1,4 @@
-﻿#include "sw.h"
+#include "sw.h"
 
 #include <algorithm>
 #include <highfive/highfive.hpp>
@@ -7,6 +7,33 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef USE_VULKAN
+struct SwForceVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int need_atom_energy;
+    int need_virial;
+    int atom_type_numbers;
+    int pair_type_numbers;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(SwForceVkParams) == 76,
+              "SwForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 namespace
 {
@@ -638,6 +665,23 @@ void STILLINGER_WEBER_INFORMATION::SW_Force_With_Atom_Energy_And_Virial_Full_NL(
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
 
+#ifdef USE_VULKAN
+    SwForceVkParams params{atom_numbers,         boundary,
+                           need_atom_energy,     need_virial,
+                           atom_type_numbers,    pair_type_numbers,
+                           vk_nl_stride(fnl_d_nl, atom_numbers)};
+    const void* buffers[] = {fnl_d_nl,
+                             fnl_d_nl[0].atom_serial,
+                             crd,
+                             frc,
+                             vk_or_dummy(atom_energy, frc),
+                             vk_or_dummy(atom_virial, frc),
+                             this->d_atom_type,
+                             this->d_parameters,
+                             this->d_energy_sum};
+    VK_LAUNCH(sw_force_full_nl, gridSize.x, 1, blockSize.x, blockSize.y,
+              buffers, &params, NULL);
+#else
     auto f = SW_Force_With_Full_Neighbor_CUDA<false, false>;
 
     if (!need_atom_energy && !need_virial)
@@ -662,12 +706,19 @@ void STILLINGER_WEBER_INFORMATION::SW_Force_With_Atom_Energy_And_Virial_Full_NL(
                          this->d_atom_type, this->d_parameters,
                          this->atom_type_numbers, this->pair_type_numbers,
                          this->d_energy_atom);
+#endif
 }
 
 void STILLINGER_WEBER_INFORMATION::Step_Print(CONTROLLER* controller)
 {
     if (!is_initialized) return;
+#ifdef USE_VULKAN
+    // d_energy_atom is an interior pointer (d_energy_sum + 1); the Vulkan
+    // backend only binds allocation bases, so shift the range instead.
+    Sum_Of_List(d_energy_sum, d_energy_sum, atom_numbers + 1, 1);
+#else
     Sum_Of_List(d_energy_atom, d_energy_sum, atom_numbers);
+#endif
     deviceMemcpy(&h_energy_sum, d_energy_sum, sizeof(float),
                  deviceMemcpyDeviceToHost);
     controller->Step_Print(this->module_name, h_energy_sum, true);

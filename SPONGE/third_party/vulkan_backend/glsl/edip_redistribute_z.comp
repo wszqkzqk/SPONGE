@@ -1,0 +1,57 @@
+layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer Parameters { float parameters[]; };
+layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 5, std430) buffer Z { float z_dedz[]; };
+layout(set = 0, binding = 6, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int atom_i =
+        int(gl_WorkGroupSize.y * gl_WorkGroupID.x + gl_LocalInvocationID.y);
+    if (atom_i >= pc.atom_numbers) return;
+    int type_i = atom_types[atom_i];
+    int count = nl[atom_i].atom_numbers;
+    int base = atom_i * pc.max_neighbor_numbers;
+    Vec3 ri = crd[atom_i];
+    float dE_dzi = z_dedz[pc.atom_numbers + atom_i];
+    Vec3 local_frc = v3(0.0, 0.0, 0.0);
+    LTMat local_virial = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (int j = int(gl_LocalInvocationID.x); j < count;
+         j += int(gl_WorkGroupSize.x))
+    {
+        int atom_j = nl_serial[base + j];
+        int type_j = atom_types[atom_j];
+        float dE_dzj = z_dedz[pc.atom_numbers + atom_j] + dE_dzi;
+        type_j += pc.atom_type_numbers * type_i;
+        float alpha = parameters[8 * type_j];
+        float c = parameters[8 * type_j + 1];
+        float a = parameters[8 * type_j + 2];
+        Vec3 dr = get_displacement_periodic(ri, crd[atom_j], pc.boundary);
+        float r = v3_len(dr);
+        if (r < a && r > c)
+        {
+            Sad7 rs = sad7_var(r, 0);
+            Sad7 zs = sad7_div(sad7_add_c(rs, -c), sad7_const(a - c));
+            zs = sad7_exp(sad7_rdiv(
+                alpha, sad7_add_c(sad7_neg(sad7_pow(zs, -3.0)), 1.0)));
+            Vec3 f = v3_scale(dr, dE_dzj * zs.d[0] / r);
+            local_frc = v3_sub(local_frc, f);
+            if (pc.need_virial != 0 && atom_j > atom_i)
+                local_virial =
+                    lt_sub(local_virial, virial_from_force_dis(f, dr));
+        }
+    }
+    warp_aadd_v3(frc[atom_i], local_frc);
+    if (pc.need_virial != 0) warp_aadd_lt(atom_virial[atom_i], local_virial);
+}

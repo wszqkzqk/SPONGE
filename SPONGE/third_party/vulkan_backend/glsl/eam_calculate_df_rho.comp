@@ -1,0 +1,50 @@
+layout(set = 0, binding = 0, std430) buffer EmbedTable { float embed_table[]; };
+layout(set = 0, binding = 1, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 2, std430) buffer Rho { float d_rho[]; };
+layout(set = 0, binding = 3, std430) buffer DfDrho { float d_df_drho[]; };
+layout(set = 0, binding = 4, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 5, std430) buffer EnergySum { float d_energy_sum[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int nrho;
+    float drho;
+    int need_atom_energy;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    int type_i = atom_types[atom_i];
+    int tbl = type_i * pc.nrho;
+    float index_f = d_rho[atom_i] / pc.drho;
+    int i = int(index_f);
+    if (i < 0) i = 0;
+    if (i >= pc.nrho - 1) i = pc.nrho - 2;
+    int idx0 = i - 1 < 0 ? 0 : i - 1;
+    int idx1 = i;
+    int idx2 = i + 1;
+    int idx3 = i + 2 >= pc.nrho ? pc.nrho - 1 : i + 2;
+    float p0 = embed_table[tbl + idx0];
+    float p1 = embed_table[tbl + idx1];
+    float p2 = embed_table[tbl + idx2];
+    float p3 = embed_table[tbl + idx3];
+    float t = index_f - float(i);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float val = 0.5 *
+                ((2.0 * p1) + (-p0 + p2) * t +
+                 (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                 (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+    float der = 0.5 *
+                ((-p0 + p2) + 2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t +
+                 3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t2) /
+                pc.drho;
+    d_df_drho[atom_i] = der;
+    if (pc.need_atom_energy != 0)
+    {
+        atom_energy[atom_i] += val;
+        afadd(d_energy_sum[0], val);
+    }
+}

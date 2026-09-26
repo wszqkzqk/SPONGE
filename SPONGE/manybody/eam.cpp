@@ -1,10 +1,62 @@
-﻿#include "eam.h"
+#include "eam.h"
 
 #include <algorithm>
 #include <highfive/highfive.hpp>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef USE_VULKAN
+struct EamRhoVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int ntypes;
+    int nr;
+    float dr;
+    float cut;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EamRhoVkParams) == 76,
+              "EamRhoVkParams must match the GLSL push constant layout");
+
+struct EamDfRhoVkParams
+{
+    int atom_numbers;
+    int nrho;
+    float drho;
+    int need_atom_energy;
+};
+static_assert(sizeof(EamDfRhoVkParams) == 16,
+              "EamDfRhoVkParams must match the GLSL push constant layout");
+
+struct EamForceVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int ntypes;
+    int nr;
+    float dr;
+    float cut;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EamForceVkParams) == 84,
+              "EamForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 namespace
 {
@@ -325,10 +377,20 @@ void EAM_INFORMATION::EAM_Force_With_Atom_Energy_And_Virial(
     float* d_rho_local = this->d_rho;
     int ntypes = this->atom_type_numbers;
 
+#ifdef USE_VULKAN
+    EamRhoVkParams rho_params{atom_numbers, boundary, ntypes, nr_local,
+                              dr_local, cut_local,
+                              vk_nl_stride(nl, atom_numbers)};
+    const void* rho_buffers[] = {nl, nl[0].atom_serial, crd, atom_type_local,
+                                 rho_table, d_rho_local};
+    VK_LAUNCH(eam_calculate_rho, blocks, 1, threads, 1, rho_buffers,
+              &rho_params, NULL);
+#else
     Launch_Device_Kernel(EAM_Calculate_Rho_CUDA, blocks, threads, 0, NULL,
                          atom_numbers, crd, boundary, nl, atom_type_local,
                          rho_table, ntypes, nr_local, dr_local, cut_local,
                          d_rho_local);
+#endif
 
     if (need_atom_energy) deviceMemset(d_energy_sum, 0, sizeof(float));
 
@@ -339,6 +401,37 @@ void EAM_INFORMATION::EAM_Force_With_Atom_Energy_And_Virial(
     float* d_df_drho_local = this->d_df_drho;
     float* d_energy_sum_local = this->d_energy_sum;
 
+#ifdef USE_VULKAN
+    EamDfRhoVkParams df_params{atom_numbers, nrho_local, drho_local,
+                               need_atom_energy};
+    const void* df_buffers[] = {embed_table,
+                                atom_type_local,
+                                d_rho_local,
+                                d_df_drho_local,
+                                vk_or_dummy(atom_energy, d_rho_local),
+                                d_energy_sum_local};
+    VK_LAUNCH(eam_calculate_df_rho, blocks, 1, threads, 1, df_buffers,
+              &df_params, NULL);
+
+    EamForceVkParams force_params{atom_numbers, boundary, ntypes, nr_local,
+                                  dr_local, cut_local, need_atom_energy,
+                                  need_virial,
+                                  vk_nl_stride(nl, atom_numbers)};
+    const void* force_buffers[] = {nl,
+                                   nl[0].atom_serial,
+                                   crd,
+                                   frc,
+                                   atom_type_local,
+                                   rho_table,
+                                   phi_table,
+                                   d_rho_local,
+                                   d_df_drho_local,
+                                   vk_or_dummy(atom_energy, frc),
+                                   vk_or_dummy(atom_virial, frc),
+                                   d_energy_sum_local};
+    VK_LAUNCH(eam_calculate_force, blocks, 1, threads, 1, force_buffers,
+              &force_params, NULL);
+#else
     auto df_rho_kernel = EAM_Calculate_DF_Rho_CUDA<false>;
     if (need_atom_energy) df_rho_kernel = EAM_Calculate_DF_Rho_CUDA<true>;
     Launch_Device_Kernel(df_rho_kernel, blocks, threads, 0, NULL, atom_numbers,
@@ -364,6 +457,7 @@ void EAM_INFORMATION::EAM_Force_With_Atom_Energy_And_Virial(
                          phi_table, ntypes, nr_local, dr_local, cut_local,
                          d_rho_local, d_df_drho_local, atom_energy, atom_virial,
                          d_energy_sum_local);
+#endif
 }
 
 void EAM_INFORMATION::Read_Funcfl(FILE* fp, CONTROLLER* controller)

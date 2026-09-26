@@ -1,6 +1,54 @@
-﻿#include "edip.h"
+#include "edip.h"
 
 #include "../utils/h5md/topology_manybody_h5_materializer.hpp"
+
+#ifdef USE_VULKAN
+struct EdipGetZVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EdipGetZVkParams) == 64,
+              "EdipGetZVkParams must match the GLSL push constant layout");
+
+struct EdipForceVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int need_atom_energy;
+    int need_virial;
+    int atom_type_numbers;
+    int pair_type_numbers;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EdipForceVkParams) == 76,
+              "EdipForceVkParams must match the GLSL push constant layout");
+
+struct EdipRedistributeVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EdipRedistributeVkParams) == 68,
+              "EdipRedistributeVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 void EDIP_INFORMATION::Initial(CONTROLLER* controller, const char* module_name,
                                bool* need_full_nl_flag)
@@ -529,6 +577,47 @@ void EDIP_INFORMATION::EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
 
+    deviceMemset(this->z, 0, sizeof(float) * atom_numbers * 2);
+#ifdef USE_VULKAN
+    EdipGetZVkParams gz_params{atom_numbers, boundary, atom_type_numbers,
+                               vk_nl_stride(fnl_d_nl, atom_numbers)};
+    const void* gz_buffers[] = {fnl_d_nl, fnl_d_nl[0].atom_serial, crd,
+                                this->d_parameters, this->d_atom_type,
+                                this->z};
+    VK_LAUNCH(edip_get_z, gridSize.x, 1, blockSize.x, blockSize.y, gz_buffers,
+              &gz_params, NULL);
+
+    EdipForceVkParams f_params{atom_numbers, boundary, need_atom_energy,
+                               need_virial, atom_type_numbers,
+                               pair_type_numbers,
+                               vk_nl_stride(fnl_d_nl, atom_numbers)};
+    const void* f_buffers[] = {fnl_d_nl,
+                               fnl_d_nl[0].atom_serial,
+                               crd,
+                               frc,
+                               this->z,
+                               vk_or_dummy(atom_energy, frc),
+                               vk_or_dummy(atom_virial, frc),
+                               this->d_atom_type,
+                               this->d_parameters,
+                               this->d_energy_sum};
+    VK_LAUNCH(edip_force_full_nl, gridSize.x, 1, blockSize.x, blockSize.y,
+              f_buffers, &f_params, NULL);
+
+    EdipRedistributeVkParams r_params{atom_numbers, boundary,
+                                      atom_type_numbers, need_virial,
+                                      vk_nl_stride(fnl_d_nl, atom_numbers)};
+    const void* r_buffers[] = {fnl_d_nl,
+                               fnl_d_nl[0].atom_serial,
+                               crd,
+                               this->d_parameters,
+                               this->d_atom_type,
+                               this->z,
+                               frc,
+                               vk_or_dummy(atom_virial, frc)};
+    VK_LAUNCH(edip_redistribute_z, gridSize.x, 1, blockSize.x, blockSize.y,
+              r_buffers, &r_params, NULL);
+#else
     auto f1 = EDIP_Force_With_Full_Neighbor_CUDA<false, false>;
     auto f2 = Redistribute_Z_to_Atoms<false>;
     if (!need_atom_energy && !need_virial)
@@ -552,7 +641,6 @@ void EDIP_INFORMATION::EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
         f2 = Redistribute_Z_to_Atoms<true>;
     }
 
-    deviceMemset(this->z, 0, sizeof(float) * atom_numbers * 2);
     Launch_Device_Kernel(Get_Z, gridSize, blockSize, 0, NULL, atom_numbers, crd,
                          boundary, fnl_d_nl, this->d_parameters,
                          this->atom_type_numbers, this->d_atom_type, this->z);
@@ -565,12 +653,19 @@ void EDIP_INFORMATION::EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
                          boundary, fnl_d_nl, this->d_parameters,
                          this->atom_type_numbers, this->d_atom_type,
                          this->dE_dz, frc, atom_virial);
+#endif
 }
 
 void EDIP_INFORMATION::Step_Print(CONTROLLER* controller)
 {
     if (!is_initialized) return;
+#ifdef USE_VULKAN
+    // d_energy_atom is an interior pointer (d_energy_sum + 1); the Vulkan
+    // backend only binds allocation bases, so shift the range instead.
+    Sum_Of_List(d_energy_sum, d_energy_sum, atom_numbers + 1, 1);
+#else
     Sum_Of_List(d_energy_atom, d_energy_sum, atom_numbers);
+#endif
     deviceMemcpy(&h_energy_sum, d_energy_sum, sizeof(float),
                  deviceMemcpyDeviceToHost);
     controller->Step_Print(this->module_name, h_energy_sum, true);

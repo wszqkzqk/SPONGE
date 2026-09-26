@@ -1,0 +1,123 @@
+layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 5, std430) buffer RhoTable { float rho_table[]; };
+layout(set = 0, binding = 6, std430) buffer PhiTable { float phi_table[]; };
+layout(set = 0, binding = 7, std430) buffer Rho { float d_rho[]; };
+layout(set = 0, binding = 8, std430) buffer DfDrho { float d_df_drho[]; };
+layout(set = 0, binding = 9, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 10, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 11, std430) buffer EnergySum { float d_energy_sum[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int ntypes;
+    int nr;
+    float dr;
+    float cut;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+vec2 phi_interp(int tbl, float x)
+{
+    float index_f = x / pc.dr;
+    int k = int(index_f);
+    if (k < 0) k = 0;
+    if (k >= pc.nr - 1) k = pc.nr - 2;
+    int idx0 = k - 1 < 0 ? 0 : k - 1;
+    int idx1 = k;
+    int idx2 = k + 1;
+    int idx3 = k + 2 >= pc.nr ? pc.nr - 1 : k + 2;
+    float p0 = phi_table[tbl + idx0];
+    float p1 = phi_table[tbl + idx1];
+    float p2 = phi_table[tbl + idx2];
+    float p3 = phi_table[tbl + idx3];
+    float t = index_f - float(k);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float val = 0.5 *
+                ((2.0 * p1) + (-p0 + p2) * t +
+                 (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                 (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+    float der = 0.5 *
+                ((-p0 + p2) + 2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t +
+                 3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t2) /
+                pc.dr;
+    return vec2(val, der);
+}
+vec2 rho_interp(int tbl, float x)
+{
+    float index_f = x / pc.dr;
+    int k = int(index_f);
+    if (k < 0) k = 0;
+    if (k >= pc.nr - 1) k = pc.nr - 2;
+    int idx0 = k - 1 < 0 ? 0 : k - 1;
+    int idx1 = k;
+    int idx2 = k + 1;
+    int idx3 = k + 2 >= pc.nr ? pc.nr - 1 : k + 2;
+    float p0 = rho_table[tbl + idx0];
+    float p1 = rho_table[tbl + idx1];
+    float p2 = rho_table[tbl + idx2];
+    float p3 = rho_table[tbl + idx3];
+    float t = index_f - float(k);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float val = 0.5 *
+                ((2.0 * p1) + (-p0 + p2) * t +
+                 (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                 (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+    float der = 0.5 *
+                ((-p0 + p2) + 2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t +
+                 3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t2) /
+                pc.dr;
+    return vec2(val, der);
+}
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    Vec3 ri = crd[atom_i];
+    Vec3 fi = v3(0.0, 0.0, 0.0);
+    LTMat vi = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    int count = nl[atom_i].atom_numbers;
+    int base = atom_i * pc.max_neighbor_numbers;
+    float dfi = d_df_drho[atom_i];
+    int type_i = atom_types[atom_i];
+    for (int j = 0; j < count; j++)
+    {
+        int atom_j = nl_serial[base + j];
+        int type_j = atom_types[atom_j];
+        Vec3 rj = crd[atom_j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float rij = v3_len(drij);
+        if (rij < pc.cut)
+        {
+            vec2 phi = phi_interp((type_i * pc.ntypes + type_j) * pc.nr, rij);
+            vec2 rho_at_j = rho_interp(type_j * pc.nr, rij);
+            vec2 rho_at_i = rho_interp(type_i * pc.nr, rij);
+            float dfj = d_df_drho[atom_j];
+            float e_force_der =
+                phi.y + dfi * rho_at_j.y + dfj * rho_at_i.y;
+            Vec3 fij = v3_scale(drij, -e_force_der / rij);
+            fi = v3_add(fi, fij);
+            if (pc.need_atom_energy != 0)
+            {
+                atom_energy[atom_i] += 0.5 * phi.x;
+                afadd(d_energy_sum[0], 0.5 * phi.x);
+            }
+            if (pc.need_virial != 0)
+                vi = lt_add(vi,
+                            lt_scale(virial_from_force_dis(fij, drij), 0.5));
+        }
+    }
+    frc[atom_i].x += fi.x;
+    frc[atom_i].y += fi.y;
+    frc[atom_i].z += fi.z;
+    if (pc.need_virial != 0)
+        atom_virial[atom_i] = lt_add(atom_virial[atom_i], vi);
+}

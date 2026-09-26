@@ -1,0 +1,58 @@
+layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 4, std430) buffer RhoTable { float rho_table[]; };
+layout(set = 0, binding = 5, std430) buffer Rho { float d_rho[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int ntypes;
+    int nr;
+    float dr;
+    float cut;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    float local_rho = 0.0;
+    Vec3 ri = crd[atom_i];
+    int count = nl[atom_i].atom_numbers;
+    int base = atom_i * pc.max_neighbor_numbers;
+    for (int j = 0; j < count; j++)
+    {
+        int atom_j = nl_serial[base + j];
+        int type_j = atom_types[atom_j];
+        Vec3 rj = crd[atom_j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float rij = v3_len(drij);
+        if (rij < pc.cut)
+        {
+            int tbl = type_j * pc.nr;
+            float index_f = rij / pc.dr;
+            int k = int(index_f);
+            if (k < 0) k = 0;
+            if (k >= pc.nr - 1) k = pc.nr - 2;
+            int idx0 = k - 1 < 0 ? 0 : k - 1;
+            int idx1 = k;
+            int idx2 = k + 1;
+            int idx3 = k + 2 >= pc.nr ? pc.nr - 1 : k + 2;
+            float p0 = rho_table[tbl + idx0];
+            float p1 = rho_table[tbl + idx1];
+            float p2 = rho_table[tbl + idx2];
+            float p3 = rho_table[tbl + idx3];
+            float t = index_f - float(k);
+            float t2 = t * t;
+            float t3 = t2 * t;
+            local_rho += 0.5 *
+                         ((2.0 * p1) + (-p0 + p2) * t +
+                          (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                          (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+        }
+    }
+    d_rho[atom_i] = local_rho;
+}

@@ -326,6 +326,21 @@ Sad1 sad1_rdiv(float a, Sad1 b)
     return Sad1(q, -q * b.d0 / b.val);
 }
 Sad1 sad1_log(Sad1 a) { return Sad1(log(a.val), a.d0 / a.val); }
+Sad1 sad1_sub_c(Sad1 a, float c) { return Sad1(a.val - c, a.d0); }
+Sad1 sad1_rsub_c(float c, Sad1 a) { return Sad1(c - a.val, -a.d0); }
+Sad1 sad1_neg(Sad1 a) { return Sad1(-a.val, -a.d0); }
+Sad1 sad1_exp(Sad1 a)
+{
+    float e = exp(a.val);
+    return Sad1(e, e * a.d0);
+}
+Sad1 sad1_powf(Sad1 x, Sad1 y)
+{
+    float v = pow(x.val, y.val);
+    float df_dx = y.val * pow(x.val, y.val - 1.0);
+    float df_dy = x.val > 0.0 ? v * log(x.val) : 0.0;
+    return Sad1(v, df_dx * x.d0 + df_dy * y.d0);
+}
 
 Sad3 sad3_var(float v, int id)
 {
@@ -335,6 +350,17 @@ Sad3 sad3_var(float v, int id)
 Sad3 sad3_add(Sad3 a, Sad3 b)
 {
     return Sad3(a.val + b.val, a.d0 + b.d0, a.d1 + b.d1, a.d2 + b.d2);
+}
+Sad3 sad3_sub(Sad3 a, Sad3 b)
+{
+    return Sad3(a.val - b.val, a.d0 - b.d0, a.d1 - b.d1, a.d2 - b.d2);
+}
+Sad3 sad3_neg(Sad3 a) { return Sad3(-a.val, -a.d0, -a.d1, -a.d2); }
+Sad3 sad3_add_c(Sad3 a, float c) { return Sad3(a.val + c, a.d0, a.d1, a.d2); }
+Sad3 sad3_sub_c(Sad3 a, float c) { return Sad3(a.val - c, a.d0, a.d1, a.d2); }
+Sad3 sad3_rsub_c(float c, Sad3 a)
+{
+    return Sad3(c - a.val, -a.d0, -a.d1, -a.d2);
 }
 Sad3 sad3_scale(Sad3 a, float s)
 {
@@ -367,9 +393,193 @@ Sad3 sad3_sqrt(Sad3 a)
     float df = 0.5 / s;
     return Sad3(s, df * a.d0, df * a.d1, df * a.d2);
 }
+Sad3 sad3_powf(Sad3 x, Sad3 y)
+{
+    float v = pow(x.val, y.val);
+    float df_dx = y.val * pow(x.val, y.val - 1.0);
+    float df_dy = x.val > 0.0 ? v * log(x.val) : 0.0;
+    return Sad3(v, df_dx * x.d0 + df_dy * y.d0, df_dx * x.d1 + df_dy * y.d1,
+                df_dx * x.d2 + df_dy * y.d2);
+}
+
+struct Sad7
+{
+    float val;
+    float d[7];
+};
+
+Sad7 sad7_const(float v)
+{
+    Sad7 r;
+    r.val = v;
+    for (int i = 0; i < 7; i++) r.d[i] = 0.0;
+    return r;
+}
+Sad7 sad7_var(float v, int id)
+{
+    Sad7 r = sad7_const(v);
+    r.d[id] = 1.0;
+    return r;
+}
+Sad7 sad7_add(Sad7 a, Sad7 b)
+{
+    Sad7 r;
+    r.val = a.val + b.val;
+    for (int i = 0; i < 7; i++) r.d[i] = a.d[i] + b.d[i];
+    return r;
+}
+Sad7 sad7_add_c(Sad7 a, float c)
+{
+    Sad7 r = a;
+    r.val = a.val + c;
+    return r;
+}
+Sad7 sad7_sub(Sad7 a, Sad7 b)
+{
+    Sad7 r;
+    r.val = a.val - b.val;
+    for (int i = 0; i < 7; i++) r.d[i] = a.d[i] - b.d[i];
+    return r;
+}
+Sad7 sad7_neg(Sad7 a)
+{
+    Sad7 r;
+    r.val = -a.val;
+    for (int i = 0; i < 7; i++) r.d[i] = -a.d[i];
+    return r;
+}
+Sad7 sad7_scale(Sad7 a, float s)
+{
+    Sad7 r;
+    r.val = a.val * s;
+    for (int i = 0; i < 7; i++) r.d[i] = a.d[i] * s;
+    return r;
+}
+Sad7 sad7_mul(Sad7 a, Sad7 b)
+{
+    Sad7 r;
+    r.val = a.val * b.val;
+    for (int i = 0; i < 7; i++) r.d[i] = a.d[i] * b.val + a.val * b.d[i];
+    return r;
+}
+Sad7 sad7_div(Sad7 a, Sad7 b)
+{
+    Sad7 r;
+    r.val = a.val / b.val;
+    for (int i = 0; i < 7; i++)
+        r.d[i] = (a.d[i] * b.val - b.d[i] * a.val) / (b.val * b.val);
+    return r;
+}
+Sad7 sad7_rdiv(float a, Sad7 b)
+{
+    Sad7 r;
+    r.val = a / b.val;
+    for (int i = 0; i < 7; i++) r.d[i] = -a * b.d[i] / (b.val * b.val);
+    return r;
+}
+Sad7 sad7_exp(Sad7 a)
+{
+    float e = exp(a.val);
+    Sad7 r;
+    r.val = e;
+    for (int i = 0; i < 7; i++) r.d[i] = e * a.d[i];
+    return r;
+}
+Sad7 sad7_pow(Sad7 a, float p)
+{
+    float df = p * pow(a.val, p - 1.0);
+    Sad7 r;
+    r.val = pow(a.val, p);
+    for (int i = 0; i < 7; i++) r.d[i] = df * a.d[i];
+    return r;
+}
+Sad7 sad7_sqrt(Sad7 a) { return sad7_pow(a, 0.5); }
+Sad7 sad7_sin(Sad7 a)
+{
+    float dc = cos(a.val);
+    Sad7 r;
+    r.val = sin(a.val);
+    for (int i = 0; i < 7; i++) r.d[i] = dc * a.d[i];
+    return r;
+}
 
 // erf(x) = 1 - erfc(x)
 float erff(float x) { return 1.0 - erfcf(x); }
+
+struct Sad5
+{
+    float val, d0, d1, d2, d3, d4;
+};
+
+Sad5 sad5_var(float v, int id)
+{
+    return Sad5(v, id == 0 ? 1.0 : 0.0, id == 1 ? 1.0 : 0.0,
+                id == 2 ? 1.0 : 0.0, id == 3 ? 1.0 : 0.0, id == 4 ? 1.0 : 0.0);
+}
+Sad5 sad5_const(float v) { return Sad5(v, 0.0, 0.0, 0.0, 0.0, 0.0); }
+Sad5 sad5_add(Sad5 a, Sad5 b)
+{
+    return Sad5(a.val + b.val, a.d0 + b.d0, a.d1 + b.d1, a.d2 + b.d2,
+                a.d3 + b.d3, a.d4 + b.d4);
+}
+Sad5 sad5_sub(Sad5 a, Sad5 b)
+{
+    return Sad5(a.val - b.val, a.d0 - b.d0, a.d1 - b.d1, a.d2 - b.d2,
+                a.d3 - b.d3, a.d4 - b.d4);
+}
+Sad5 sad5_neg(Sad5 a)
+{
+    return Sad5(-a.val, -a.d0, -a.d1, -a.d2, -a.d3, -a.d4);
+}
+Sad5 sad5_add_c(Sad5 a, float c)
+{
+    return Sad5(a.val + c, a.d0, a.d1, a.d2, a.d3, a.d4);
+}
+Sad5 sad5_sub_c(Sad5 a, float c)
+{
+    return Sad5(a.val - c, a.d0, a.d1, a.d2, a.d3, a.d4);
+}
+Sad5 sad5_scale(Sad5 a, float s)
+{
+    return Sad5(a.val * s, a.d0 * s, a.d1 * s, a.d2 * s, a.d3 * s, a.d4 * s);
+}
+Sad5 sad5_mul(Sad5 a, Sad5 b)
+{
+    return Sad5(a.val * b.val, a.d0 * b.val + a.val * b.d0,
+                a.d1 * b.val + a.val * b.d1, a.d2 * b.val + a.val * b.d2,
+                a.d3 * b.val + a.val * b.d3, a.d4 * b.val + a.val * b.d4);
+}
+Sad5 sad5_div(Sad5 a, Sad5 b)
+{
+    float q = a.val / b.val;
+    return Sad5(q, (a.d0 - q * b.d0) / b.val, (a.d1 - q * b.d1) / b.val,
+                (a.d2 - q * b.d2) / b.val, (a.d3 - q * b.d3) / b.val,
+                (a.d4 - q * b.d4) / b.val);
+}
+Sad5 sad5_rdiv(float a, Sad5 b)
+{
+    float q = a / b.val;
+    return Sad5(q, -q * b.d0 / b.val, -q * b.d1 / b.val, -q * b.d2 / b.val,
+                -q * b.d3 / b.val, -q * b.d4 / b.val);
+}
+Sad5 sad5_exp(Sad5 a)
+{
+    float e = exp(a.val);
+    return Sad5(e, e * a.d0, e * a.d1, e * a.d2, e * a.d3, e * a.d4);
+}
+Sad5 sad5_log_sum_exp(Sad5 x, Sad5 y)
+{
+    float max_xy = max(x.val, y.val);
+    float ex = exp(x.val - max_xy);
+    float ey = exp(y.val - max_xy);
+    float sum = ex + ey;
+    float inv_sum = 1.0 / sum;
+    float wx = ex * inv_sum;
+    float wy = ey * inv_sum;
+    return Sad5(max_xy + log(sum), wx * x.d0 + wy * y.d0,
+                wx * x.d1 + wy * y.d1, wx * x.d2 + wy * y.d2,
+                wx * x.d3 + wy * y.d3, wx * x.d4 + wy * y.d4);
+}
 
 // exp(x^2) * erfc(x), overflow-safe: same polynomial as erfcf without the
 // exp(-x^2) factor; 3-term asymptotic series for x > 10

@@ -1,0 +1,48 @@
+layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer Parameters { float parameters[]; };
+layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 5, std430) buffer Z { float z_dedz[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int atom_i =
+        int(gl_WorkGroupSize.y * gl_WorkGroupID.x + gl_LocalInvocationID.y);
+    if (atom_i >= pc.atom_numbers) return;
+    int type_i = atom_types[atom_i];
+    int count = nl[atom_i].atom_numbers;
+    int base = atom_i * pc.max_neighbor_numbers;
+    Vec3 ri = crd[atom_i];
+    float local_z = 0.0;
+    for (int j = int(gl_LocalInvocationID.x); j < count;
+         j += int(gl_WorkGroupSize.x))
+    {
+        int atom_j = nl_serial[base + j];
+        int type_j = atom_types[atom_j];
+        type_j += pc.atom_type_numbers * type_i;
+        float alpha = parameters[8 * type_j];
+        float c = parameters[8 * type_j + 1];
+        float a = parameters[8 * type_j + 2];
+        Vec3 dr = get_displacement_periodic(crd[atom_j], ri, pc.boundary);
+        float r = v3_len(dr);
+        if (r < c)
+        {
+            local_z += 1.0;
+        }
+        else if (r < a)
+        {
+            r = (r - c) / (a - c);
+            r = exp(alpha / (1.0 - pow(r, -3.0)));
+            local_z += r;
+        }
+    }
+    warp_afadd(z_dedz[atom_i], local_z);
+}

@@ -1,4 +1,4 @@
-﻿#include "tersoff.h"
+#include "tersoff.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,6 +10,32 @@
 #include <vector>
 
 #include "../utils/float_classification.hpp"
+
+#ifdef USE_VULKAN
+struct TersoffVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int ntypes;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(TersoffVkParams) == 72,
+              "TersoffVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 namespace
 {
@@ -747,6 +773,23 @@ void TERSOFF_INFORMATION::TERSOFF_Force_With_Atom_Energy_And_Virial(
     dim3 blockSize(128);
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
 
+#ifdef USE_VULKAN
+    TersoffVkParams params{atom_numbers, boundary, atom_type_numbers,
+                           need_atom_energy, need_virial,
+                           vk_nl_stride(nl, atom_numbers)};
+    const void* buffers[] = {nl,
+                             nl[0].atom_serial,
+                             crd,
+                             frc,
+                             d_atom_type,
+                             d_params,
+                             d_map,
+                             vk_or_dummy(atom_energy, frc),
+                             vk_or_dummy(atom_virial, frc),
+                             d_energy_sum};
+    VK_LAUNCH(tersoff_force_full_nl, gridSize.x, 1, blockSize.x, 1, buffers,
+              &params, NULL);
+#else
     auto force_kernel = Tersoff_Force_CUDA<false, false>;
     if (need_atom_energy && need_virial)
     {
@@ -765,6 +808,7 @@ void TERSOFF_INFORMATION::TERSOFF_Force_With_Atom_Energy_And_Virial(
                          atom_numbers, crd, frc, boundary, nl, d_atom_type,
                          d_params, d_map, atom_type_numbers, atom_energy,
                          atom_virial, d_energy_sum);
+#endif
 }
 
 void TERSOFF_INFORMATION::Step_Print(CONTROLLER* controller)

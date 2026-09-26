@@ -1,0 +1,251 @@
+layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 5, std430) buffer Parameters { float params[]; };
+layout(set = 0, binding = 6, std430) buffer TypeMap { int tersoff_map[]; };
+layout(set = 0, binding = 7, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 8, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 9, std430) buffer EnergySum { float d_energy_sum[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int ntypes;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+const int p_m = 0;
+const int p_gamma = 1;
+const int p_lam3 = 2;
+const int p_c = 3;
+const int p_d = 4;
+const int p_h = 5;
+const int p_n = 6;
+const int p_beta = 7;
+const int p_lam2 = 8;
+const int p_B = 9;
+const int p_R = 10;
+const int p_D = 11;
+const int p_lam1 = 12;
+const int p_A = 13;
+const int p_c1 = 14;
+const int p_c2 = 15;
+const int p_c3 = 16;
+const int p_c4 = 17;
+const int PARAM_STRIDE = 18;
+const float TERS_PI = 3.1415926535897932;
+float ters_fc(float r, int pb)
+{
+    float R = params[pb + p_R];
+    float D = params[pb + p_D];
+    if (r < R - D) return 1.0;
+    if (r > R + D) return 0.0;
+    return 0.5 * (1.0 - sin(TERS_PI * 0.5 * (r - R) / D));
+}
+Sad7 ters_fc_sad(Sad7 r, int pb)
+{
+    float R = params[pb + p_R];
+    float D = params[pb + p_D];
+    if (r.val < R - D) return sad7_const(1.0);
+    if (r.val > R + D) return sad7_const(0.0);
+    return sad7_scale(
+        sad7_add_c(
+            sad7_neg(sad7_sin(sad7_scale(sad7_add_c(r, -R), TERS_PI * 0.5 / D))),
+            1.0),
+        0.5);
+}
+Sad7 ters_gijk_sad(Sad7 costheta, int pb)
+{
+    float c = params[pb + p_c];
+    float d = params[pb + p_d];
+    float h = params[pb + p_h];
+    float gamma = params[pb + p_gamma];
+    Sad7 diff = sad7_add_c(sad7_neg(costheta), h);
+    Sad7 term = sad7_add_c(sad7_mul(diff, diff), d * d);
+    return sad7_scale(
+        sad7_sub(sad7_const(1.0 + c * c / (d * d)), sad7_rdiv(c * c, term)),
+        gamma);
+}
+float ters_bij(float zeta, int pb)
+{
+    float beta = params[pb + p_beta];
+    float n = params[pb + p_n];
+    float c1 = params[pb + p_c1];
+    float c2 = params[pb + p_c2];
+    float c3 = params[pb + p_c3];
+    float c4 = params[pb + p_c4];
+    float tmp = beta * zeta;
+    if (tmp > c1) return 1.0 / sqrt(tmp);
+    if (tmp > c2) return (1.0 - pow(tmp, -n) / (2.0 * n)) / sqrt(tmp);
+    if (tmp < c4) return 1.0;
+    if (tmp < c3) return 1.0 - pow(tmp, n) / (2.0 * n);
+    return pow(1.0 + pow(tmp, n), -1.0 / (2.0 * n));
+}
+float ters_bij_d(float zeta, int pb)
+{
+    float beta = params[pb + p_beta];
+    float n = params[pb + p_n];
+    float c1 = params[pb + p_c1];
+    float c2 = params[pb + p_c2];
+    float c3 = params[pb + p_c3];
+    float c4 = params[pb + p_c4];
+    float tmp = beta * zeta;
+    if (tmp > c1) return beta * -0.5 * pow(tmp, -1.5);
+    if (tmp > c2)
+        return beta * (-0.5 * pow(tmp, -1.5) *
+                       (1.0 - (1.0 + 1.0 / (2.0 * n)) * pow(tmp, -n)));
+    if (tmp < c4) return 0.0;
+    if (tmp < c3) return -0.5 * beta * pow(tmp, n - 1.0);
+    float tmp_n = pow(tmp, n);
+    return -0.5 * pow(1.0 + tmp_n, -1.0 - (1.0 / (2.0 * n))) * tmp_n / zeta;
+}
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_types[i];
+    Vec3 ri = crd[i];
+    int count_i = nl[i].atom_numbers;
+    int base_i = i * pc.max_neighbor_numbers;
+    Vec3 fi = v3(0.0, 0.0, 0.0);
+    float en_i = 0.0;
+    LTMat vi = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (int jj = 0; jj < count_i; jj++)
+    {
+        int j = nl_serial[base_i + jj];
+        int type_j = atom_types[j];
+        Vec3 rj = crd[j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float rij = v3_len(drij);
+        int param_idx_ij = tersoff_map[type_i * pc.ntypes * pc.ntypes +
+                                       type_j * pc.ntypes + type_j];
+        int pb_ij = param_idx_ij * PARAM_STRIDE;
+        if (rij > params[pb_ij + p_R] + params[pb_ij + p_D]) continue;
+        Sad7 rij_sad = sad7_var(rij, 0);
+        Sad7 fr = sad7_scale(
+            sad7_mul(sad7_exp(sad7_scale(rij_sad, -params[pb_ij + p_lam1])),
+                     ters_fc_sad(rij_sad, pb_ij)),
+            params[pb_ij + p_A]);
+        float f_rep = -0.5 * fr.d[0] / rij;
+        fi.x += f_rep * drij.x;
+        fi.y += f_rep * drij.y;
+        fi.z += f_rep * drij.z;
+        aadd_v3(frc[j], v3_scale(drij, -f_rep));
+        if (pc.need_atom_energy != 0)
+        {
+            float ev = 0.5 * fr.val;
+            en_i += ev;
+            afadd(d_energy_sum[0], ev);
+        }
+        if (pc.need_virial != 0)
+            vi = lt_add(vi,
+                        virial_from_force_dis(v3_scale(drij, f_rep), drij));
+        float zeta = 0.0;
+        for (int kk = 0; kk < count_i; kk++)
+        {
+            if (jj == kk) continue;
+            int k = nl_serial[base_i + kk];
+            int type_k = atom_types[k];
+            int param_idx_ijk = tersoff_map[type_i * pc.ntypes * pc.ntypes +
+                                            type_j * pc.ntypes + type_k];
+            int pb = param_idx_ijk * PARAM_STRIDE;
+            Vec3 rk = crd[k];
+            Vec3 drik = get_displacement_periodic(ri, rk, pc.boundary);
+            float rik = v3_len(drik);
+            if (rik > params[pb + p_R] + params[pb + p_D]) continue;
+            float costheta = v3_dot(drij, drik) / (rij * rik);
+            float fc_ik = ters_fc(rik, pb);
+            float c_ = params[pb + p_c];
+            float d_ = params[pb + p_d];
+            float h_ = params[pb + p_h];
+            float g = params[pb + p_gamma] *
+                      (1.0 + c_ * c_ / (d_ * d_) -
+                       c_ * c_ / (d_ * d_ + (h_ - costheta) * (h_ - costheta)));
+            float diff = rij - rik;
+            float arg = params[pb + p_lam3] * diff;
+            if (abs(params[pb + p_m] - 3.0) < 1e-5) arg = arg * arg * arg;
+            zeta += fc_ik * g * exp(arg);
+        }
+        float bij = ters_bij(zeta, pb_ij);
+        float fa_val = -params[pb_ij + p_B] * exp(-params[pb_ij + p_lam2] * rij) *
+                       ters_fc(rij, pb_ij);
+        Sad7 fa_sad = sad7_scale(
+            sad7_mul(sad7_exp(sad7_scale(rij_sad, -params[pb_ij + p_lam2])),
+                     ters_fc_sad(rij_sad, pb_ij)),
+            -params[pb_ij + p_B]);
+        float f_attr_direct = -0.5 * bij * fa_sad.d[0] / rij;
+        fi.x += f_attr_direct * drij.x;
+        fi.y += f_attr_direct * drij.y;
+        fi.z += f_attr_direct * drij.z;
+        aadd_v3(frc[j], v3_scale(drij, -f_attr_direct));
+        if (pc.need_atom_energy != 0)
+        {
+            float ev = 0.5 * bij * fa_val;
+            en_i += ev;
+            afadd(d_energy_sum[0], ev);
+        }
+        if (pc.need_virial != 0)
+            vi = lt_add(vi, virial_from_force_dis(v3_scale(drij, f_attr_direct),
+                                                  drij));
+        float pre = -0.5 * fa_val * ters_bij_d(zeta, pb_ij);
+        for (int kk = 0; kk < count_i; kk++)
+        {
+            if (jj == kk) continue;
+            int k = nl_serial[base_i + kk];
+            int param_idx_ijk = tersoff_map[type_i * pc.ntypes * pc.ntypes +
+                                            type_j * pc.ntypes + atom_types[k]];
+            int pb = param_idx_ijk * PARAM_STRIDE;
+            Vec3 rk = crd[k];
+            Vec3 drik = get_displacement_periodic(ri, rk, pc.boundary);
+            float rik = v3_len(drik);
+            if (rik > params[pb + p_R] + params[pb + p_D]) continue;
+            float costheta = v3_dot(drij, drik) / (rij * rik);
+            Sad7 s_rij = sad7_var(rij, 0);
+            Sad7 s_rik = sad7_var(rik, 1);
+            Sad7 s_cos = sad7_var(costheta, 2);
+            Sad7 s_arg = sad7_scale(sad7_sub(s_rij, s_rik), params[pb + p_lam3]);
+            if (abs(params[pb + p_m] - 3.0) < 1e-5)
+                s_arg = sad7_mul(sad7_mul(s_arg, s_arg), s_arg);
+            Sad7 s_zeta_ijk =
+                sad7_mul(sad7_mul(ters_fc_sad(s_rik, pb), ters_gijk_sad(s_cos, pb)),
+                         sad7_exp(s_arg));
+            Vec3 rj_hat = v3_scale(drij, 1.0 / rij);
+            Vec3 rk_hat = v3_scale(drik, 1.0 / rik);
+            Vec3 dcos_dxj = v3_scale(
+                v3_sub(rk_hat, v3_scale(rj_hat, costheta)), -1.0 / rij);
+            Vec3 dcos_dxk = v3_scale(
+                v3_sub(rj_hat, v3_scale(rk_hat, costheta)), -1.0 / rik);
+            Vec3 fj_tri;
+            fj_tri.x = pre * (-s_zeta_ijk.d[0] * rj_hat.x +
+                              s_zeta_ijk.d[2] * dcos_dxj.x);
+            fj_tri.y = pre * (-s_zeta_ijk.d[0] * rj_hat.y +
+                              s_zeta_ijk.d[2] * dcos_dxj.y);
+            fj_tri.z = pre * (-s_zeta_ijk.d[0] * rj_hat.z +
+                              s_zeta_ijk.d[2] * dcos_dxj.z);
+            Vec3 fk_tri;
+            fk_tri.x = pre * (-s_zeta_ijk.d[1] * rk_hat.x +
+                              s_zeta_ijk.d[2] * dcos_dxk.x);
+            fk_tri.y = pre * (-s_zeta_ijk.d[1] * rk_hat.y +
+                              s_zeta_ijk.d[2] * dcos_dxk.y);
+            fk_tri.z = pre * (-s_zeta_ijk.d[1] * rk_hat.z +
+                              s_zeta_ijk.d[2] * dcos_dxk.z);
+            fi.x -= (fj_tri.x + fk_tri.x);
+            fi.y -= (fj_tri.y + fk_tri.y);
+            fi.z -= (fj_tri.z + fk_tri.z);
+            aadd_v3(frc[j], fj_tri);
+            aadd_v3(frc[k], fk_tri);
+            if (pc.need_virial != 0)
+            {
+                vi = lt_sub(vi, virial_from_force_dis(drij, fj_tri));
+                vi = lt_sub(vi, virial_from_force_dis(drik, fk_tri));
+            }
+        }
+    }
+    aadd_v3(frc[i], fi);
+    if (pc.need_atom_energy != 0) atom_energy[i] += en_i;
+    if (pc.need_virial != 0) aadd_lt(atom_virial[i], vi);
+}

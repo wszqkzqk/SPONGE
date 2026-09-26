@@ -1,0 +1,144 @@
+layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 4, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 5, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 6, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 7, std430) buffer Parameters { float parameters[]; };
+layout(set = 0, binding = 8, std430) buffer ThisEnergy { float this_energy[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int need_atom_energy;
+    int need_virial;
+    int atom_type_numbers;
+    int pair_type_numbers;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int atom_i =
+        int(gl_WorkGroupSize.y * gl_WorkGroupID.x + gl_LocalInvocationID.y);
+    if (atom_i >= pc.atom_numbers) return;
+    int type_i = atom_types[atom_i];
+    int count = nl[atom_i].atom_numbers;
+    int base = atom_i * pc.max_neighbor_numbers;
+    Vec3 ri = crd[atom_i];
+    float local_energy = 0.0;
+    Vec3 i_force = v3(0.0, 0.0, 0.0);
+    LTMat local_virial = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (int j = int(gl_LocalInvocationID.x); j < count;
+         j += int(gl_WorkGroupSize.x))
+    {
+        Vec3 j_force = v3(0.0, 0.0, 0.0);
+        int atom_j = nl_serial[base + j];
+        bool should_compute_twobody = atom_j > atom_i;
+        int type_j = atom_types[atom_j];
+        Vec3 rj = crd[atom_j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float rij = v3_len(drij);
+        int pair_index_1 = type_i * pc.atom_type_numbers + type_j;
+        float A = parameters[8 * pair_index_1];
+        float B = parameters[8 * pair_index_1 + 1];
+        float epsilon = parameters[8 * pair_index_1 + 2];
+        float p = parameters[8 * pair_index_1 + 3];
+        float q = parameters[8 * pair_index_1 + 4];
+        float a1 = parameters[8 * pair_index_1 + 5];
+        float gamma1 = parameters[8 * pair_index_1 + 6];
+        float sigma1 = parameters[8 * pair_index_1 + 7];
+        if (should_compute_twobody && rij < a1 * sigma1)
+        {
+            Sad7 twobody = sad7_var(rij, 0);
+            twobody = sad7_div(twobody, sad7_const(sigma1));
+            twobody = sad7_mul(
+                sad7_scale(sad7_sub(sad7_scale(sad7_pow(twobody, -p), B),
+                                    sad7_pow(twobody, -q)),
+                           A * epsilon),
+                sad7_exp(sad7_rdiv(1.0, sad7_add_c(twobody, -a1))));
+            local_energy += twobody.val;
+            Vec3 temp1_force = v3_scale(drij, twobody.d[0] / rij);
+            i_force = v3_sub(i_force, temp1_force);
+            j_force = v3_add(j_force, temp1_force);
+            if (pc.need_virial != 0)
+                local_virial = lt_sub(local_virial,
+                                      virial_from_force_dis(temp1_force, drij));
+        }
+        for (int k = j + 1; k < count; k++)
+        {
+            Vec3 k_force = v3(0.0, 0.0, 0.0);
+            int atom_k = nl_serial[base + k];
+            int type_k = atom_types[atom_k];
+            Vec3 rk = crd[atom_k];
+            Vec3 drik = get_displacement_periodic(ri, rk, pc.boundary);
+            float rik = v3_len(drik);
+            int pair_index_2 = type_i * pc.atom_type_numbers + type_k;
+            float a2 = parameters[8 * pair_index_2 + 5];
+            float sigma2 = parameters[8 * pair_index_2 + 7];
+            if (rij < a1 * sigma1 && rik < a2 * sigma2)
+            {
+                float gamma2 = parameters[8 * pair_index_2 + 6];
+                int triple_index = type_i * pc.atom_type_numbers *
+                                       pc.atom_type_numbers +
+                                   type_j * pc.atom_type_numbers + type_k;
+                float lambda =
+                    parameters[8 * pc.pair_type_numbers + 3 * triple_index];
+                float epsilon3 =
+                    parameters[8 * pc.pair_type_numbers + 3 * triple_index + 1];
+                float b =
+                    parameters[8 * pc.pair_type_numbers + 3 * triple_index + 2];
+                Sad7 t1x = sad7_var(drij.x, 0);
+                Sad7 t1y = sad7_var(drij.y, 1);
+                Sad7 t1z = sad7_var(drij.z, 2);
+                Sad7 t2x = sad7_var(drik.x, 3);
+                Sad7 t2y = sad7_var(drik.y, 4);
+                Sad7 t2z = sad7_var(drik.z, 5);
+                Sad7 r1 = sad7_sqrt(
+                    sad7_add(sad7_add(sad7_mul(t1x, t1x), sad7_mul(t1y, t1y)),
+                             sad7_mul(t1z, t1z)));
+                Sad7 r2 = sad7_sqrt(
+                    sad7_add(sad7_add(sad7_mul(t2x, t2x), sad7_mul(t2y, t2y)),
+                             sad7_mul(t2z, t2z)));
+                Sad7 E = sad7_div(
+                    sad7_div(sad7_add(sad7_add(sad7_mul(t1x, t2x),
+                                               sad7_mul(t1y, t2y)),
+                                      sad7_mul(t1z, t2z)),
+                             r1),
+                    r2);
+                E = sad7_add_c(E, -b);
+                r1 = sad7_div(r1, sad7_const(sigma1));
+                r2 = sad7_div(r2, sad7_const(sigma2));
+                E = sad7_mul(
+                    sad7_mul(sad7_scale(sad7_mul(E, E), lambda * epsilon3),
+                             sad7_exp(sad7_rdiv(gamma1, sad7_add_c(r1, -a1)))),
+                    sad7_exp(sad7_rdiv(gamma2, sad7_add_c(r2, -a2))));
+                Vec3 temp1_force = v3(E.d[0], E.d[1], E.d[2]);
+                Vec3 temp2_force = v3(E.d[3], E.d[4], E.d[5]);
+                k_force = v3_add(k_force, temp2_force);
+                j_force = v3_add(j_force, temp1_force);
+                i_force = v3_sub(i_force, v3_add(temp1_force, temp2_force));
+                local_energy += E.val;
+                if (pc.need_virial != 0)
+                    local_virial =
+                        lt_sub(local_virial,
+                               lt_add(virial_from_force_dis(temp1_force, drij),
+                                      virial_from_force_dis(temp2_force, drik)));
+            }
+            aadd_v3(frc[atom_k], k_force);
+        }
+        aadd_v3(frc[atom_j], j_force);
+    }
+    warp_aadd_v3(frc[atom_i], i_force);
+    if (pc.need_atom_energy != 0)
+    {
+        float esum = subgroupAdd(local_energy);
+        if (gl_SubgroupInvocationID == 0u)
+        {
+            atomicAdd(atom_energy[atom_i], esum);
+            atomicAdd(this_energy[atom_i + 1], esum);
+        }
+    }
+    if (pc.need_virial != 0) warp_aadd_lt(atom_virial[atom_i], local_virial);
+}

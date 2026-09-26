@@ -12,9 +12,10 @@ layout(push_constant) uniform Params
     float second_bias_sqrt;
 }
 pc;
-float adam_step(float f, float m_inv, inout float moment, inout float root)
+float adam_step(float f, inout float moment, inout float root)
 {
-    float m = pc.beta1 * moment + (1.0 - pc.beta1) * m_inv * f;
+    f = clamp(f, -1e10, 1e10);
+    float m = pc.beta1 * moment + (1.0 - pc.beta1) * f;
     float s = max(abs(root), abs(f));
     float r = s > 0.0 ? s * sqrt(pc.beta2 * (root / s) * (root / s) +
                                  (1.0 - pc.beta2) * (f / s) * (f / s))
@@ -27,13 +28,17 @@ void main()
 {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.atom_numbers) return;
-    float m_inv = mass_inverse[i];
+    if (mass_inverse[i] == 0.0)
+    {
+        frc[i] = Vec3(0.0, 0.0, 0.0);
+        return;
+    }
     Vec3 f = frc[i];
     Vec3 moment = vel[i];
     Vec3 root = acc[i];
-    frc[i] = Vec3(adam_step(f.x, m_inv, moment.x, root.x),
-                  adam_step(f.y, m_inv, moment.y, root.y),
-                  adam_step(f.z, m_inv, moment.z, root.z));
+    frc[i] = Vec3(adam_step(f.x, moment.x, root.x),
+                  adam_step(f.y, moment.y, root.y),
+                  adam_step(f.z, moment.z, root.z));
     vel[i] = moment;
     acc[i] = root;
 }

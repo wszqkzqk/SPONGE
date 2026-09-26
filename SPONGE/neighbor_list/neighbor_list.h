@@ -79,6 +79,8 @@ struct NEIGHBOR_LIST
         VECTOR* d_grid_atom_crd = NULL;
         // 每个格点内ghost的坐标
         VECTOR* d_grid_ghost_crd = NULL;
+        // 每个格点邻居格原子数的独占前缀和（Vulkan 扁平扫描用）
+        int* d_grid_neighbor_prefix = NULL;
         // 初始化格点信息
         void Initial(CONTROLLER* controller, int max_atom_in_grid_numbers,
                      int max_ghost_in_grid_numbers, const Boundary boundary,

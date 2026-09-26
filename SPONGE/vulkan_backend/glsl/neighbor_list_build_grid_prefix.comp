@@ -1,0 +1,28 @@
+#define MAX_GRID_NEIGHBORS 192
+
+layout(set = 0, binding = 0, std430) buffer Need { int need[]; };
+layout(set = 0, binding = 1, std430) buffer GridNeighborNumbers { int grid_neighbor_numbers[]; };
+layout(set = 0, binding = 2, std430) buffer GridNeighbors { int grid_neighbors[]; };
+layout(set = 0, binding = 3, std430) buffer GridAtomNumbers { int grid_atom_numbers[]; };
+layout(set = 0, binding = 4, std430) buffer GridNeighborPrefix { int grid_neighbor_prefix[]; };
+layout(push_constant) uniform Params
+{
+    int grid_numbers;
+}
+pc;
+void main()
+{
+    if (need[0] == 0) return;
+    int grid_i = int(gl_GlobalInvocationID.x);
+    if (grid_i >= pc.grid_numbers) return;
+    const int neighbor_count = grid_neighbor_numbers[grid_i];
+    const int neighbor_base = grid_i * MAX_GRID_NEIGHBORS;
+    const int prefix_base = grid_i * (MAX_GRID_NEIGHBORS + 1);
+    int sum = 0;
+    grid_neighbor_prefix[prefix_base] = 0;
+    for (int k = 0; k < neighbor_count; ++k)
+    {
+        sum += grid_atom_numbers[grid_neighbors[neighbor_base + k]];
+        grid_neighbor_prefix[prefix_base + k + 1] = sum;
+    }
+}

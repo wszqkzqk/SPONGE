@@ -56,6 +56,14 @@ static_assert(sizeof(FindNeighborsGridlyVkParams) == 72,
               "FindNeighborsGridlyVkParams must match the GLSL push constant "
               "layout");
 
+struct BuildGridPrefixVkParams
+{
+    int grid_numbers;
+};
+static_assert(sizeof(BuildGridPrefixVkParams) == 4,
+              "BuildGridPrefixVkParams must match the GLSL push constant "
+              "layout");
+
 struct DeleteExcludedVkParams
 {
     int local_atom_numbers;
@@ -311,6 +319,15 @@ void NEIGHBOR_LIST::GRIDS::Initial(CONTROLLER* controller,
     Device_Malloc_And_Copy_Safely((void**)&d_grid_atom_numbers,
                                   h_grid_atom_numbers,
                                   sizeof(int) * grid_numbers);
+#ifdef USE_VULKAN
+    if (max_atom_in_grid_numbers > 256)
+        controller->Throw_SPONGE_Error(
+            spongeErrorMallocFailed, "NEIGHBOR_LIST::Initial",
+            "atoms in one grid exceed the Vulkan shared-memory cap");
+    Device_Malloc_Safely((void**)&d_grid_neighbor_prefix,
+                         sizeof(int) * grid_numbers *
+                             (MAX_GRID_NEIGHBORS + 1));
+#endif
 
 #ifdef USE_VULKAN
     FindNeighborGridsVkParams params{grid_numbers, Nx,          Ny,
@@ -345,6 +362,7 @@ void NEIGHBOR_LIST::GRIDS::Clear()
                                  (void**)&d_grid_ghost_numbers);
     Free_Single_Device_Pointer((void**)&d_grid_ghost_crd);
     Free_Single_Device_Pointer((void**)&d_grid_atom_crd);
+    Free_Single_Device_Pointer((void**)&d_grid_neighbor_prefix);
 }
 
 void NEIGHBOR_LIST::UPDATOR::Initial(CONTROLLER* controller, int atom_numbers)
@@ -951,6 +969,19 @@ void NEIGHBOR_LIST::UPDATOR::Update(
                   NULL);
     }
     {
+        BuildGridPrefixVkParams prefix_params{grids->grid_numbers};
+        const void* prefix_buffers[] = {d_need_update,
+                                        grids->d_neighbor_grid_numbers,
+                                        grids->d_neighbor_grids,
+                                        grids->d_grid_atom_numbers,
+                                        grids->d_grid_neighbor_prefix};
+        VK_LAUNCH(neighbor_list_build_grid_prefix,
+                  (grids->grid_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, prefix_buffers,
+                  &prefix_params, NULL);
+    }
+    {
         FindNeighborsGridlyVkParams fn_params{
             grids->grid_numbers,      boundary,
             max_atom_in_grid_numbers, grid_length * grid_length * 4.0f,
@@ -967,7 +998,8 @@ void NEIGHBOR_LIST::UPDATOR::Update(
                                     d_neighbor_list_overflow,
                                     grids->d_grid_ghost_crd,
                                     grids->d_grid_ghost_numbers,
-                                    grids->d_grid_ghosts};
+                                    grids->d_grid_ghosts,
+                                    grids->d_grid_neighbor_prefix};
         VK_LAUNCH(neighbor_list_find_neighbors_gridly,
                   grids->grid_numbers < 65535 ? grids->grid_numbers : 65535, 1,
                   CONTROLLER::device_max_thread, 1, fn_buffers, &fn_params,

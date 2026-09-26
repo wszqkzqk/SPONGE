@@ -33,15 +33,61 @@ static __global__ void Get_Adam_Force(int atom_numbers, float* mass_inverse,
 {
     SIMPLE_DEVICE_FOR(i, atom_numbers)
     {
+        const double first_bias =
+            1.0 - pow(static_cast<double>(beta1), static_cast<double>(t) + 1.0);
+        const double second_bias_sqrt =
+            sqrt(1.0 -
+                 pow(static_cast<double>(beta2), static_cast<double>(t) + 1.0));
+        const double mass = mass_inverse[i];
         VECTOR f = frc[i];
-        VECTOR f2 = {f.x * f.x, f.y * f.y, f.z * f.z};
-        vel[i] = beta1 * vel[i] + (1 - beta1) * mass_inverse[i] * f;
-        acc[i] = beta2 * acc[i] + (1 - beta2) * f2;
-        f = 1.0f / (1 - powf(beta1, t + 1.0f)) * vel[i];
-        f2 = 1.0f / (1 - powf(beta2, t + 1.0f)) * acc[i];
-        frc[i].x = f.x / (sqrtf(f2.x) + epsilon);
-        frc[i].y = f.y / (sqrtf(f2.y) + epsilon);
-        frc[i].z = f.z / (sqrtf(f2.z) + epsilon);
+        VECTOR moment = vel[i];
+        VECTOR root = acc[i];
+        double m = static_cast<double>(beta1) * moment.x +
+                   (1.0 - static_cast<double>(beta1)) * mass * f.x;
+        double r = sqrt(static_cast<double>(beta2) * root.x * root.x +
+                        (1.0 - static_cast<double>(beta2)) *
+                            static_cast<double>(f.x) * f.x);
+        moment.x = static_cast<float>(m);
+        root.x = static_cast<float>(r);
+        f.x = static_cast<float>((m / first_bias) /
+                                 (r / second_bias_sqrt + epsilon));
+        m = static_cast<double>(beta1) * moment.y +
+            (1.0 - static_cast<double>(beta1)) * mass * f.y;
+        r = sqrt(static_cast<double>(beta2) * root.y * root.y +
+                 (1.0 - static_cast<double>(beta2)) * static_cast<double>(f.y) *
+                     f.y);
+        moment.y = static_cast<float>(m);
+        root.y = static_cast<float>(r);
+        f.y = static_cast<float>((m / first_bias) /
+                                 (r / second_bias_sqrt + epsilon));
+        m = static_cast<double>(beta1) * moment.z +
+            (1.0 - static_cast<double>(beta1)) * mass * f.z;
+        r = sqrt(static_cast<double>(beta2) * root.z * root.z +
+                 (1.0 - static_cast<double>(beta2)) * static_cast<double>(f.z) *
+                     f.z);
+        moment.z = static_cast<float>(m);
+        root.z = static_cast<float>(r);
+        f.z = static_cast<float>((m / first_bias) /
+                                 (r / second_bias_sqrt + epsilon));
+        vel[i] = moment;
+        acc[i] = root;
+        frc[i] = f;
+    }
+}
+
+static __global__ void MD_Iteration_Adam_Move(const int atom_numbers,
+                                              VECTOR* crd, const VECTOR* frc,
+                                              const float dt,
+                                              const float max_move)
+{
+    SIMPLE_DEVICE_FOR(i, atom_numbers)
+    {
+        VECTOR move = dt * frc[i];
+        if (max_move > 0)
+        {
+            move = Make_Vector_Not_Exceed_Value(move, max_move);
+        }
+        crd[i] = crd[i] + move;
     }
 }
 
@@ -142,7 +188,16 @@ void MD_INFORMATION::MINIMIZATION_iteration::Gradient_Descent(
     int atom_numbers, VECTOR* crd, VECTOR* frc, VECTOR* vel,
     const float* d_mass_inverse)
 {
-    if (max_move <= 0)
+    if (dynamic_dt)
+    {
+        Launch_Device_Kernel(
+            MD_Iteration_Adam_Move,
+            (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, atom_numbers, crd, frc,
+            md_info->dt, max_move);
+    }
+    else if (max_move <= 0)
     {
         Launch_Device_Kernel(
             MD_Iteration_Gradient_Descent,

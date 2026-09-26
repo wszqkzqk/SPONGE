@@ -1352,7 +1352,7 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
                                           atom_numbers,   PME_Nall};
             const void* final_buffers[] = {PME_atom_near, charge, PME_FBCFQ,
                                            force_backup, PME_frxyz};
-            VK_LAUNCH(pme_final, (atom_numbers + blockSize.x - 1) / blockSize.x,
+            VK_LAUNCH(pme_final, (atom_numbers + blockSize.y - 1) / blockSize.y,
                       1, blockSize.x, blockSize.y, final_buffers, &final_params,
                       NULL);
 #else

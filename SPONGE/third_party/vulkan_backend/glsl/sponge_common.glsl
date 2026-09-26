@@ -26,6 +26,10 @@ Vec3 v3_neg(Vec3 a) { return Vec3(-a.x, -a.y, -a.z); }
 float v3_dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 float v3_len(Vec3 a) { return sqrt(v3_dot(a, a)); }
 Vec3 v3_floor(Vec3 a) { return Vec3(floor(a.x), floor(a.y), floor(a.z)); }
+Vec3 v3_clamp_len(Vec3 v, float max_len)
+{
+    return v3_scale(v, min(1.0, max_len / v3_len(v)));
+}
 Vec3 v3_cross(Vec3 a, Vec3 b)
 {
     return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
@@ -229,6 +233,12 @@ void kahan_add(inout Kahan k, float v)
     k.sum = t;
 }
 
+LTMat lt_add(LTMat a, LTMat b)
+{
+    return LTMat(a.a11 + b.a11, a.a21 + b.a21, a.a22 + b.a22, a.a31 + b.a31,
+                 a.a32 + b.a32, a.a33 + b.a33);
+}
+
 LTMat lt_scale(LTMat m, float s)
 {
     return LTMat(m.a11 * s, m.a21 * s, m.a22 * s, m.a31 * s, m.a32 * s,
@@ -239,6 +249,24 @@ LTMat lt_sub(LTMat a, LTMat b)
 {
     return LTMat(a.a11 - b.a11, a.a21 - b.a21, a.a22 - b.a22, a.a31 - b.a31,
                  a.a32 - b.a32, a.a33 - b.a33);
+}
+
+const float SPONGE_FLT_EPSILON = 1.1920928955078125e-07;
+
+// Velocity_Constraint_Residual_Tolerance (constrain/velocity_projection.h)
+float velocity_constraint_residual_tolerance(float displacement_squared,
+                                             Vec3 velocity_i, Vec3 velocity_j,
+                                             Vec3 velocity_difference,
+                                             float relative_tolerance)
+{
+    float displacement_norm = sqrt(displacement_squared);
+    float relative_scale =
+        displacement_norm *
+        sqrt(max(v3_dot(velocity_difference, velocity_difference), 1.0e-12));
+    float velocity_scale = max(v3_len(velocity_i), v3_len(velocity_j));
+    float roundoff_floor =
+        8.0 * SPONGE_FLT_EPSILON * displacement_norm * velocity_scale;
+    return max(relative_tolerance * relative_scale, roundoff_floor);
 }
 
 int get_lj_type(int a, int b)
@@ -265,6 +293,118 @@ float erfcf(float x)
                                                    t * (-0.82215223 +
                                                         t * 0.17087277)))))))));
     return x >= 0.0 ? tau : 2.0 - tau;
+}
+
+struct Sad1
+{
+    float val, d0;
+};
+
+struct Sad3
+{
+    float val, d0, d1, d2;
+};
+
+Sad1 sad1_var(float v) { return Sad1(v, 1.0); }
+Sad1 sad1_const(float v) { return Sad1(v, 0.0); }
+Sad1 sad1_add(Sad1 a, Sad1 b) { return Sad1(a.val + b.val, a.d0 + b.d0); }
+Sad1 sad1_sub(Sad1 a, Sad1 b) { return Sad1(a.val - b.val, a.d0 - b.d0); }
+Sad1 sad1_add_c(Sad1 a, float c) { return Sad1(a.val + c, a.d0); }
+Sad1 sad1_scale(Sad1 a, float s) { return Sad1(a.val * s, a.d0 * s); }
+Sad1 sad1_mul(Sad1 a, Sad1 b)
+{
+    return Sad1(a.val * b.val, a.d0 * b.val + a.val * b.d0);
+}
+Sad1 sad1_div(Sad1 a, Sad1 b)
+{
+    float q = a.val / b.val;
+    return Sad1(q, (a.d0 - q * b.d0) / b.val);
+}
+Sad1 sad1_rdiv(float a, Sad1 b)
+{
+    float q = a / b.val;
+    return Sad1(q, -q * b.d0 / b.val);
+}
+Sad1 sad1_log(Sad1 a) { return Sad1(log(a.val), a.d0 / a.val); }
+
+Sad3 sad3_var(float v, int id)
+{
+    return Sad3(v, id == 0 ? 1.0 : 0.0, id == 1 ? 1.0 : 0.0,
+                id == 2 ? 1.0 : 0.0);
+}
+Sad3 sad3_add(Sad3 a, Sad3 b)
+{
+    return Sad3(a.val + b.val, a.d0 + b.d0, a.d1 + b.d1, a.d2 + b.d2);
+}
+Sad3 sad3_scale(Sad3 a, float s)
+{
+    return Sad3(a.val * s, a.d0 * s, a.d1 * s, a.d2 * s);
+}
+Sad3 sad3_mul(Sad3 a, Sad3 b)
+{
+    return Sad3(a.val * b.val, a.d0 * b.val + a.val * b.d0,
+                a.d1 * b.val + a.val * b.d1, a.d2 * b.val + a.val * b.d2);
+}
+Sad3 sad3_div(Sad3 a, Sad3 b)
+{
+    float q = a.val / b.val;
+    return Sad3(q, (a.d0 - q * b.d0) / b.val, (a.d1 - q * b.d1) / b.val,
+                (a.d2 - q * b.d2) / b.val);
+}
+Sad3 sad3_rdiv(float a, Sad3 b)
+{
+    float q = a / b.val;
+    return Sad3(q, -q * b.d0 / b.val, -q * b.d1 / b.val, -q * b.d2 / b.val);
+}
+Sad3 sad3_exp(Sad3 a)
+{
+    float e = exp(a.val);
+    return Sad3(e, e * a.d0, e * a.d1, e * a.d2);
+}
+Sad3 sad3_sqrt(Sad3 a)
+{
+    float s = sqrt(a.val);
+    float df = 0.5 / s;
+    return Sad3(s, df * a.d0, df * a.d1, df * a.d2);
+}
+
+// erf(x) = 1 - erfc(x)
+float erff(float x) { return 1.0 - erfcf(x); }
+
+// exp(x^2) * erfc(x), overflow-safe: same polynomial as erfcf without the
+// exp(-x^2) factor; 3-term asymptotic series for x > 10
+float erfcxf(float x)
+{
+    float ax = abs(x);
+    float result;
+    if (ax > 10.0)
+    {
+        float inv_x2 = 1.0 / (ax * ax);
+        result =
+            0.56418958835977 / ax * (1.0 + inv_x2 * (-0.5 + inv_x2 * 0.75));
+    }
+    else
+    {
+        float t = 1.0 / (1.0 + 0.5 * ax);
+        result = t * exp(-1.26551223 +
+                         t * (1.00002368 +
+                              t * (0.37409196 +
+                                   t * (0.09678418 +
+                                        t * (-0.18628806 +
+                                             t * (0.27886807 +
+                                                  t * (-1.13520398 +
+                                                       t * (1.48851587 +
+                                                            t * (-0.82215223 +
+                                                                 t * 0.17087277)))))))));
+    }
+    return x >= 0.0 ? result : 2.0 * exp(x * x) - result;
+}
+
+Vec3 v3_mul_transpose_lt(Vec3 v, float a11, float a21, float a22, float a31,
+                         float a32, float a33)
+{
+    return Vec3(v.x * a11, v.x * a21 + v.y * a22,
+                v.x * a31 + v.y * a32 + v.z * a33);
 }
 
 #define warp_afadd(slot, v)                                      \

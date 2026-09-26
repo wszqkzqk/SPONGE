@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer List { float atom_virial[]; };
+layout(set = 0, binding = 1, std430) buffer Sum { float sum_virial[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    uint wx = gl_WorkGroupSize.x;
+    uint wy = gl_WorkGroupSize.y;
+    int tid = int(gl_WorkGroupID.x * wx * wy + gl_LocalInvocationID.x * wy +
+                  gl_LocalInvocationID.y);
+    int stride = int(wx * wy * gl_NumWorkGroups.x);
+    float temp = 0.0;
+    for (int i = tid; i < pc.n; i += stride)
+    {
+        temp = temp + atom_virial[i];
+    }
+    warp_afadd(sum_virial[0], temp);
+}

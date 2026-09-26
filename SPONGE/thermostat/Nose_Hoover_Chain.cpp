@@ -1,7 +1,31 @@
-﻿#include "Nose_Hoover_Chain.h"
+#include "Nose_Hoover_Chain.h"
 
 #include "../utils/float_classification.hpp"
 #include "../utils/h5md/input_assembler.hpp"
+
+#ifdef USE_VULKAN
+struct NhcUpdateVkParams
+{
+    int chain_length;
+    float chain_mass;
+    float Ek;
+    float kB_T;
+    float dt;
+    int freedom;
+};
+static_assert(sizeof(NhcUpdateVkParams) == 24,
+              "NhcUpdateVkParams must match the GLSL push constant layout");
+
+struct NhcIntegrateVkParams
+{
+    int local_atom_numbers;
+    float dt;
+    float chain_vel;
+    float max_vel;
+};
+static_assert(sizeof(NhcIntegrateVkParams) == 16,
+              "NhcIntegrateVkParams must match the GLSL push constant layout");
+#endif
 
 static __global__ void Nose_Hoover_Chain_Update(
     int chain_length, float* chain_crd, float* chain_vel, float chain_mass,
@@ -228,12 +252,24 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Get_Local(int* atom_local,
 {
     if (!is_initialized) return;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int local_atom_numbers;
+    } params{local_atom_numbers};
+    const void* buffers[] = {atom_local, d_mass_inverse, d_mass_inverse_local};
+    VK_LAUNCH(nhc_get_local,
+              (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         device_get_local,
         (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, atom_local, local_atom_numbers,
         d_mass_inverse, d_mass_inverse_local);
+#endif
 }
 
 void NOSE_HOOVER_CHAIN_INFORMATION::MD_Iteration_Leap_Frog(
@@ -242,13 +278,30 @@ void NOSE_HOOVER_CHAIN_INFORMATION::MD_Iteration_Leap_Frog(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        NhcUpdateVkParams update_params{chain_length, h_mass, Ek,
+                                        kB_T,         dt,     freedom};
+        const void* update_buffers[] = {coordinate, velocity};
+        VK_LAUNCH(nhc_update, 1, 1, 1, 1, update_buffers, &update_params,
+                  NULL);
+#else
         Launch_Device_Kernel(Nose_Hoover_Chain_Update, 1, 1, 0, NULL,
                              chain_length, coordinate, velocity, h_mass, Ek,
                              kB_T, dt, freedom);
+#endif
         deviceMemcpy(h_coordinate, coordinate, sizeof(float) * chain_length,
                      deviceMemcpyDeviceToHost);
         deviceMemcpy(h_velocity, velocity, sizeof(float) * (chain_length + 1),
                      deviceMemcpyDeviceToHost);
+#ifdef USE_VULKAN
+        NhcIntegrateVkParams params{local_atom_numbers, dt, h_velocity[0],
+                                    max_velocity};
+        const void* buffers[] = {d_mass_inverse_local, vel, crd, frc};
+        VK_LAUNCH(nhc_integrate,
+                  (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         if (max_velocity <= 0)
         {
             Launch_Device_Kernel(
@@ -268,6 +321,7 @@ void NOSE_HOOVER_CHAIN_INFORMATION::MD_Iteration_Leap_Frog(
                 d_mass_inverse_local, vel, crd, frc, acc, h_velocity[0],
                 max_velocity);
         }
+#endif
     }
 }
 

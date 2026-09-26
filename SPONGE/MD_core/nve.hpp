@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 static __global__ void MD_Iteration_Leap_Frog(const int atom_numbers,
                                               VECTOR* vel, VECTOR* crd,
@@ -35,6 +35,21 @@ void MD_INFORMATION::NVE_iteration::Leap_Frog(const int atom_numbers,
                                               const float* inverse_mass,
                                               const float dt)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+        float dt;
+        float max_velocity;
+    } params{atom_numbers, dt, max_velocity};
+    static_assert(sizeof(params) == 12,
+                  "leap_frog params must match the GLSL push constant layout");
+    const void* buffers[] = {vel, crd, frc, (void*)inverse_mass};
+    VK_LAUNCH(leap_frog,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     if (max_velocity <= 0)
     {
         Launch_Device_Kernel(
@@ -53,6 +68,7 @@ void MD_INFORMATION::NVE_iteration::Leap_Frog(const int atom_numbers,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers, vel, crd, frc,
             inverse_mass, dt, max_velocity);
     }
+#endif
 }
 
 void MD_INFORMATION::NVE_iteration::Initial(CONTROLLER* controller,

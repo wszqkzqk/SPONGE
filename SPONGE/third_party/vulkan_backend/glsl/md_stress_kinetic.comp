@@ -1,0 +1,31 @@
+layout(set = 0, binding = 0, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 1, std430) buffer Mass { float mass[]; };
+layout(set = 0, binding = 2, std430) buffer Stress { LTMat stress[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float volume_inverse;
+}
+pc;
+void main()
+{
+    uint wx = gl_WorkGroupSize.x;
+    uint wy = gl_WorkGroupSize.y;
+    int tid = int(gl_LocalInvocationID.y + gl_LocalInvocationID.x * wy +
+                  wx * wy * gl_WorkGroupID.x);
+    int stride = int(wx * wy * gl_NumWorkGroups.x);
+    LTMat s = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (int atom = tid; atom < pc.atom_numbers; atom += stride)
+    {
+        Vec3 vel0 = vel[atom];
+        float factor = pc.volume_inverse * mass[atom];
+        LTMat c = virial_from_force_dis(vel0, vel0);
+        s.a11 += factor * c.a11;
+        s.a21 += factor * c.a21;
+        s.a22 += factor * c.a22;
+        s.a31 += factor * c.a31;
+        s.a32 += factor * c.a32;
+        s.a33 += factor * c.a33;
+    }
+    warp_aadd_lt(stress[0], s);
+}

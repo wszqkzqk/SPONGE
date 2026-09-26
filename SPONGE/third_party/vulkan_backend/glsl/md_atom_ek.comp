@@ -1,0 +1,11 @@
+layout(set = 0, binding = 0, std430) buffer Ek { float ek[]; };
+layout(set = 0, binding = 1, std430) buffer Vel { Vec3 atom_vel[]; };
+layout(set = 0, binding = 2, std430) buffer Mass { float atom_mass[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    Vec3 v = atom_vel[i];
+    ek[i] = 0.5 * v3_dot(v, v) * atom_mass[i];
+}

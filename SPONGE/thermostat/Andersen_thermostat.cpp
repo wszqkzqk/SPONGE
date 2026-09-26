@@ -1,7 +1,23 @@
-﻿#include "Andersen_thermostat.h"
+#include "Andersen_thermostat.h"
 
 #include "../utils/float_classification.hpp"
 #include "../utils/random/restart_rng_state.hpp"
+
+#ifdef USE_VULKAN
+struct AndersenVkParams
+{
+    unsigned int seed_lo;
+    unsigned int seed_hi;
+    unsigned int offset_lo;
+    unsigned int offset_hi;
+    int local_atom_numbers;
+    float half_dt;
+    float dt;
+    float max_vel;
+};
+static_assert(sizeof(AndersenVkParams) == 32,
+              "AndersenVkParams must match the GLSL push constant layout");
+#endif
 
 static __global__ void MD_Iteration_Leap_Frog_With_Andersen(
     const std::uint64_t random_seed,
@@ -263,12 +279,25 @@ void ANDERSEN_THERMOSTAT_INFORMATION::Get_Local(int* atom_local,
     if (!is_initialized) return;
     this->local_atom_numbers = local_atom_numbers;
     this->local_float4_numbers = (local_atom_numbers * 3 + 3) / 4;
+#ifdef USE_VULKAN
+    struct
+    {
+        int local_atom_numbers;
+    } params{local_atom_numbers};
+    const void* buffers[] = {atom_local, d_factor, d_factor_local,
+                             d_mass_inverse, d_mass_inverse_local};
+    VK_LAUNCH(andersen_get_local,
+              (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         device_get_local,
         (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, atom_local, local_atom_numbers,
         d_factor, d_factor_local, d_mass_inverse, d_mass_inverse_local);
+#endif
 }
 
 void ANDERSEN_THERMOSTAT_INFORMATION::MD_Iteration_Leap_Frog(
@@ -276,6 +305,22 @@ void ANDERSEN_THERMOSTAT_INFORMATION::MD_Iteration_Leap_Frog(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        const std::uint64_t random_offset = random_invocation_count * 4;
+        AndersenVkParams params{
+            static_cast<unsigned int>(random_seed & 0xffffffffu),
+            static_cast<unsigned int>(random_seed >> 32),
+            static_cast<unsigned int>(random_offset & 0xffffffffu),
+            static_cast<unsigned int>(random_offset >> 32),
+            local_atom_numbers,
+            0.5f * dt,
+            dt,
+            max_velocity};
+        const void* buffers[] = {d_mass_inverse_local, d_factor_local, vel,
+                                 crd, frc};
+        VK_LAUNCH(andersen_integrate, (local_atom_numbers + 32 - 1) / 32, 1,
+                  32, 1, buffers, &params, NULL);
+#else
         if (max_velocity <= 0)
         {
             Launch_Device_Kernel(
@@ -294,6 +339,7 @@ void ANDERSEN_THERMOSTAT_INFORMATION::MD_Iteration_Leap_Frog(
                 0.5f * dt, dt, d_mass_inverse_local, d_factor_local, vel, crd,
                 frc, acc, random_vel, max_velocity);
         }
+#endif
         random_invocation_count += 1;
     }
 }

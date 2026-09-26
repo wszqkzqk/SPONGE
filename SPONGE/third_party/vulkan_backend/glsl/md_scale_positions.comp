@@ -1,0 +1,18 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    LTMat g;
+    float dt;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    Vec3 r = crd[i];
+    crd[i] = Vec3(
+        r.x + pc.dt * (r.x * pc.g.a11 + r.y * pc.g.a21 + r.z * pc.g.a31),
+        r.y + pc.dt * (r.y * pc.g.a22 + r.z * pc.g.a32),
+        r.z + pc.dt * r.z * pc.g.a33);
+}

@@ -1,0 +1,54 @@
+layout(set = 0, binding = 0, std430) buffer MassInv { float inverse_mass[]; };
+layout(set = 0, binding = 1, std430) buffer SqrtMassInv
+{
+    float sqrt_mass_inverse[];
+};
+layout(set = 0, binding = 2, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 4, std430) buffer Frc { Vec3 frc[]; };
+layout(push_constant) uniform Params
+{
+    uint seed_lo;
+    uint seed_hi;
+    uint offset_lo;
+    uint offset_hi;
+    int local_atom_numbers;
+    float half_dt;
+    float dt;
+    float exp_gamma;
+    float max_vel;
+}
+pc;
+void main()
+{
+    int tid = int(gl_GlobalInvocationID.x);
+    int begin = tid * 4;
+    if (begin >= pc.local_atom_numbers) return;
+    int size = min(4, pc.local_atom_numbers - begin);
+    int rand_begin = begin / 4 * 3;
+    int rand_count = (size * 3 + 3) / 4;
+    float rf[12];
+    for (int j = 0; j < rand_count; j++)
+    {
+        vec4 r = philox_normal4(uvec2(pc.offset_lo, pc.offset_hi),
+                                uvec2(uint(rand_begin + j), 0u),
+                                uvec2(pc.seed_lo, pc.seed_hi));
+        rf[4 * j] = r.x;
+        rf[4 * j + 1] = r.y;
+        rf[4 * j + 2] = r.z;
+        rf[4 * j + 3] = r.w;
+    }
+    for (int k = 0; k < size; k++)
+    {
+        int i = begin + k;
+        Vec3 temp1 = v3_scale(frc[i], inverse_mass[i]);
+        temp1 = v3_add(vel[i], v3_scale(temp1, pc.dt));
+        if (pc.max_vel > 0.0) temp1 = v3_clamp_len(temp1, pc.max_vel);
+        Vec3 temp2 = v3_add(crd[i], v3_scale(temp1, pc.half_dt));
+        Vec3 rnd = Vec3(rf[3 * k], rf[3 * k + 1], rf[3 * k + 2]);
+        temp1 = v3_add(v3_scale(temp1, pc.exp_gamma),
+                       v3_scale(rnd, sqrt_mass_inverse[i]));
+        vel[i] = temp1;
+        crd[i] = v3_add(temp2, v3_scale(temp1, pc.half_dt));
+    }
+}

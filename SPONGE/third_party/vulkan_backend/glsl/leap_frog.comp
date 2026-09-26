@@ -1,0 +1,21 @@
+layout(set = 0, binding = 0, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 3, std430) buffer MassInv { float inverse_mass[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float dt;
+    float max_velocity;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    Vec3 acc_i = v3_scale(frc[i], inverse_mass[i]);
+    Vec3 vel_i = v3_add(vel[i], v3_scale(acc_i, pc.dt));
+    if (pc.max_velocity > 0.0) vel_i = v3_clamp_len(vel_i, pc.max_velocity);
+    vel[i] = vel_i;
+    crd[i] = v3_add(crd[i], v3_scale(vel_i, pc.dt));
+}

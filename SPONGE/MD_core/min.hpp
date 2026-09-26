@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 static __global__ void MD_Iteration_Gradient_Descent(
     const int atom_numbers, VECTOR* crd, VECTOR* frc, const float* mass_inverse,
@@ -188,6 +188,42 @@ void MD_INFORMATION::MINIMIZATION_iteration::Gradient_Descent(
     int atom_numbers, VECTOR* crd, VECTOR* frc, VECTOR* vel,
     const float* d_mass_inverse)
 {
+#ifdef USE_VULKAN
+    if (dynamic_dt)
+    {
+        struct
+        {
+            int atom_numbers;
+            float dt;
+            float max_move;
+        } adam_params{atom_numbers, md_info->dt, max_move};
+        static_assert(sizeof(adam_params) == 12,
+                      "minimization_adam_move params must match the GLSL "
+                      "push constant layout");
+        const void* adam_buffers[] = {crd, frc};
+        VK_LAUNCH(minimization_adam_move,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, adam_buffers,
+                  &adam_params, NULL);
+        return;
+    }
+    struct
+    {
+        int atom_numbers;
+        float dt;
+        float momentum_keep;
+        float max_move;
+    } params{atom_numbers, md_info->dt, momentum_keep, max_move};
+    static_assert(sizeof(params) == 16,
+                  "minimization_gradient_descent params must match the GLSL "
+                  "push constant layout");
+    const void* buffers[] = {crd, frc, (void*)d_mass_inverse, vel};
+    VK_LAUNCH(minimization_gradient_descent,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     if (dynamic_dt)
     {
         Launch_Device_Kernel(
@@ -215,6 +251,7 @@ void MD_INFORMATION::MINIMIZATION_iteration::Gradient_Descent(
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers, crd, frc,
             d_mass_inverse, md_info->dt, vel, momentum_keep, max_move);
     }
+#endif
 }
 
 void MD_INFORMATION::MINIMIZATION_iteration::Scale_Force_For_Dynamic_Dt(
@@ -223,6 +260,34 @@ void MD_INFORMATION::MINIMIZATION_iteration::Scale_Force_For_Dynamic_Dt(
 {
     if (md_info->mode == MINIMIZATION && dynamic_dt)
     {
+#ifdef USE_VULKAN
+        const double bias_step =
+            static_cast<double>(md_info->sys.steps) + 1.0;
+        struct
+        {
+            int atom_numbers;
+            float beta1;
+            float beta2;
+            float epsilon;
+            float first_bias;
+            float second_bias_sqrt;
+        } params{atom_numbers,
+                 beta1,
+                 beta2,
+                 epsilon,
+                 static_cast<float>(
+                     1.0 - pow(static_cast<double>(beta1), bias_step)),
+                 static_cast<float>(sqrt(
+                     1.0 - pow(static_cast<double>(beta2), bias_step)))};
+        static_assert(sizeof(params) == 24,
+                      "minimization_adam_force params must match the GLSL "
+                      "push constant layout");
+        const void* buffers[] = {(void*)d_mass_inverse, frc, vel, acc};
+        VK_LAUNCH(minimization_adam_force,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Get_Adam_Force,
             (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -230,5 +295,6 @@ void MD_INFORMATION::MINIMIZATION_iteration::Scale_Force_For_Dynamic_Dt(
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
             d_mass_inverse, frc, vel, acc, beta1, beta2, epsilon,
             md_info->sys.steps);
+#endif
     }
 }

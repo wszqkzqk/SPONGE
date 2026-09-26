@@ -1,0 +1,26 @@
+layout(set = 0, binding = 0, std430) buffer AtomVirial
+{
+    LTMat atom_virial[];
+};
+layout(set = 0, binding = 1, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    uint wx = gl_WorkGroupSize.x;
+    uint wy = gl_WorkGroupSize.y;
+    int tid = int(gl_LocalInvocationID.y + gl_LocalInvocationID.x * wy +
+                  wx * wy * gl_WorkGroupID.x);
+    int stride = int(wx * wy * gl_NumWorkGroups.x);
+    LTMat v = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (int atom = tid; atom < pc.atom_numbers; atom += stride)
+    {
+        LTMat t = atom_virial[atom];
+        v.a11 += t.a11;
+        v.a21 += t.a21;
+        v.a22 += t.a22;
+        v.a31 += t.a31;
+        v.a32 += t.a32;
+        v.a33 += t.a33;
+    }
+    warp_aadd_lt(virial[0], v);
+}

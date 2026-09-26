@@ -1,0 +1,25 @@
+layout(set = 0, binding = 0, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer DdCrd { Vec3 dd_crd[]; };
+layout(set = 0, binding = 3, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 4, std430) buffer DdVel { Vec3 dd_vel[]; };
+layout(set = 0, binding = 5, std430) buffer LocalId { int atom_local_id[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    if (label_at(i) == 1u)
+    {
+        int local_id = atom_local_id[i];
+        if (local_id >= 0)
+        {
+            dd_crd[local_id] = crd[i];
+            dd_vel[local_id] = vel[i];
+        }
+    }
+}

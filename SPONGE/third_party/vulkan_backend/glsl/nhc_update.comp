@@ -1,0 +1,32 @@
+layout(set = 0, binding = 0, std430) buffer ChainCrd { float chain_crd[]; };
+layout(set = 0, binding = 1, std430) buffer ChainVel { float chain_vel[]; };
+layout(push_constant) uniform Params
+{
+    int chain_length;
+    float chain_mass;
+    float Ek;
+    float kB_T;
+    float dt;
+    int freedom;
+}
+pc;
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    float chain_mass_inverse = 1.0 / pc.chain_mass;
+    chain_vel[0] += (2.0 * pc.Ek - float(pc.freedom) * pc.kB_T) *
+                        chain_mass_inverse * pc.dt -
+                    chain_vel[0] * chain_vel[1] * pc.dt;
+    for (int i = 1; i < pc.chain_length; i++)
+    {
+        float temp_vel = chain_vel[i - 1];
+        chain_vel[i] += (temp_vel * temp_vel -
+                         pc.kB_T * chain_mass_inverse) *
+                            pc.dt -
+                        chain_vel[i] * chain_vel[i + 1] * pc.dt;
+    }
+    for (int i = 0; i < pc.chain_length; i++)
+    {
+        chain_crd[i] += chain_vel[i] * pc.dt;
+    }
+}

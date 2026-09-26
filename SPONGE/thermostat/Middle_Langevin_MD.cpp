@@ -1,7 +1,25 @@
-﻿#include "Middle_Langevin_MD.h"
+#include "Middle_Langevin_MD.h"
 
 #include "../utils/float_classification.hpp"
 #include "../utils/random/restart_rng_state.hpp"
+
+#ifdef USE_VULKAN
+struct MiddleLangevinVkParams
+{
+    unsigned int seed_lo;
+    unsigned int seed_hi;
+    unsigned int offset_lo;
+    unsigned int offset_hi;
+    int local_atom_numbers;
+    float half_dt;
+    float dt;
+    float exp_gamma;
+    float max_vel;
+};
+static_assert(sizeof(MiddleLangevinVkParams) == 36,
+              "MiddleLangevinVkParams must match the GLSL push constant "
+              "layout");
+#endif
 
 // liu. J, Middle Langevin 热浴迭代算法
 // 4个原子为一组计算，每组随机数由
@@ -293,12 +311,25 @@ void MIDDLE_Langevin_INFORMATION::Get_Local(int* atom_local,
     if (!is_initialized) return;
     this->local_atom_numbers = local_atom_numbers;
     this->local_float4_numbers = (local_atom_numbers * 3 + 3) / 4;
+#ifdef USE_VULKAN
+    struct
+    {
+        int local_atom_numbers;
+    } params{local_atom_numbers};
+    const void* buffers[] = {atom_local, d_sqrt_mass, d_sqrt_mass_local,
+                             d_mass_inverse, d_mass_inverse_local};
+    VK_LAUNCH(middle_langevin_get_local,
+              (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         device_get_local,
         (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, atom_local, local_atom_numbers,
         d_sqrt_mass, d_sqrt_mass_local, d_mass_inverse, d_mass_inverse_local);
+#endif
 }
 
 void MIDDLE_Langevin_INFORMATION::MD_Iteration_Leap_Frog(VECTOR* frc,
@@ -308,6 +339,24 @@ void MIDDLE_Langevin_INFORMATION::MD_Iteration_Leap_Frog(VECTOR* frc,
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        const std::uint64_t random_offset = random_invocation_count * 4;
+        MiddleLangevinVkParams params{
+            static_cast<unsigned int>(random_seed & 0xffffffffu),
+            static_cast<unsigned int>(random_seed >> 32),
+            static_cast<unsigned int>(random_offset & 0xffffffffu),
+            static_cast<unsigned int>(random_offset >> 32),
+            local_atom_numbers,
+            half_dt,
+            dt,
+            exp_gamma,
+            max_velocity};
+        const void* buffers[] = {d_mass_inverse_local, d_sqrt_mass_local, vel,
+                                 crd, frc};
+        VK_LAUNCH(middle_langevin_integrate,
+                  (local_atom_numbers + 32 - 1) / 32, 1, 32, 1, buffers,
+                  &params, NULL);
+#else
         if (max_velocity <= 0)
         {
             Launch_Device_Kernel(MD_Iteration_Leap_Frog_With_LiuJian,
@@ -328,6 +377,7 @@ void MIDDLE_Langevin_INFORMATION::MD_Iteration_Leap_Frog(VECTOR* frc,
                 d_mass_inverse_local, d_sqrt_mass_local, vel, crd, frc, acc,
                 random_force, max_velocity);
         }
+#endif
         random_invocation_count += 1;
     }
 }

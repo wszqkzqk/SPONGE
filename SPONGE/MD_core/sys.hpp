@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "third_party/toml/toml_decode.hpp"
 static __global__ void MD_Atom_Ek(const int atom_numbers, float* ek,
@@ -452,9 +452,19 @@ float MD_INFORMATION::system_information::Get_Total_Atom_Ek(int is_download)
 {
     int gridSize = (md_info->atom_numbers + CONTROLLER::device_max_thread - 1) /
                    CONTROLLER::device_max_thread;
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+    } params{md_info->atom_numbers};
+    const void* buffers[] = {md_info->d_atom_ek, md_info->vel, md_info->d_mass};
+    VK_LAUNCH(md_atom_ek, gridSize, 1, CONTROLLER::device_max_thread, 1,
+              buffers, &params, NULL);
+#else
     Launch_Device_Kernel(MD_Atom_Ek, gridSize, CONTROLLER::device_max_thread, 0,
                          NULL, md_info->atom_numbers, md_info->d_atom_ek,
                          md_info->vel, md_info->d_mass);
+#endif
     Sum_Of_List(md_info->d_atom_ek, d_sum_of_atom_ek, md_info->atom_numbers);
     SPONGE_MPI_WRAPPER::Device_Sum(d_sum_of_atom_ek, 1, CONTROLLER::d_pp_comm);
     if (is_download)
@@ -498,6 +508,24 @@ void MD_INFORMATION::system_information::Get_Potential_to_stress(
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
 
     // 计算势能贡献
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+    } params{atom_numbers};
+    const void* buffers[] = {d_atom_virial_tensor, d_virial_tensor};
+    VK_LAUNCH(md_stress_potential,
+              (atom_numbers + 4 * CONTROLLER::device_max_thread - 1) / 4 /
+                  CONTROLLER::device_max_thread,
+              1, blockSize.x, blockSize.y, buffers, &params, NULL);
+    struct
+    {
+        float volume_inverse;
+    } virial_params{volume_inverse};
+    const void* virial_buffers[] = {d_virial_tensor, d_stress};
+    VK_LAUNCH(md_stress_from_virial, 1, 1, 1, 1, virial_buffers,
+              &virial_params, NULL);
+#else
     Launch_Device_Kernel(
         Get_Stress_Potential_Contribution,
         (atom_numbers + 4 * CONTROLLER::device_max_thread - 1) / 4 /
@@ -507,6 +535,7 @@ void MD_INFORMATION::system_information::Get_Potential_to_stress(
 
     Launch_Device_Kernel(Get_Stress_From_virial, 1, 1, 0, NULL, volume_inverse,
                          d_virial_tensor, d_stress);
+#endif
 }
 
 void MD_INFORMATION::system_information::Get_Kinetic_to_stress(
@@ -516,21 +545,44 @@ void MD_INFORMATION::system_information::Get_Kinetic_to_stress(
     dim3 blockSize = {CONTROLLER::device_warp,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     // 计算动能贡献
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+        float volume_inverse;
+    } params{atom_numbers, volume_inverse};
+    const void* buffers[] = {vel, atom_mass, d_stress};
+    VK_LAUNCH(md_stress_kinetic,
+              (atom_numbers + 4 * CONTROLLER::device_max_thread - 1) / 4 /
+                  CONTROLLER::device_max_thread,
+              1, blockSize.x, blockSize.y, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         Get_Stress_Kinetic_Contribution,
         (atom_numbers + 4 * CONTROLLER::device_max_thread - 1) / 4 /
             CONTROLLER::device_max_thread,
         blockSize, 0, NULL, atom_numbers, vel, atom_mass, d_stress,
         volume_inverse);
+#endif
 }
 
 float MD_INFORMATION::system_information::Get_Potential(int is_download)
 {
     dim3 blockSize = {CONTROLLER::device_warp,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+    } params{md_info->atom_numbers};
+    const void* buffers[] = {md_info->d_atom_energy, d_potential};
+    VK_LAUNCH(md_add_sum_list, CONTROLLER::device_optimized_block, 1,
+              blockSize.x, blockSize.y, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Add_Sum_List, CONTROLLER::device_optimized_block,
                          blockSize, 0, NULL, md_info->atom_numbers,
                          md_info->d_atom_energy, d_potential);
+#endif
     SPONGE_MPI_WRAPPER::Device_Sum(d_potential, 1,
                                    CONTROLLER::D_MPI_COMM_WORLD);
     if (is_download)

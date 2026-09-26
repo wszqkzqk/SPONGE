@@ -1,4 +1,4 @@
-﻿#include "MD_core.h"
+#include "MD_core.h"
 
 #include "../xponge/xponge.h"
 
@@ -28,6 +28,17 @@
 #include "rerun.hpp"
 #include "sys.hpp"
 #include "ug.hpp"
+
+#ifdef USE_VULKAN
+struct MdScaleVkParams
+{
+    int atom_numbers;
+    LTMatrix3 g;
+    float dt;
+};
+static_assert(sizeof(MdScaleVkParams) == 32,
+              "MdScaleVkParams must match the GLSL push constant layout");
+#endif
 
 static int Xponge_Atom_Numbers()
 {
@@ -832,12 +843,24 @@ void MD_INFORMATION::Scale_Positions_And_Velocities(LTMatrix3 g, int scale_crd,
     switch (scale_crd)
     {
         case SCALE_COORDINATES_BY_ATOM:
+#ifdef USE_VULKAN
+        {
+            MdScaleVkParams params{atom_numbers, g, dt};
+            const void* buffers[] = {crd};
+            VK_LAUNCH(md_scale_positions,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+        }
+#else
             Launch_Device_Kernel(
                 Scale_Positions_Device,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, atom_numbers, g, crd,
                 dt);
+#endif
             break;
 
         default:
@@ -847,12 +870,24 @@ void MD_INFORMATION::Scale_Positions_And_Velocities(LTMatrix3 g, int scale_crd,
     switch (scale_vel)
     {
         case SCALE_VELOCITIES_BY_ATOM:
+#ifdef USE_VULKAN
+        {
+            MdScaleVkParams params{atom_numbers, g, dt};
+            const void* buffers[] = {vel};
+            VK_LAUNCH(md_scale_velocities,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+        }
+#else
             Launch_Device_Kernel(
                 Scale_Velocities_Device,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, atom_numbers, g, vel,
                 dt);
+#endif
             break;
 
         default:
@@ -950,10 +985,22 @@ void MD_INFORMATION::Crd_Vel_dd_to_Device(VECTOR* dd_crd, VECTOR* dd_vel,
     {
         deviceMemset(vel, 0, sizeof(VECTOR) * atom_numbers);
         deviceMemset(crd, 0, sizeof(VECTOR) * atom_numbers);
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {dd_atom_local_label, crd, dd_crd,
+                                 vel,                dd_vel,
+                                 dd_atom_local_id};
+        VK_LAUNCH(md_dd_crd_and_vel_to_global, (atom_numbers + 255) / 256, 1,
+                  256, 1, buffers, &params, stream);
+#else
         Launch_Device_Kernel(dd_crd_and_vel_to_global,
                              (atom_numbers + 255) / 256, 256, 0, stream,
                              atom_numbers, dd_atom_local_label, crd, dd_crd,
                              vel, dd_vel, dd_atom_local_id);
+#endif
 #ifdef USE_MPI
         if (CONTROLLER::PP_MPI_size == 1) return;
         D_MPI_Allreduce_IN_PLACE(crd, atom_numbers * 3, D_MPI_FLOAT, D_MPI_SUM,
@@ -973,12 +1020,27 @@ void MD_INFORMATION::Crd_Vel_Device_to_dd(VECTOR* dd_crd, VECTOR* dd_vel,
 {
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {dd_atom_local_label, crd, dd_crd,
+                                 vel,                dd_vel,
+                                 dd_atom_local_id};
+        VK_LAUNCH(md_global_crd_and_vel_to_dd,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                  stream);
+#else
         Launch_Device_Kernel(
             global_crd_and_vel_to_dd,
             (atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, stream, atom_numbers,
             dd_atom_local_label, crd, dd_crd, vel, dd_vel, dd_atom_local_id);
+#endif
     }
 }
 
@@ -1027,9 +1089,20 @@ void MD_INFORMATION::Frc_dd_to_Host(VECTOR* dd_frc, char* dd_atom_local_label,
     {
 #ifdef USE_MPI
         deviceMemset(frc, 0, sizeof(VECTOR) * atom_numbers);
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {dd_atom_local_label, frc, dd_frc,
+                                 dd_atom_local_id};
+        VK_LAUNCH(md_dd_frc_to_global, (atom_numbers + 255) / 256, 1, 256, 1,
+                  buffers, &params, stream);
+#else
         Launch_Device_Kernel(dd_frc_to_global, (atom_numbers + 255) / 256, 256,
                              0, stream, atom_numbers, dd_atom_local_label, frc,
                              dd_frc, dd_atom_local_id);
+#endif
         D_MPI_Allreduce_IN_PLACE(frc, atom_numbers * 3, D_MPI_FLOAT, D_MPI_SUM,
                                  CONTROLLER::d_pp_comm, stream);
         D_MPI_Barrier(CONTROLLER::d_pp_comm, stream);

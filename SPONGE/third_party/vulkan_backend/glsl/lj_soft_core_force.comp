@@ -1,0 +1,249 @@
+struct VecLJSoft
+{
+    float x, y, z;
+    int lj_type;
+    int lj_type_b;
+    int mask;
+    float charge;
+    float charge_ba;
+};
+layout(set = 0, binding = 0, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { VecLJSoft crd[]; };
+layout(set = 0, binding = 3, std430) buffer LJAA { float lj_aa[]; };
+layout(set = 0, binding = 4, std430) buffer LJAB { float lj_ab[]; };
+layout(set = 0, binding = 5, std430) buffer LJBA { float lj_ba[]; };
+layout(set = 0, binding = 6, std430) buffer LJBB { float lj_bb[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 8, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 10, std430) buffer DirectCFEnergy { float atom_direct_cf_energy[]; };
+layout(set = 0, binding = 11, std430) buffer DuDlLJ { float du_dl_lj[]; };
+layout(set = 0, binding = 12, std430) buffer DuDlDirect { float du_dl_direct[]; };
+layout(set = 0, binding = 13, std430) buffer ThisEnergy { float this_energy[]; };
+layout(set = 0, binding = 14, std430) buffer Intersys { float atom_energy_intersys[]; };
+layout(set = 0, binding = 15, std430) buffer Intrasys { float atom_energy_intrasys[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int solvent_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    float lambda;
+    float alpha;
+    float p;
+    float sigma_6;
+    float sigma_6_min;
+    int max_neighbor_numbers;
+    int flags;
+}
+pc;
+float lj_energy(float dr_abs, float A, float B)
+{
+    float dr_6 = pow(dr_abs, -6.0);
+    return (0.083333333 * A * dr_6 - 0.166666667 * B) * dr_6;
+}
+float lj_force(float dr_abs, float A, float B)
+{
+    return (B - A * pow(dr_abs, -6.0)) * pow(dr_abs, -8.0);
+}
+float dc_energy(float q1q2, float dr_abs, float beta)
+{
+    return q1q2 * erfcf(beta * dr_abs) / dr_abs;
+}
+float dc_force(float q1q2, float dr_abs, float beta)
+{
+    float beta_dr = beta * dr_abs;
+    return q1q2 * pow(dr_abs, -3.0) *
+           (beta_dr * 1.1283791670218446 * exp(-beta_dr * beta_dr) +
+            erfcf(beta_dr));
+}
+float dc_du_dlambda(VecLJSoft r1, VecLJSoft r2, float dr_abs, float beta)
+{
+    return erfcf(beta * dr_abs) *
+           (r2.charge_ba * r1.charge + r2.charge * r1.charge_ba) / dr_abs;
+}
+float sc_sigma(float A, float B)
+{
+    return (A == 0.0 || B == 0.0) ? pc.sigma_6
+                                  : max(0.5 * A / B, pc.sigma_6_min);
+}
+float sc_distance(float sigma, float dr_abs, float one_minus_lambda)
+{
+    float alpha_lambda_p = pc.alpha * pow(one_minus_lambda, pc.p);
+    float dr6 = pow(dr_abs, 6.0);
+    return pow(dr6 + alpha_lambda_p * sigma, 0.16666667);
+}
+float sc_lj_force(float dr_abs, float dr_sc, float A, float B)
+{
+    return pow(dr_abs, 4.0) * (B - A * pow(dr_sc, -6.0)) * pow(dr_sc, -12.0);
+}
+float sc_dc_force(float q1q2, float dr_abs, float dr_sc, float beta)
+{
+    float beta_dr_sc = dr_sc * beta;
+    return q1q2 * pow(dr_abs, 4.0) *
+           (exp(-beta_dr_sc * beta_dr_sc) * 1.1283791670218446 * beta +
+            erfcf(beta_dr_sc) / dr_sc) *
+           pow(dr_sc, -6.0);
+}
+float sc_du_dlambda(float F, float sigma, float dr_sc, float lam)
+{
+    return 0.16666667 * pc.p * pc.alpha * (1.0 - lam) *
+           pow(lam + 1.17549435e-38, pc.p - 1.0) * F * pow(dr_sc, -4.0) *
+           sigma;
+}
+void main()
+{
+    int atom_i =
+        int(gl_WorkGroupSize.y * gl_WorkGroupID.x + gl_LocalInvocationID.y);
+    if (atom_i >= pc.atom_numbers - pc.solvent_numbers) return;
+    bool need_force = (pc.flags & 1) != 0;
+    bool need_energy = (pc.flags & 2) != 0;
+    bool need_virial = (pc.flags & 4) != 0;
+    bool need_coulomb = (pc.flags & 8) != 0;
+    bool need_du_dlambda = (pc.flags & 16) != 0;
+    float lambda_ = 1.0 - pc.lambda;
+    int count = int(nl_raw[atom_i].x);
+    int base = atom_i * pc.max_neighbor_numbers;
+    VecLJSoft r1 = crd[atom_i];
+    Vec3 frc_record = v3(0.0, 0.0, 0.0);
+    LTMat virial_record = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    float energy_lj = 0.0;
+    float energy_lj_intersys = 0.0;
+    float energy_lj_intrasys = 0.0;
+    float energy_coulomb = 0.0;
+    float du_dlambda_lj = 0.0;
+    float du_dlambda_direct = 0.0;
+    for (int j = int(gl_LocalInvocationID.x); j < count;
+         j += int(gl_WorkGroupSize.x))
+    {
+        int atom_j = nl_serial[base + j];
+        float ij_factor = atom_j < pc.atom_numbers ? 1.0 : 0.5;
+        VecLJSoft r2 = crd[atom_j];
+        Vec3 dr = get_displacement(v3(r2.x, r2.y, r2.z), v3(r1.x, r1.y, r1.z),
+                                   pc.boundary);
+        float dr_abs = v3_len(dr);
+        if (dr_abs < pc.cutoff)
+        {
+            int pair_type_a = get_lj_type(r1.lj_type, r2.lj_type);
+            int pair_type_b = get_lj_type(r1.lj_type_b, r2.lj_type_b);
+            float AA = lj_aa[pair_type_a];
+            float AB = lj_ab[pair_type_a];
+            float BA = lj_ba[pair_type_b];
+            float BB = lj_bb[pair_type_b];
+            float q1q2 = r1.charge * r2.charge;
+            if (BA * AA != 0.0 || BA + AA == 0.0)
+            {
+                if (need_force)
+                {
+                    float frc_abs = lambda_ * lj_force(dr_abs, AA, AB) +
+                                    pc.lambda * lj_force(dr_abs, BA, BB);
+                    if (need_coulomb)
+                        frc_abs = frc_abs - dc_force(q1q2, dr_abs, pc.pme_beta);
+                    Vec3 frc_lin = v3_scale(dr, frc_abs);
+                    frc_record = v3_add(frc_record, frc_lin);
+                    if (atom_j < pc.atom_numbers)
+                        aadd_v3(frc[atom_j], v3_neg(frc_lin));
+                    if (need_virial)
+                        virial_record = lt_sub(virial_record, lt_scale(virial_from_force_dis(frc_lin, dr), ij_factor));
+                }
+                if (need_coulomb && need_energy)
+                    energy_coulomb +=
+                        ij_factor * dc_energy(q1q2, dr_abs, pc.pme_beta);
+                if (need_energy)
+                {
+                    float pair_energy_lj =
+                        ij_factor * (lambda_ * lj_energy(dr_abs, AA, AB) +
+                                     pc.lambda * lj_energy(dr_abs, BA, BB));
+                    energy_lj += pair_energy_lj;
+                    if (r1.mask == r2.mask)
+                        energy_lj_intrasys += pair_energy_lj;
+                    else
+                        energy_lj_intersys += pair_energy_lj;
+                }
+                if (need_du_dlambda)
+                {
+                    du_dlambda_lj += ij_factor * (lj_energy(dr_abs, BA, BB) -
+                                                  lj_energy(dr_abs, AA, AB));
+                    if (need_coulomb)
+                        du_dlambda_direct += ij_factor * dc_du_dlambda(r1, r2, dr_abs, pc.pme_beta);
+                }
+            }
+            else
+            {
+                float sigma_A = sc_sigma(AA, AB);
+                float sigma_B = sc_sigma(BA, BB);
+                float dr_sc_A = sc_distance(sigma_A, dr_abs, pc.lambda);
+                float dr_sc_B = sc_distance(sigma_B, dr_abs, lambda_);
+                if (need_force)
+                {
+                    float frc_abs = lambda_ * sc_lj_force(dr_abs, dr_sc_A, AA, AB) +
+                                    pc.lambda * sc_lj_force(dr_abs, dr_sc_B, BA, BB);
+                    if (need_coulomb)
+                    {
+                        float frc_cf_abs =
+                            lambda_ * sc_dc_force(q1q2, dr_abs, dr_sc_A, pc.pme_beta) +
+                            pc.lambda * sc_dc_force(q1q2, dr_abs, dr_sc_B, pc.pme_beta);
+                        frc_abs = frc_abs - frc_cf_abs;
+                    }
+                    Vec3 frc_lin = v3_scale(dr, frc_abs);
+                    frc_record = v3_add(frc_record, frc_lin);
+                    if (atom_j < pc.atom_numbers)
+                        aadd_v3(frc[atom_j], v3_neg(frc_lin));
+                    if (need_virial)
+                        virial_record = lt_sub(virial_record, lt_scale(virial_from_force_dis(frc_lin, dr), ij_factor));
+                }
+                if (need_coulomb && need_energy)
+                    energy_coulomb += ij_factor *
+                                      (lambda_ * dc_energy(q1q2, dr_sc_A, pc.pme_beta) +
+                                       pc.lambda * dc_energy(q1q2, dr_sc_B, pc.pme_beta));
+                if (need_energy)
+                {
+                    float pair_energy_lj =
+                        ij_factor * (lambda_ * lj_energy(dr_sc_A, AA, AB) +
+                                     pc.lambda * lj_energy(dr_sc_B, BA, BB));
+                    energy_lj += pair_energy_lj;
+                    if (r1.mask == r2.mask)
+                        energy_lj_intrasys += pair_energy_lj;
+                    else
+                        energy_lj_intersys += pair_energy_lj;
+                }
+                if (need_du_dlambda)
+                {
+                    du_dlambda_lj += ij_factor * (lj_energy(dr_sc_B, BA, BB) -
+                                                  lj_energy(dr_sc_A, AA, AB));
+                    du_dlambda_lj += sc_du_dlambda(lj_force(dr_sc_A, AA, AB), sigma_A, dr_sc_A, pc.lambda) -
+                                     sc_du_dlambda(lj_force(dr_sc_B, BA, BB), sigma_B, dr_sc_B, lambda_);
+                    if (need_coulomb)
+                    {
+                        du_dlambda_direct += ij_factor * (dc_energy(q1q2, dr_sc_B, pc.pme_beta) -
+                                                          dc_energy(q1q2, dr_sc_A, pc.pme_beta));
+                        du_dlambda_direct += ij_factor * (sc_du_dlambda(dc_force(q1q2, dr_sc_B, pc.pme_beta), sigma_B, dr_sc_B, lambda_) -
+                                                          sc_du_dlambda(dc_force(q1q2, dr_sc_A, pc.pme_beta), sigma_A, dr_sc_A, pc.lambda));
+                        du_dlambda_direct += ij_factor * (pc.lambda * dc_du_dlambda(r1, r2, dr_sc_B, pc.pme_beta) +
+                                                          lambda_ * dc_du_dlambda(r1, r2, dr_sc_A, pc.pme_beta));
+                    }
+                }
+            }
+        }
+    }
+    if (need_force) warp_aadd_v3(frc[atom_i], frc_record);
+    if (need_energy)
+    {
+        float energy_total = energy_lj;
+        if (need_coulomb) energy_total += energy_coulomb;
+        warp_afadd(atom_energy[atom_i], energy_total);
+        warp_afadd(this_energy[atom_i], energy_lj);
+        warp_afadd(atom_energy_intersys[atom_i], energy_lj_intersys);
+        warp_afadd(atom_energy_intrasys[atom_i], energy_lj_intrasys);
+    }
+    if (need_coulomb && need_energy)
+        warp_afadd(atom_direct_cf_energy[atom_i], energy_coulomb);
+    if (need_virial) warp_aadd_lt(atom_virial[atom_i], virial_record);
+    if (need_du_dlambda)
+    {
+        warp_afadd(du_dl_lj[0], du_dlambda_lj);
+        if (need_coulomb) warp_afadd(du_dl_direct[0], du_dlambda_direct);
+    }
+}

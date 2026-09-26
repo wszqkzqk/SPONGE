@@ -1,0 +1,16 @@
+struct VecLJ
+{
+    float x, y, z;
+    int lj_type;
+    float charge;
+};
+layout(set = 0, binding = 0, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 1, std430) buffer LJType { int lj_type[]; };
+layout(set = 0, binding = 2, std430) buffer CrdLocal { VecLJ crd_local[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    crd_local[i].lj_type = lj_type[atom_local[i]];
+}

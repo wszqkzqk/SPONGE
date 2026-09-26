@@ -1,0 +1,119 @@
+struct VecLJ
+{
+    float x, y, z;
+    int lj_type;
+    float charge;
+};
+layout(set = 0, binding = 0, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer ResStart { int res_start[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { VecLJ crd[]; };
+layout(set = 0, binding = 4, std430) buffer LJA { float lj_a[]; };
+layout(set = 0, binding = 5, std430) buffer LJB { float lj_b[]; };
+layout(set = 0, binding = 6, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 7, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 8, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 9, std430) buffer DirectCFEnergy { float atom_direct_cf_energy[]; };
+layout(set = 0, binding = 10, std430) buffer ThisEnergy { float this_energy[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int solvent_start_residue;
+    int res_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    int need_atom_energy;
+    int need_virial;
+    int wat_points;
+    int max_neighbor_numbers;
+}
+pc;
+shared float r1s_x[128];
+shared float r1s_y[128];
+shared float r1s_z[128];
+shared int r1s_lj_type[128];
+shared float r1s_charge[128];
+void main()
+{
+    int residue_i =
+        int(gl_WorkGroupSize.y * gl_WorkGroupID.x + gl_LocalInvocationID.y) +
+        pc.solvent_start_residue;
+    if (residue_i >= pc.res_numbers) return;
+    int tx = int(gl_LocalInvocationID.x);
+    int ty = int(gl_LocalInvocationID.y);
+    Vec3 frc_record[4];
+    for (int i = 0; i < 4; i++) frc_record[i] = v3(0.0, 0.0, 0.0);
+    int atom_i = res_start[residue_i];
+    if (tx < pc.wat_points)
+    {
+        int shared_idx = ty * pc.wat_points + tx;
+        VecLJ r1 = crd[atom_i + tx];
+        r1s_x[shared_idx] = r1.x;
+        r1s_y[shared_idx] = r1.y;
+        r1s_z[shared_idx] = r1.z;
+        r1s_lj_type[shared_idx] = r1.lj_type;
+        r1s_charge[shared_idx] = r1.charge;
+    }
+    subgroupBarrier();
+    int count = int(nl_raw[atom_i].x);
+    int base = atom_i * pc.max_neighbor_numbers;
+    LTMat virial_record = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    float energy_lj = 0.0;
+    float energy_coulomb = 0.0;
+    for (int j = tx; j < count; j += int(gl_WorkGroupSize.x))
+    {
+        int atom_j = nl_serial[base + j];
+        float ij_factor = atom_j < pc.atom_numbers ? 1.0 : 0.5;
+        VecLJ r2 = crd[atom_j];
+        Vec3 frc_record_j = v3(0.0, 0.0, 0.0);
+        for (int i = 0; i < pc.wat_points; i++)
+        {
+            int shared_idx = ty * pc.wat_points + i;
+            Vec3 r1_crd =
+                v3(r1s_x[shared_idx], r1s_y[shared_idx], r1s_z[shared_idx]);
+            int r1_lj_type = r1s_lj_type[shared_idx];
+            float r1_charge = r1s_charge[shared_idx];
+            Vec3 dr =
+                get_displacement(v3(r2.x, r2.y, r2.z), r1_crd, pc.boundary);
+            float dr_abs = v3_len(dr);
+            if (dr_abs < pc.cutoff)
+            {
+                int pair_type = get_lj_type(r1_lj_type, r2.lj_type);
+                float A = lj_a[pair_type];
+                float B = lj_b[pair_type];
+                float frc_abs =
+                    (B - A * pow(dr_abs, -6.0)) * pow(dr_abs, -8.0);
+                float beta_dr = pc.pme_beta * dr_abs;
+                float q1q2 = r1_charge * r2.charge;
+                frc_abs = frc_abs - q1q2 * pow(dr_abs, -3.0) *
+                                        (beta_dr * 1.1283791670218446 *
+                                             exp(-beta_dr * beta_dr) +
+                                         erfcf(beta_dr));
+                Vec3 frc_lin = v3_scale(dr, frc_abs);
+                frc_record[i] = v3_add(frc_record[i], frc_lin);
+                frc_record_j = v3_sub(frc_record_j, frc_lin);
+                if (pc.need_virial != 0)
+                    virial_record = lt_sub(virial_record, lt_scale(virial_from_force_dis(frc_lin, dr), ij_factor));
+                if (pc.need_atom_energy != 0)
+                {
+                    float dr_6 = pow(dr_abs, -6.0);
+                    energy_lj += ij_factor *
+                                 (0.083333333 * A * dr_6 - 0.166666667 * B) *
+                                 dr_6;
+                    energy_coulomb += ij_factor * q1q2 * erfcf(beta_dr) / dr_abs;
+                }
+            }
+        }
+        if (atom_j < pc.atom_numbers) aadd_v3(frc[atom_j], frc_record_j);
+    }
+    for (int i = 0; i < pc.wat_points; i++)
+        warp_aadd_v3(frc[atom_i + i], frc_record[i]);
+    if (pc.need_atom_energy != 0)
+    {
+        warp_afadd(atom_energy[atom_i], energy_lj + energy_coulomb);
+        warp_afadd(this_energy[atom_i], energy_lj);
+        warp_afadd(atom_direct_cf_energy[atom_i], energy_coulomb);
+    }
+    if (pc.need_virial != 0) warp_aadd_lt(atom_virial[atom_i], virial_record);
+}

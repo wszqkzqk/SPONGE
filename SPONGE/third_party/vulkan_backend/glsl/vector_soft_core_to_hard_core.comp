@@ -1,0 +1,29 @@
+struct VecLJ
+{
+    float x, y, z;
+    int lj_type;
+    float charge;
+};
+struct VecLJSoft
+{
+    float x, y, z;
+    int lj_type;
+    int lj_type_b;
+    int mask;
+    float charge;
+    float charge_ba;
+};
+layout(set = 0, binding = 0, std430) buffer HardCrd { VecLJ hard_crd[]; };
+layout(set = 0, binding = 1, std430) buffer SoftCrd { VecLJSoft soft_crd[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    VecLJSoft s = soft_crd[atom_i];
+    hard_crd[atom_i].x = s.x;
+    hard_crd[atom_i].y = s.y;
+    hard_crd[atom_i].z = s.z;
+    hard_crd[atom_i].charge = s.charge;
+    hard_crd[atom_i].lj_type = s.lj_type;
+}

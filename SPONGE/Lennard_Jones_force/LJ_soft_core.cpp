@@ -1,7 +1,48 @@
-﻿#include "LJ_soft_core.h"
+#include "LJ_soft_core.h"
 
 #include "../xponge/load/native/lj_soft.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct LjSoftCoreVkParams
+{
+    int atom_numbers;
+    int solvent_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    float lambda;
+    float alpha;
+    float p;
+    float sigma_6;
+    float sigma_6_min;
+    int max_neighbor_numbers;
+    int flags;
+};
+static_assert(sizeof(LjSoftCoreVkParams) == 96,
+              "LjSoftCoreVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+
+enum LjSoftCoreVkFlags
+{
+    LJSC_NEED_FORCE = 1,
+    LJSC_NEED_ENERGY = 2,
+    LJSC_NEED_VIRIAL = 4,
+    LJSC_NEED_COULOMB = 8,
+    LJSC_NEED_DU_DLAMBDA = 16
+};
+#endif
 
 __global__ void Copy_LJ_Type_And_Mask_To_New_Crd(const int atom_numbers,
                                                  VECTOR_LJ_SOFT_TYPE* new_crd,
@@ -631,6 +672,18 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
         this->cutoff = cutoff;
         Device_Malloc_Safely((void**)&crd_with_parameters,
                              sizeof(VECTOR_LJ_SOFT_TYPE) * atom_numbers);
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {crd_with_parameters, d_atom_LJ_type_A,
+                                 d_atom_LJ_type_B, d_subsys_division};
+        VK_LAUNCH(lj_soft_copy_type_mask,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_LJ_Type_And_Mask_To_New_Crd,
             (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -638,6 +691,7 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
             crd_with_parameters, d_atom_LJ_type_A, d_atom_LJ_type_B,
             d_subsys_division);
+#endif
         controller->printf("    Start initializing long range LJ correction\n");
         long_range_factor = 0;
         double h_factor = 0.0;
@@ -764,6 +818,19 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } copy_params{this->local_atom_numbers + this->ghost_numbers};
+        const void* copy_buffers[] = {crd, crd_with_LJ_parameters_local,
+                                      charge};
+        VK_LAUNCH(lj_soft_copy_crd_charge,
+                  (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, copy_buffers,
+                  &copy_params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -771,6 +838,7 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_max_thread, 0, NULL,
             this->local_atom_numbers + this->ghost_numbers, crd,
             crd_with_LJ_parameters_local, charge);
+#endif
 
         if (need_atom_energy)
         {
@@ -789,7 +857,34 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
-
+#ifdef USE_VULKAN
+        LjSoftCoreVkParams params{
+            local_atom_numbers, solvent_numbers, boundary,
+            cutoff,             pme_beta,        lambda,
+            alpha,              p,               sigma_6,
+            sigma_6_min,        vk_nl_stride(nl, atom_numbers),
+            LJSC_NEED_FORCE | LJSC_NEED_COULOMB |
+                (need_atom_energy ? LJSC_NEED_ENERGY : 0) |
+                (need_virial ? LJSC_NEED_VIRIAL : 0)};
+        const void* buffers[] = {nl,
+                                 nl[0].atom_serial,
+                                 crd_with_LJ_parameters_local,
+                                 d_LJ_AA,
+                                 d_LJ_AB,
+                                 d_LJ_BA,
+                                 d_LJ_BB,
+                                 frc,
+                                 vk_or_dummy(atom_energy, frc),
+                                 vk_or_dummy(atom_lj_virial, frc),
+                                 vk_or_dummy(atom_direct_pme_energy, frc),
+                                 frc,
+                                 frc,
+                                 d_LJ_energy_atom,
+                                 d_LJ_energy_atom_intersys,
+                                 d_LJ_energy_atom_intrasys};
+        VK_LAUNCH(lj_soft_core_force, gridSize.x, 1, blockSize.x, blockSize.y,
+                  buffers, &params, NULL);
+#else
         auto f =
             Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<true, false, false,
                                                             true, false>;
@@ -821,6 +916,7 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             atom_energy, atom_lj_virial, atom_direct_pme_energy, NULL, NULL,
             lambda, alpha, p, sigma_6, sigma_6_min, d_LJ_energy_atom,
             d_LJ_energy_atom_intersys, d_LJ_energy_atom_intrasys);
+#endif
     }
 }
 
@@ -831,6 +927,19 @@ float LJ_SOFT_CORE::Get_Partial_H_Partial_Lambda_With_Columb_Direct(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } copy_params{this->local_atom_numbers + this->ghost_numbers};
+        const void* copy_buffers[] = {crd, crd_with_parameters, charge,
+                                      charge_B_A};
+        VK_LAUNCH(lj_soft_copy_crd_charge_ba,
+                  (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, copy_buffers,
+                  &copy_params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -838,6 +947,7 @@ float LJ_SOFT_CORE::Get_Partial_H_Partial_Lambda_With_Columb_Direct(
             CONTROLLER::device_max_thread, 0, NULL,
             this->local_atom_numbers + this->ghost_numbers, crd,
             crd_with_parameters, charge, charge_B_A);
+#endif
 
         deviceMemset(d_sigma_of_dH_dlambda_lj, 0, sizeof(float));
 
@@ -845,6 +955,37 @@ float LJ_SOFT_CORE::Get_Partial_H_Partial_Lambda_With_Columb_Direct(
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
+#ifdef USE_VULKAN
+        if (charge_perturbated > 0)
+        {
+            deviceMemset(d_sigma_of_dH_dlambda_direct, 0, sizeof(float));
+        }
+        LjSoftCoreVkParams params{
+            local_atom_numbers, solvent_numbers, boundary,
+            cutoff,             pme_beta,        lambda,
+            alpha,              p,               sigma_6,
+            sigma_6_min,        vk_nl_stride(nl, atom_numbers),
+            LJSC_NEED_DU_DLAMBDA |
+                (charge_perturbated > 0 ? LJSC_NEED_COULOMB : 0)};
+        const void* buffers[] = {nl,
+                                 nl[0].atom_serial,
+                                 crd_with_LJ_parameters_local,
+                                 d_LJ_AA,
+                                 d_LJ_AB,
+                                 d_LJ_BA,
+                                 d_LJ_BB,
+                                 d_LJ_AA,
+                                 d_LJ_AA,
+                                 d_LJ_AA,
+                                 d_LJ_AA,
+                                 d_sigma_of_dH_dlambda_lj,
+                                 d_sigma_of_dH_dlambda_direct,
+                                 d_LJ_AA,
+                                 d_LJ_AA,
+                                 d_LJ_AA};
+        VK_LAUNCH(lj_soft_core_force, gridSize.x, 1, blockSize.x, blockSize.y,
+                  buffers, &params, NULL);
+#else
         auto f =
             Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<false, false, false,
                                                             true, true>;
@@ -866,6 +1007,7 @@ float LJ_SOFT_CORE::Get_Partial_H_Partial_Lambda_With_Columb_Direct(
             d_LJ_AA, d_LJ_AB, d_LJ_BA, d_LJ_BB, cutoff, NULL, pme_beta, NULL,
             NULL, NULL, d_sigma_of_dH_dlambda_lj, d_sigma_of_dH_dlambda_direct,
             lambda, alpha, p, sigma_6, sigma_6_min, NULL, NULL, NULL);
+#endif
 
         deviceMemcpy(h_sigma_of_dH_dlambda_lj, d_sigma_of_dH_dlambda_lj,
                      sizeof(float), deviceMemcpyDeviceToHost);
@@ -933,13 +1075,32 @@ void LJ_SOFT_CORE::Long_Range_Correction(int need_pressure, LTMatrix3* d_virial,
     {
         if (need_pressure > 0)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                float factor;
+            } params{2 * long_range_factor / volume};
+            const void* buffers[] = {d_virial};
+            VK_LAUNCH(lj_long_range_virial_correction, 1, 1, 1, 1, buffers,
+                      &params, NULL);
+#else
             Launch_Device_Kernel(Long_Range_Virial_Correction, 1, 1, 0, NULL,
                                  d_virial, 2 * long_range_factor / volume);
+#endif
         }
         if (need_potential > 0)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                float adder;
+            } params{long_range_factor / volume};
+            const void* buffers[] = {d_potential};
+            VK_LAUNCH(lj_device_add, 1, 1, 1, 1, buffers, &params, NULL);
+#else
             Launch_Device_Kernel(device_add, 1, 1, 0, NULL, d_potential,
                                  long_range_factor / volume);
+#endif
             h_LJ_long_energy = long_range_factor / volume;
         }
     }
@@ -965,6 +1126,19 @@ void LJ_SOFT_CORE::Get_Local(int* atom_local, int local_atom_numbers,
     if (!is_initialized) return;
     this->local_atom_numbers = local_atom_numbers;
     this->ghost_numbers = ghost_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+    } params{local_atom_numbers + ghost_numbers};
+    const void* buffers[] = {atom_local, d_atom_LJ_type_A, d_atom_LJ_type_B,
+                             d_subsys_division, crd_with_LJ_parameters_local};
+    VK_LAUNCH(lj_soft_get_local,
+              (local_atom_numbers + ghost_numbers +
+               CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device,
                          (local_atom_numbers + ghost_numbers +
                           CONTROLLER::device_max_thread - 1) /
@@ -973,4 +1147,5 @@ void LJ_SOFT_CORE::Get_Local(int* atom_local, int local_atom_numbers,
                          local_atom_numbers, ghost_numbers, d_atom_LJ_type_A,
                          d_atom_LJ_type_B, d_subsys_division,
                          crd_with_LJ_parameters_local);
+#endif
 }

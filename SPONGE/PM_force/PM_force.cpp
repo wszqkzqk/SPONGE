@@ -1,4 +1,4 @@
-﻿#include "PM_force.h"
+#include "PM_force.h"
 
 #include "../utils/float_classification.hpp"
 /*

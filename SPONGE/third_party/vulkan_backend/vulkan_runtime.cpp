@@ -67,6 +67,12 @@ VulkanState& S()
     return state;
 }
 
+static bool SyncEach()
+{
+    static const bool sync_each = getenv("SPONGE_VK_SYNC_EACH") != nullptr;
+    return sync_each;
+}
+
 struct StreamState
 {
     VkCommandBuffer cb = VK_NULL_HANDLE;
@@ -105,6 +111,9 @@ StreamState* StreamOf(void* stream)
     abort();
 }
 
+struct StreamState;
+void SubmitAndWaitImpl(StreamState* stream);
+
 uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags required,
                         VkMemoryPropertyFlags preferred)
 {
@@ -128,6 +137,8 @@ void EnsureStaging(VkDeviceSize size)
     if (size <= S().staging_size) return;
     if (S().staging != VK_NULL_HANDLE)
     {
+        SubmitAndWaitImpl(&g_default_stream);
+        for (auto& [_, stream] : g_streams) SubmitAndWaitImpl(stream);
         vkDestroyBuffer(S().device, S().staging, nullptr);
         vkFreeMemory(S().device, S().staging_memory, nullptr);
     }
@@ -539,6 +550,7 @@ void Launch(int kernel_id, unsigned int grid_x, unsigned int grid_y,
                            params);
     vkCmdDispatch(stream->cb, grid_x, grid_y, 1);
     PipelineBarrierCompute(stream);
+    if (SyncEach()) SubmitAndWaitImpl(stream);
 }
 
 }  // namespace sponge_vk
@@ -842,6 +854,7 @@ void deviceMemset(void* to, int val, size_t size)
     vkCmdFillBuffer(stream->cb, sponge_vk::AllocationOf(to)->buffer, 0, size,
                     (uint32_t)val);
     PipelineBarrierTransferToCompute(stream);
+    if (SyncEach()) SubmitAndWaitImpl(stream);
 }
 
 void deviceStreamCreate(deviceStream_t* stream)

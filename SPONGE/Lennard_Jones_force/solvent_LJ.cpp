@@ -1,4 +1,34 @@
-﻿#include "solvent_LJ.h"
+#include "solvent_LJ.h"
+
+#ifdef USE_VULKAN
+struct SolventLjVkParams
+{
+    int atom_numbers;
+    int solvent_start_residue;
+    int res_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    int need_atom_energy;
+    int need_virial;
+    int wat_points;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(SolventLjVkParams) == 88,
+              "SolventLjVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 __global__ void Vector_Soft_Core_To_Hard_Core(
     int atom_numbers, VECTOR_LJ* hard_core_crd,
@@ -162,7 +192,7 @@ void SOLVENT_LENNARD_JONES::Initial(CONTROLLER* controller,
         strcpy(this->module_name, module_name);
     }
     bool enable;
-#ifdef USE_GPU
+#if defined(USE_GPU) || defined(USE_VULKAN)
     if (!controller->Command_Exist(this->module_name))
     {
         printf("md_info->ug.ug_numbers: %d\n", md_info->ug.ug_numbers);
@@ -262,6 +292,78 @@ void SOLVENT_LENNARD_JONES::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        unsigned int block_y =
+            CONTROLLER::device_max_thread / CONTROLLER::device_warp;
+        if (block_y > 8u) block_y = 8u;
+        unsigned int grid_x = static_cast<unsigned int>(
+            (residue_numbers - solvent_start_local +
+             static_cast<int>(block_y) - 1) /
+            static_cast<int>(block_y));
+        if (lj_info->is_initialized)
+        {
+            SolventLjVkParams params{atom_numbers,
+                                     solvent_start_local,
+                                     residue_numbers,
+                                     boundary,
+                                     lj_info->cutoff,
+                                     pme_beta,
+                                     need_atom_energy,
+                                     need_virial,
+                                     water_points,
+                                     vk_nl_stride(nl, atom_numbers)};
+            const void* buffers[] = {nl,
+                                     nl[0].atom_serial,
+                                     d_res_start,
+                                     lj_info->crd_with_LJ_parameters_local,
+                                     lj_info->d_LJ_A,
+                                     lj_info->d_LJ_B,
+                                     frc,
+                                     vk_or_dummy(atom_energy, frc),
+                                     vk_or_dummy(atom_lj_virial, frc),
+                                     vk_or_dummy(atom_direct_pme_energy, frc),
+                                     lj_info->d_LJ_energy_atom};
+            VK_LAUNCH(solvent_lj_force, grid_x, 1, CONTROLLER::device_warp,
+                      block_y, buffers, &params, NULL);
+        }
+        else if (lj_soft_info->is_initialized)
+        {
+            struct
+            {
+                int atom_numbers;
+            } copy_params{atom_numbers};
+            const void* copy_buffers[] = {
+                soft_to_hard_crd, lj_soft_info->crd_with_LJ_parameters_local};
+            VK_LAUNCH(vector_soft_core_to_hard_core,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, copy_buffers,
+                      &copy_params, NULL);
+            SolventLjVkParams params{atom_numbers,
+                                     solvent_start_local,
+                                     residue_numbers,
+                                     boundary,
+                                     lj_soft_info->cutoff,
+                                     pme_beta,
+                                     need_atom_energy,
+                                     need_virial,
+                                     water_points,
+                                     vk_nl_stride(nl, atom_numbers)};
+            const void* buffers[] = {nl,
+                                     nl[0].atom_serial,
+                                     d_res_start,
+                                     soft_to_hard_crd,
+                                     lj_soft_info->d_LJ_AA,
+                                     lj_soft_info->d_LJ_AB,
+                                     frc,
+                                     vk_or_dummy(atom_energy, frc),
+                                     vk_or_dummy(atom_lj_virial, frc),
+                                     vk_or_dummy(atom_direct_pme_energy, frc),
+                                     lj_soft_info->d_LJ_energy_atom};
+            VK_LAUNCH(solvent_lj_force, grid_x, 1, CONTROLLER::device_warp,
+                      block_y, buffers, &params, NULL);
+        }
+#endif
 #ifdef USE_GPU
         dim3 blockSize = {
             static_cast<unsigned int>(CONTROLLER::device_warp),
@@ -473,9 +575,21 @@ void SOLVENT_LENNARD_JONES::Get_Local(const int local_res_numbers,
 {
     if (!is_initialized) return;
 
+#ifdef USE_VULKAN
+    struct
+    {
+        int local_res_numbers;
+        int water_points;
+        int atom_numbers;
+    } params{local_res_numbers, water_points, atom_numbers};
+    const void* buffers[] = {d_res_len, d_solvent_start_local,
+                             d_local_solvent_numbers, local_mass};
+    VK_LAUNCH(solvent_lj_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL, local_res_numbers,
                          d_res_len, water_points, d_solvent_start_local,
                          d_local_solvent_numbers, atom_numbers, local_mass);
+#endif
     deviceMemcpy(&solvent_start_local, d_solvent_start_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
     deviceMemcpy(&local_solvent_numbers, d_local_solvent_numbers, sizeof(int),

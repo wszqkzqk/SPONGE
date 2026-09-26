@@ -1,8 +1,36 @@
-﻿#include "Lennard_Jones_force.h"
+#include "Lennard_Jones_force.h"
 
 #include "../xponge/load/native/lj.hpp"
 #include "../xponge/xponge.h"
 // #include "assert.h"
+
+#ifdef USE_VULKAN
+struct LjPmeDirectVkParams
+{
+    int local_atom_numbers;
+    int solvent_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(LjPmeDirectVkParams) == 80,
+              "LjPmeDirectVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 // 由LJ坐标和转化系数求距离
 __global__ void Copy_LJ_Type_To_New_Crd(const int atom_numbers,
@@ -198,12 +226,24 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
         this->cutoff = cutoff;
         Device_Malloc_Safely((void**)&crd_with_LJ_parameters,
                              sizeof(VECTOR_LJ) * atom_numbers);
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {crd_with_LJ_parameters, d_atom_LJ_type};
+        VK_LAUNCH(lj_copy_type,
+                  (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_LJ_Type_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
             crd_with_LJ_parameters, d_atom_LJ_type);
+#endif
         controller->printf("    Start initializing long range LJ correction\n");
         // 全对求和 Σ_i Σ_j B[type_i, type_j] 等于按类型直方图的
         // Σ_a count_a · Σ_b count_b · B[pair(a,b)]，后者按固定顺序双精度
@@ -267,6 +307,19 @@ void LENNARD_JONES_INFORMATION::Get_Local(int* atom_local,
     if (!is_initialized) return;
     this->local_atom_numbers = local_atom_numbers;
     this->ghost_numbers = ghost_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+    } params{local_atom_numbers + ghost_numbers};
+    const void* buffers[] = {atom_local, d_atom_LJ_type,
+                             crd_with_LJ_parameters_local};
+    VK_LAUNCH(lj_get_local,
+              (local_atom_numbers + ghost_numbers +
+               CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device,
                          (local_atom_numbers + ghost_numbers +
                           CONTROLLER::device_max_thread - 1) /
@@ -274,6 +327,7 @@ void LENNARD_JONES_INFORMATION::Get_Local(int* atom_local,
                          CONTROLLER::device_max_thread, 0, NULL, atom_local,
                          local_atom_numbers, ghost_numbers, d_atom_LJ_type,
                          crd_with_LJ_parameters_local);
+#endif
 }
 
 static __global__ void Long_Range_Virial_Correction(LTMatrix3* d_virial,
@@ -294,13 +348,32 @@ void LENNARD_JONES_INFORMATION::Long_Range_Correction(int need_pressure,
     {
         if (need_pressure)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                float factor;
+            } params{2 * long_range_factor / volume};
+            const void* buffers[] = {d_virial};
+            VK_LAUNCH(lj_long_range_virial_correction, 1, 1, 1, 1, buffers,
+                      &params, NULL);
+#else
             Launch_Device_Kernel(Long_Range_Virial_Correction, 1, 1, 0, 0,
                                  d_virial, 2 * long_range_factor / volume);
+#endif
         }
         if (need_potential)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                float adder;
+            } params{long_range_factor / volume};
+            const void* buffers[] = {d_potential};
+            VK_LAUNCH(lj_device_add, 1, 1, 1, 1, buffers, &params, NULL);
+#else
             Launch_Device_Kernel(device_add, 1, 1, 0, 0, d_potential,
                                  long_range_factor / volume);
+#endif
 
             h_LJ_long_energy = long_range_factor / volume;
         }
@@ -333,6 +406,19 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } copy_params{this->local_atom_numbers + this->ghost_numbers};
+        const void* copy_buffers[] = {crd, crd_with_LJ_parameters_local,
+                                      charge};
+        VK_LAUNCH(lj_copy_crd_charge,
+                  (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, copy_buffers,
+                  &copy_params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -340,6 +426,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_max_thread, 0, NULL,
             this->local_atom_numbers + this->ghost_numbers, crd,
             crd_with_LJ_parameters_local, charge);
+#endif
         if (need_atom_energy)
         {
             deviceMemset(atom_direct_pme_energy, 0,
@@ -354,6 +441,28 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
+#ifdef USE_VULKAN
+        LjPmeDirectVkParams params{local_atom_numbers,
+                                   solvent_numbers,
+                                   boundary,
+                                   cutoff,
+                                   pme_beta,
+                                   need_atom_energy,
+                                   need_virial,
+                                   vk_nl_stride(nl, atom_numbers)};
+        const void* buffers[] = {nl,
+                                 nl[0].atom_serial,
+                                 crd_with_LJ_parameters_local,
+                                 d_LJ_A,
+                                 d_LJ_B,
+                                 frc,
+                                 vk_or_dummy(atom_energy, frc),
+                                 vk_or_dummy(atom_virial, frc),
+                                 vk_or_dummy(atom_direct_pme_energy, frc),
+                                 d_LJ_energy_atom};
+        VK_LAUNCH(lj_pme_direct_force, gridSize.x, 1, blockSize.x, blockSize.y,
+                  buffers, &params, NULL);
+#else
         auto f =
             Lennard_Jones_And_Direct_Coulomb_Device<true, false, false, true>;
         if (!need_atom_energy && !need_virial)
@@ -380,6 +489,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             solvent_numbers, nl, crd_with_LJ_parameters_local, boundary, d_LJ_A,
             d_LJ_B, cutoff, frc, pme_beta, atom_energy, atom_virial,
             atom_direct_pme_energy, d_LJ_energy_atom);
+#endif
     }
 }
 

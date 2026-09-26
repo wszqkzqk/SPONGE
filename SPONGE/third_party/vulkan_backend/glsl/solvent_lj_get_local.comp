@@ -1,0 +1,37 @@
+layout(set = 0, binding = 0, std430) buffer ResLen { int res_len[]; };
+layout(set = 0, binding = 1, std430) buffer SolventStart { int solvent_start_local[]; };
+layout(set = 0, binding = 2, std430) buffer SolventNumbers { int local_solvent_numbers[]; };
+layout(set = 0, binding = 3, std430) buffer Mass { float mass[]; };
+layout(push_constant) uniform Params
+{
+    int local_res_numbers;
+    int water_points;
+    int atom_numbers;
+}
+pc;
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    solvent_start_local[0] = pc.local_res_numbers;
+    local_solvent_numbers[0] = 0;
+    int cnt = 0;
+    for (int i = pc.local_res_numbers - 1; i >= 0; i -= 1)
+    {
+        int res_start = pc.atom_numbers - pc.water_points * (cnt + 1);
+        float atom_O = mass[res_start];
+        float atom_H1 = mass[res_start + 1];
+        float atom_H2 = mass[res_start + 2];
+        if (res_len[i] == pc.water_points && atom_O > 15.8 && atom_O < 16.2 &&
+            atom_H1 > 1.007 && atom_H1 < 1.009 && atom_H2 > 1.007 &&
+            atom_H2 < 1.009)
+        {
+            solvent_start_local[0] -= 1;
+            local_solvent_numbers[0] += pc.water_points;
+            cnt++;
+        }
+        else
+        {
+            break;
+        }
+    }
+}

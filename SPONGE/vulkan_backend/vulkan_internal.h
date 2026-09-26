@@ -12,7 +12,6 @@ struct Allocation
     VkBuffer buffer;
     VkDeviceMemory memory;
     VkDeviceSize size;
-    void* mapped;
 };
 
 VkInstance Instance();

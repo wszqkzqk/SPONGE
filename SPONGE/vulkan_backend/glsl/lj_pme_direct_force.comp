@@ -52,11 +52,12 @@ void main()
             int pair_type = get_lj_type(r1.lj_type, r2.lj_type);
             float A = lj_a[pair_type];
             float B = lj_b[pair_type];
-            float dr_6 = pow(dr_abs, -6.0);
-            float frc_abs = (B - A * dr_6) * pow(dr_abs, -8.0);
+            float dr_2 = 1.0 / (dr_abs * dr_abs);
+            float dr_6 = dr_2 * dr_2 * dr_2;
+            float frc_abs = (B - A * dr_6) * (dr_6 * dr_2);
             float beta_dr = pc.pme_beta * dr_abs;
             float q1q2 = r1.charge * r2.charge;
-            frc_abs = frc_abs - q1q2 * pow(dr_abs, -3.0) *
+            frc_abs = frc_abs - q1q2 * (dr_2 / dr_abs) *
                                     (beta_dr * 1.1283791670218446 *
                                          exp(-beta_dr * beta_dr) +
                                      erfcf(beta_dr));

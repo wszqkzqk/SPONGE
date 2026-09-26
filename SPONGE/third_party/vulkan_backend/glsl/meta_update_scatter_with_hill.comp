@@ -1,0 +1,59 @@
+layout(set = 0, binding = 0, std430) buffer Coordinates { float coordinates[]; };
+layout(set = 0, binding = 1, std430) buffer Periods { float periods[]; };
+layout(set = 0, binding = 2, std430) buffer HillCenters { float hill_centers[]; };
+layout(set = 0, binding = 3, std430) buffer HillInvW { float hill_inv_w[]; };
+layout(set = 0, binding = 4, std430) buffer Cutoff { float cutoff[]; };
+layout(set = 0, binding = 5, std430) buffer Potential { float potential[]; };
+layout(set = 0, binding = 6, std430) buffer Force { float force[]; };
+layout(push_constant) uniform Params
+{
+    int num_points, ndim;
+    float factor;
+    int update_force;
+    int use_cutoff;
+}
+pc;
+void main()
+{
+    int index = int(gl_GlobalInvocationID.x);
+    if (index >= pc.num_points) return;
+    float dx[8], df[8];
+    bool within = true;
+    for (int d = 0; d < pc.ndim; ++d)
+    {
+        float diff = coordinates[index * pc.ndim + d] - hill_centers[d];
+        if (periods[d] > 0.0)
+        {
+            diff -= round(diff / periods[d]) * periods[d];
+        }
+        if (pc.use_cutoff != 0 && abs(diff) > cutoff[d])
+        {
+            within = false;
+            break;
+        }
+        float x = diff * hill_inv_w[d];
+        dx[d] = exp(-0.5 * x * x);
+        df[d] = -x * hill_inv_w[d] * dx[d];
+    }
+    if (within)
+    {
+        float hill_potential = 1.0;
+        for (int d = 0; d < pc.ndim; ++d)
+        {
+            hill_potential *= dx[d];
+        }
+        potential[index] += pc.factor * hill_potential;
+        if (pc.update_force != 0)
+        {
+            for (int i = 0; i < pc.ndim; ++i)
+            {
+                float tder = 1.0;
+                for (int j = 0; j < pc.ndim; ++j)
+                {
+                    tder *= (j == i) ? df[j] : dx[j];
+                }
+                force[index * pc.ndim + i] += pc.factor * tder;
+            }
+        }
+    }
+}

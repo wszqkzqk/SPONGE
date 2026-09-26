@@ -1,4 +1,4 @@
-﻿#include "RMSD.h"
+#include "RMSD.h"
 
 REGISTER_CV_STRUCTURE(CV_RMSD, "rmsd", 0);
 
@@ -376,9 +376,21 @@ void CV_RMSD::Compute(int atom_numbers, VECTOR* crd, const Boundary boundary,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need)
     {
+#ifdef USE_VULKAN
+        {
+            struct
+            {
+                int atom_numbers;
+            } params{this->atom_numbers};
+            const void* buffers[] = {this->atom, crd, this->points};
+            VK_LAUNCH(cv_rmsd_center_of_atoms, 1, 1, 1024, 1, buffers, &params,
+                      this->device_stream);
+        }
+#else
         Launch_Device_Kernel(Get_Center_of_Atoms, 1, 1024, 0,
                              this->device_stream, this->atom_numbers,
                              this->atom, crd, this->points);
+#endif
         if (rotated_comparing)
         {
             deviceMemset(this->covariance_matrix, 0, sizeof(float) * 9);
@@ -386,6 +398,50 @@ void CV_RMSD::Compute(int atom_numbers, VECTOR* crd, const Boundary boundary,
                 CONTROLLER::device_warp,
                 CONTROLLER::device_max_thread / CONTROLLER::device_warp};
             dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
+#ifdef USE_VULKAN
+            {
+                struct
+                {
+                    int atom_numbers;
+                } params{this->atom_numbers};
+                const void* buffers[] = {this->references, this->points,
+                                         this->covariance_matrix};
+                VK_LAUNCH(cv_rmsd_coordinate_covariance, gridSize.x, 1,
+                          blockSize.x, blockSize.y, buffers, &params,
+                          this->device_stream);
+            }
+            {
+                struct
+                {
+                    int dummy;
+                } params{0};
+                const void* buffers[] = {this->covariance_matrix, this->R};
+                VK_LAUNCH(cv_rmsd_rotation_matrix, 1, 1, 1, 1, buffers,
+                          &params, this->device_stream);
+            }
+            {
+                struct
+                {
+                    int atom_numbers;
+                } params{this->atom_numbers};
+                const void* buffers[] = {this->references, this->R,
+                                         this->rotated_ref};
+                VK_LAUNCH(cv_rmsd_rotated_reference,
+                          (atom_numbers + 1023) / 1024, 1, 1024, 1, buffers,
+                          &params, this->device_stream);
+            }
+            {
+                struct
+                {
+                    int atom_numbers;
+                } params{this->atom_numbers};
+                const void* buffers[] = {this->points, this->rotated_ref,
+                                         d_value,      atom,
+                                         crd_grads,    virial};
+                VK_LAUNCH(cv_rmsd_diff_and_rmsd, 1, 1, 1024, 1, buffers,
+                          &params, this->device_stream);
+            }
+#else
             Launch_Device_Kernel(Get_Coordinate_Covariance, gridSize, blockSize,
                                  0, this->device_stream, this->atom_numbers,
                                  this->references, this->points,
@@ -401,13 +457,25 @@ void CV_RMSD::Compute(int atom_numbers, VECTOR* crd, const Boundary boundary,
                                  this->device_stream, this->atom_numbers,
                                  this->points, this->rotated_ref, d_value, atom,
                                  crd_grads, virial, boundary);
+#endif
         }
         else
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int atom_numbers;
+            } params{this->atom_numbers};
+            const void* buffers[] = {this->points, this->references, d_value,
+                                     atom,         crd_grads,        virial};
+            VK_LAUNCH(cv_rmsd_diff_and_rmsd, 1, 1, 1024, 1, buffers, &params,
+                      this->device_stream);
+#else
             Launch_Device_Kernel(get_diff_and_rmsd, 1, 1024, 0,
                                  this->device_stream, this->atom_numbers,
                                  this->points, this->references, d_value, atom,
                                  crd_grads, virial, boundary);
+#endif
         }
         deviceMemcpyAsync(&value, d_value, sizeof(float),
                           deviceMemcpyDeviceToHost, this->device_stream);

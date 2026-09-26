@@ -1,0 +1,151 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Value { float value[]; };
+layout(set = 0, binding = 2, std430) buffer CrdGrads { Vec3 crd_grads[]; };
+layout(set = 0, binding = 3, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params
+{
+    int atom0, atom1, atom2, atom3;
+    Boundary boundary;
+}
+pc;
+
+struct Sad9
+{
+    float val;
+    float d[9];
+};
+
+struct SadV9
+{
+    Sad9 x, y, z;
+};
+
+Sad9 sad9_var(float v, int id)
+{
+    Sad9 f;
+    f.val = v;
+    for (int i = 0; i < 9; i++) f.d[i] = (i == id) ? 1.0 : 0.0;
+    return f;
+}
+
+Sad9 sad9_add(Sad9 a, Sad9 b)
+{
+    Sad9 f;
+    f.val = a.val + b.val;
+    for (int i = 0; i < 9; i++) f.d[i] = a.d[i] + b.d[i];
+    return f;
+}
+
+Sad9 sad9_neg(Sad9 a)
+{
+    Sad9 f;
+    f.val = -a.val;
+    for (int i = 0; i < 9; i++) f.d[i] = -a.d[i];
+    return f;
+}
+
+Sad9 sad9_mul(Sad9 a, Sad9 b)
+{
+    Sad9 f;
+    f.val = a.val * b.val;
+    for (int i = 0; i < 9; i++) f.d[i] = b.val * a.d[i] + a.val * b.d[i];
+    return f;
+}
+
+Sad9 sad9_div(Sad9 a, Sad9 b)
+{
+    Sad9 f;
+    f.val = a.val / b.val;
+    for (int i = 0; i < 9; i++) f.d[i] = (a.d[i] - f.val * b.d[i]) / b.val;
+    return f;
+}
+
+Sad9 sad9_rdiv(float c, Sad9 b)
+{
+    Sad9 f;
+    f.val = c / b.val;
+    for (int i = 0; i < 9; i++) f.d[i] = -f.val * b.d[i] / b.val;
+    return f;
+}
+
+Sad9 sad9_sqrt(Sad9 x)
+{
+    Sad9 f;
+    f.val = sqrt(x.val);
+    float df_dx = 0.5 / f.val;
+    for (int i = 0; i < 9; i++) f.d[i] = df_dx * x.d[i];
+    return f;
+}
+
+Sad9 sad9_acos(Sad9 x)
+{
+    Sad9 f;
+    f.val = acos(x.val);
+    float df_dx = -1.0 / sqrt(1.0 - x.val * x.val);
+    for (int i = 0; i < 9; i++) f.d[i] = df_dx * x.d[i];
+    return f;
+}
+
+SadV9 sadv9_var(Vec3 v, int idx, int idy, int idz)
+{
+    return SadV9(sad9_var(v.x, idx), sad9_var(v.y, idy), sad9_var(v.z, idz));
+}
+
+Sad9 sadv9_dot(SadV9 a, SadV9 b)
+{
+    return sad9_add(sad9_add(sad9_mul(a.x, b.x), sad9_mul(a.y, b.y)),
+                    sad9_mul(a.z, b.z));
+}
+
+Sad9 sad9_sub(Sad9 a, Sad9 b)
+{
+    Sad9 f;
+    f.val = a.val - b.val;
+    for (int i = 0; i < 9; i++) f.d[i] = a.d[i] - b.d[i];
+    return f;
+}
+
+SadV9 sadv9_cross(SadV9 a, SadV9 b)
+{
+    return SadV9(sad9_sub(sad9_mul(a.y, b.z), sad9_mul(a.z, b.y)),
+                 sad9_sub(sad9_mul(a.z, b.x), sad9_mul(a.x, b.z)),
+                 sad9_sub(sad9_mul(a.x, b.y), sad9_mul(a.y, b.x)));
+}
+
+void main()
+{
+    Vec3 r0 = crd[pc.atom0];
+    Vec3 r1 = crd[pc.atom1];
+    Vec3 r2 = crd[pc.atom2];
+    Vec3 r3 = crd[pc.atom3];
+    r0 = get_displacement(r1, r0, pc.boundary);
+    r1 = get_displacement(r2, r1, pc.boundary);
+    r2 = get_displacement(r3, r2, pc.boundary);
+    SadV9 dr01 = sadv9_var(r0, 0, 1, 2);
+    SadV9 dr21 = sadv9_var(r1, 3, 4, 5);
+    SadV9 dr23 = sadv9_var(r2, 6, 7, 8);
+
+    SadV9 dr_temp = sadv9_cross(dr01, dr21);
+    dr01 = sadv9_cross(dr21, dr23);
+
+    Sad9 temp = sad9_div(sad9_rdiv(1.0, sadv9_dot(dr01, dr01)),
+                         sadv9_dot(dr_temp, dr_temp));
+    temp = sad9_mul(sad9_sqrt(temp), sadv9_dot(dr01, dr_temp));
+    if (temp.val > 0.999999)
+        temp.val = 0.999999;
+    else if (temp.val < -0.999999)
+        temp.val = -0.999999;
+    temp = sad9_acos(temp);
+    if (sadv9_dot(dr_temp, dr23).val < 0.0) temp = sad9_neg(temp);
+    value[0] = temp.val;
+    Vec3 f1 = Vec3(temp.d[0], temp.d[1], temp.d[2]);
+    Vec3 f2 = Vec3(temp.d[3], temp.d[4], temp.d[5]);
+    Vec3 f3 = Vec3(temp.d[6], temp.d[7], temp.d[8]);
+    crd_grads[pc.atom0] = v3_neg(f1);
+    crd_grads[pc.atom1] = v3_sub(f1, f2);
+    crd_grads[pc.atom2] = v3_sub(f2, f3);
+    crd_grads[pc.atom3] = f3;
+    virial[0] = lt_add(lt_add(virial_from_force_dis(f1, r0),
+                              virial_from_force_dis(f2, r1)),
+                       virial_from_force_dis(f3, r2));
+}

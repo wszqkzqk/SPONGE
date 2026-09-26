@@ -1,0 +1,26 @@
+layout(set = 0, binding = 0, std430) buffer Atoms { int atoms[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer Points { Vec3 points[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    float sx = 0.0, sy = 0.0, sz = 0.0;
+    for (int i = int(tid); i < pc.atom_numbers; i += int(gl_WorkGroupSize.x))
+    {
+        Vec3 tempc = crd[atoms[i]];
+        points[i] = tempc;
+        sx += tempc.x;
+        sy += tempc.y;
+        sz += tempc.z;
+    }
+    sx = block_sum(sx);
+    sy = block_sum(sy);
+    sz = block_sum(sz);
+    Vec3 center = Vec3(sx / pc.atom_numbers, sy / pc.atom_numbers,
+                       sz / pc.atom_numbers);
+    for (int i = int(tid); i < pc.atom_numbers; i += int(gl_WorkGroupSize.x))
+    {
+        points[i] = v3_sub(points[i], center);
+    }
+}

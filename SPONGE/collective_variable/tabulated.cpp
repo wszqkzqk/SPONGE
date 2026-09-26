@@ -1,4 +1,4 @@
-﻿#include "tabulated.h"
+#include "tabulated.h"
 
 REGISTER_CV_STRUCTURE(CV_TABULATED, "tabulated", 0);
 
@@ -120,11 +120,24 @@ void CV_TABULATED::Compute(int atom_numbers, VECTOR* crd,
     {
         cv->Compute(atom_numbers, crd, boundary, CV_NEED_ALL, step);
         deviceStreamSynchronize(cv->device_stream);
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+            float cv_min, cv_max, delta;
+        } params{atom_numbers, cv_min, cv_max, delta};
+        const void* buffers[] = {parameters,     cv->d_value,  cv->crd_grads,
+                                 cv->virial,     this->d_value, this->crd_grads,
+                                 this->virial};
+        VK_LAUNCH(cv_tabulated_bspline, (atom_numbers + 1023) / 1024, 1, 1024,
+                  1, buffers, &params, this->device_stream);
+#else
         Launch_Device_Kernel(
             BSpline_interpolate1d, (atom_numbers + 1023) / 1024, 1024, 0,
             this->device_stream, atom_numbers, parameters, cv_min, cv_max,
             delta, cv->d_value, cv->crd_grads, cv->virial, this->d_value,
             this->crd_grads, this->virial);
+#endif
         deviceMemcpyAsync(&this->value, this->d_value, sizeof(float),
                           deviceMemcpyDeviceToHost, this->device_stream);
     }

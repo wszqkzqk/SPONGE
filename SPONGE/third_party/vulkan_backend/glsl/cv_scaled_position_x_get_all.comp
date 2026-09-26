@@ -1,0 +1,16 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Value { float value[]; };
+layout(set = 0, binding = 2, std430) buffer CrdGrads { Vec3 crd_grads[]; };
+layout(push_constant) uniform Params
+{
+    int atom;
+    float r11, r21, r22, r31, r32, r33;
+}
+pc;
+void main()
+{
+    Vec3 this_crd =
+        v3_mul_lt(crd[pc.atom], pc.r11, pc.r21, pc.r22, pc.r31, pc.r32, pc.r33);
+    value[0] = this_crd.x;
+    crd_grads[pc.atom].x = pc.r11;
+}

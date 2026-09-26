@@ -1,4 +1,53 @@
-﻿#include "simple_cv.h"
+#include "simple_cv.h"
+
+#ifdef USE_VULKAN
+struct CvPositionVkParams
+{
+    int atom;
+};
+static_assert(sizeof(CvPositionVkParams) == 4,
+              "CvPositionVkParams must match the GLSL push constant layout");
+
+struct CvScaledPositionVkParams
+{
+    int atom;
+    float r11, r21, r22, r31, r32, r33;
+};
+static_assert(sizeof(CvScaledPositionVkParams) == 28,
+              "CvScaledPositionVkParams must match the GLSL push constant "
+              "layout");
+
+struct CvBoxLengthVkParams
+{
+    float a11, a21, a22, a31, a32, a33;
+};
+static_assert(sizeof(CvBoxLengthVkParams) == 24,
+              "CvBoxLengthVkParams must match the GLSL push constant layout");
+
+struct CvPairVkParams
+{
+    int atom0, atom1;
+    Boundary boundary;
+};
+static_assert(sizeof(CvPairVkParams) == 60,
+              "CvPairVkParams must match the GLSL push constant layout");
+
+struct CvAngleVkParams
+{
+    int atom0, atom1, atom2;
+    Boundary boundary;
+};
+static_assert(sizeof(CvAngleVkParams) == 64,
+              "CvAngleVkParams must match the GLSL push constant layout");
+
+struct CvDihedralVkParams
+{
+    int atom0, atom1, atom2, atom3;
+    Boundary boundary;
+};
+static_assert(sizeof(CvDihedralVkParams) == 68,
+              "CvDihedralVkParams must match the GLSL push constant layout");
+#endif
 
 REGISTER_CV_STRUCTURE(CV_POSITION, "position_x", 0);
 REGISTER_CV_STRUCTURE(CV_POSITION, "position_y", 1);
@@ -88,6 +137,51 @@ void CV_POSITION::Compute(int atom_numbers, VECTOR* crd,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
+#ifdef USE_VULKAN
+        const void* buffers[] = {crd, d_value, crd_grads, virial};
+        CvPositionVkParams params{*atom};
+        if (strcmp(type_name, "position_x") == 0)
+        {
+            VK_LAUNCH(cv_position_x_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+        }
+        else if (strcmp(type_name, "position_y") == 0)
+        {
+            VK_LAUNCH(cv_position_y_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+        }
+        else if (strcmp(type_name, "position_z") == 0)
+        {
+            VK_LAUNCH(cv_position_z_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+        }
+        else
+        {
+            CvScaledPositionVkParams sparams{*atom,
+                                             boundary.rcell.a11,
+                                             boundary.rcell.a21,
+                                             boundary.rcell.a22,
+                                             boundary.rcell.a31,
+                                             boundary.rcell.a32,
+                                             boundary.rcell.a33};
+            const void* sbuffers[] = {crd, d_value, crd_grads};
+            if (strcmp(type_name, "scaled_position_x") == 0)
+            {
+                VK_LAUNCH(cv_scaled_position_x_get_all, 1, 1, 1, 1, sbuffers,
+                          &sparams, NULL);
+            }
+            else if (strcmp(type_name, "scaled_position_y") == 0)
+            {
+                VK_LAUNCH(cv_scaled_position_y_get_all, 1, 1, 1, 1, sbuffers,
+                          &sparams, NULL);
+            }
+            else if (strcmp(type_name, "scaled_position_z") == 0)
+            {
+                VK_LAUNCH(cv_scaled_position_z_get_all, 1, 1, 1, 1, sbuffers,
+                          &sparams, NULL);
+            }
+        }
+#else
         if (strcmp(type_name, "position_x") == 0)
         {
             Launch_Device_Kernel(position_x_get_all, 1, 1, 0, NULL, *atom, crd,
@@ -121,6 +215,7 @@ void CV_POSITION::Compute(int atom_numbers, VECTOR* crd,
                                  *atom, crd, boundary.rcell, d_value, crd_grads,
                                  virial);
         }
+#endif
         deviceMemcpy(&value, d_value, sizeof(float), deviceMemcpyDeviceToHost);
     }
     Record_Update_Step_Of_Fast_Computing_CV(step, need);
@@ -172,6 +267,30 @@ void CV_BOX_LENGTH::Compute(int atom_numbers, VECTOR* crd,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
+#ifdef USE_VULKAN
+        CvBoxLengthVkParams params{cell.a11, cell.a21, cell.a22,
+                                   cell.a31, cell.a32, cell.a33};
+        const void* buffers[] = {d_value, virial};
+        if (strcmp(type_name, "box_length_x") == 0)
+        {
+            VK_LAUNCH(cv_box_length_x_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+            value = cell.a11;
+        }
+        else if (strcmp(type_name, "box_length_y") == 0)
+        {
+            VK_LAUNCH(cv_box_length_y_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+            value = sqrtf(cell.a21 * cell.a21 + cell.a22 * cell.a22);
+        }
+        else if (strcmp(type_name, "box_length_z") == 0)
+        {
+            VK_LAUNCH(cv_box_length_z_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+            value = sqrtf(cell.a31 * cell.a31 + cell.a32 * cell.a32 +
+                          cell.a33 * cell.a33);
+        }
+#else
         if (strcmp(type_name, "box_length_x") == 0)
         {
             Launch_Device_Kernel(box_length_x_get_all, 1, 1, 0, NULL, cell,
@@ -191,6 +310,7 @@ void CV_BOX_LENGTH::Compute(int atom_numbers, VECTOR* crd,
             value = sqrtf(cell.a31 * cell.a31 + cell.a32 * cell.a32 +
                           cell.a33 * cell.a33);
         }
+#endif
     }
     Record_Update_Step_Of_Fast_Computing_CV(step, need);
 }
@@ -270,6 +390,21 @@ void CV_DISTANCE::Compute(int atom_numbers, VECTOR* crd,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
+#ifdef USE_VULKAN
+        CvPairVkParams params{atom[0], atom[1], boundary};
+        const void* buffers[] = {crd, d_value, crd_grads, virial};
+        if (strcmp(type_name, "distance") == 0)
+            VK_LAUNCH(cv_distance_get_all, 1, 1, 1, 1, buffers, &params, NULL);
+        else if (strcmp(type_name, "displacement_x") == 0)
+            VK_LAUNCH(cv_displacement_x_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+        else if (strcmp(type_name, "displacement_y") == 0)
+            VK_LAUNCH(cv_displacement_y_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+        else if (strcmp(type_name, "displacement_z") == 0)
+            VK_LAUNCH(cv_displacement_z_get_all, 1, 1, 1, 1, buffers, &params,
+                      NULL);
+#else
         if (strcmp(type_name, "distance") == 0)
             Launch_Device_Kernel(distance_get_all, 1, 1, 0, NULL, atom[0],
                                  atom[1], crd, boundary, d_value, crd_grads,
@@ -286,6 +421,7 @@ void CV_DISTANCE::Compute(int atom_numbers, VECTOR* crd,
             Launch_Device_Kernel(displacement_z_get_all, 1, 1, 0, NULL, atom[0],
                                  atom[1], crd, boundary, d_value, crd_grads,
                                  virial);
+#endif
         deviceMemcpy(&value, d_value, sizeof(float), deviceMemcpyDeviceToHost);
     }
     Record_Update_Step_Of_Fast_Computing_CV(step, need);
@@ -333,9 +469,15 @@ void CV_ANGLE::Compute(int atom_numbers, VECTOR* crd, const Boundary boundary,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
+#ifdef USE_VULKAN
+        CvAngleVkParams params{atom[0], atom[1], atom[2], boundary};
+        const void* buffers[] = {crd, d_value, crd_grads, virial};
+        VK_LAUNCH(cv_angle_get_all, 1, 1, 1, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(angle_get_all, 1, 1, 0, NULL, atom[0], atom[1],
                              atom[2], crd, boundary, d_value, crd_grads,
                              virial);
+#endif
         deviceMemcpy(&value, d_value, sizeof(float), deviceMemcpyDeviceToHost);
     }
     Record_Update_Step_Of_Fast_Computing_CV(step, need);
@@ -397,9 +539,15 @@ void CV_DIHEDRAL::Compute(int atom_numbers, VECTOR* crd,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
+#ifdef USE_VULKAN
+        CvDihedralVkParams params{atom[0], atom[1], atom[2], atom[3], boundary};
+        const void* buffers[] = {crd, d_value, crd_grads, virial};
+        VK_LAUNCH(cv_dihedral_get_all, 1, 1, 1, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(dihedral_get_all, 1, 1, 0, NULL, atom[0], atom[1],
                              atom[2], atom[3], crd, boundary, d_value,
                              crd_grads, virial);
+#endif
         deviceMemcpy(&value, d_value, sizeof(float), deviceMemcpyDeviceToHost);
     }
     Record_Update_Step_Of_Fast_Computing_CV(step, need);

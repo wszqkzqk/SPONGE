@@ -1,0 +1,66 @@
+layout(set = 0, binding = 0, std430) buffer Points { float points[]; };
+layout(set = 0, binding = 1, std430) buffer X { float x[]; };
+layout(set = 0, binding = 2, std430) buffer XCrdGrads { Vec3 x_crd_grads[]; };
+layout(set = 0, binding = 3, std430) buffer XBoxGrads { LTMat x_box_grads[]; };
+layout(set = 0, binding = 4, std430) buffer Y { float y[]; };
+layout(set = 0, binding = 5, std430) buffer YCrdGrads { Vec3 y_crd_grads[]; };
+layout(set = 0, binding = 6, std430) buffer YBoxGrads { LTMat y_box_grads[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float cv_min, cv_max, delta;
+}
+pc;
+
+float bspline_4_1(float x) { return 0.1666667 * x * x * x; }
+float bspline_4_2(float x)
+{
+    return -0.5 * x * x * x + 0.5 * x * x + 0.5 * x + 0.16666667;
+}
+float bspline_4_3(float x) { return 0.5 * x * x * x - x * x + 0.66666667; }
+float bspline_4_4(float x)
+{
+    return -0.16666667 * x * x * x + 0.5 * x * x - 0.5 * x + 0.16666667;
+}
+float dbspline_4_1(float x) { return -0.5 * x * x; }
+float dbspline_4_2(float x) { return 1.5 * x * x - x - 0.5; }
+float dbspline_4_3(float x) { return -1.5 * x * x + 2.0 * x; }
+float dbspline_4_4(float x) { return 0.5 * x * x - x + 0.5; }
+
+shared float shared_dy_dx;
+
+void main()
+{
+    int ti = int(gl_GlobalInvocationID.x);
+    if (gl_LocalInvocationID.x == 0u)
+    {
+        float y0 = uintBitsToFloat(0x7FC00000u);
+        float dy_dx = uintBitsToFloat(0x7FC00000u);
+        float x0 = x[0] - pc.cv_min;
+        if (x0 >= 0.0 && x0 <= pc.cv_max - pc.cv_min)
+        {
+            x0 /= pc.delta;
+            int i = int(x0) + 1;
+            x0 = float(i) - x0;
+            y0 = bspline_4_1(x0) * points[i - 1] + bspline_4_2(x0) * points[i] +
+                 bspline_4_3(x0) * points[i + 1] +
+                 bspline_4_4(x0) * points[i + 2];
+            dy_dx = (dbspline_4_1(x0) * points[i - 1] +
+                     dbspline_4_2(x0) * points[i] +
+                     dbspline_4_3(x0) * points[i + 1] +
+                     dbspline_4_4(x0) * points[i + 2]) /
+                    pc.delta;
+        }
+        shared_dy_dx = dy_dx;
+        if (gl_WorkGroupID.x == 0u)
+        {
+            y[0] = y0;
+            y_box_grads[0] = lt_scale(x_box_grads[0], dy_dx);
+        }
+    }
+    barrier();
+    if (ti < pc.atom_numbers)
+    {
+        y_crd_grads[ti] = v3_scale(x_crd_grads[ti], shared_dy_dx);
+    }
+}

@@ -1,0 +1,15 @@
+layout(set = 0, binding = 0, std430) buffer Value { float value[]; };
+layout(set = 0, binding = 1, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params
+{
+    float a11, a21, a22, a31, a32, a33;
+}
+pc;
+void main()
+{
+    float l = sqrt(pc.a31 * pc.a31 + pc.a32 * pc.a32 + pc.a33 * pc.a33);
+    value[0] = l;
+    virial[0].a31 = pc.a31 / l;
+    virial[0].a32 = pc.a32 / l;
+    virial[0].a33 = pc.a33 / l;
+}

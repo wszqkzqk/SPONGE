@@ -1,0 +1,123 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Value { float value[]; };
+layout(set = 0, binding = 2, std430) buffer CrdGrads { Vec3 crd_grads[]; };
+layout(set = 0, binding = 3, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params
+{
+    int atom0, atom1, atom2;
+    Boundary boundary;
+}
+pc;
+
+struct Sad6
+{
+    float val;
+    float d[6];
+};
+
+struct SadV6
+{
+    Sad6 x, y, z;
+};
+
+Sad6 sad6_var(float v, int id)
+{
+    Sad6 f;
+    f.val = v;
+    for (int i = 0; i < 6; i++) f.d[i] = (i == id) ? 1.0 : 0.0;
+    return f;
+}
+
+Sad6 sad6_const(float v)
+{
+    Sad6 f;
+    f.val = v;
+    for (int i = 0; i < 6; i++) f.d[i] = 0.0;
+    return f;
+}
+
+Sad6 sad6_add(Sad6 a, Sad6 b)
+{
+    Sad6 f;
+    f.val = a.val + b.val;
+    for (int i = 0; i < 6; i++) f.d[i] = a.d[i] + b.d[i];
+    return f;
+}
+
+Sad6 sad6_mul(Sad6 a, Sad6 b)
+{
+    Sad6 f;
+    f.val = a.val * b.val;
+    for (int i = 0; i < 6; i++) f.d[i] = b.val * a.d[i] + a.val * b.d[i];
+    return f;
+}
+
+Sad6 sad6_div(Sad6 a, Sad6 b)
+{
+    Sad6 f;
+    f.val = a.val / b.val;
+    for (int i = 0; i < 6; i++) f.d[i] = (a.d[i] - f.val * b.d[i]) / b.val;
+    return f;
+}
+
+Sad6 sad6_rdiv(float c, Sad6 b)
+{
+    Sad6 f;
+    f.val = c / b.val;
+    for (int i = 0; i < 6; i++) f.d[i] = -f.val * b.d[i] / b.val;
+    return f;
+}
+
+Sad6 sad6_sqrt(Sad6 x)
+{
+    Sad6 f;
+    f.val = sqrt(x.val);
+    float df_dx = 0.5 / f.val;
+    for (int i = 0; i < 6; i++) f.d[i] = df_dx * x.d[i];
+    return f;
+}
+
+Sad6 sad6_acos(Sad6 x)
+{
+    Sad6 f;
+    f.val = acos(x.val);
+    float df_dx = -1.0 / sqrt(1.0 - x.val * x.val);
+    for (int i = 0; i < 6; i++) f.d[i] = df_dx * x.d[i];
+    return f;
+}
+
+SadV6 sadv6_var(Vec3 v, int idx, int idy, int idz)
+{
+    return SadV6(sad6_var(v.x, idx), sad6_var(v.y, idy), sad6_var(v.z, idz));
+}
+
+Sad6 sadv6_dot(SadV6 a, SadV6 b)
+{
+    return sad6_add(sad6_add(sad6_mul(a.x, b.x), sad6_mul(a.y, b.y)),
+                    sad6_mul(a.z, b.z));
+}
+
+void main()
+{
+    Vec3 r1 = crd[pc.atom1];
+    Vec3 r0 = get_displacement(crd[pc.atom0], r1, pc.boundary);
+    Vec3 r2 = get_displacement(crd[pc.atom2], r1, pc.boundary);
+    SadV6 dr01 = sadv6_var(r0, 0, 1, 2);
+    SadV6 dr21 = sadv6_var(r2, 3, 4, 5);
+    Sad6 temp = sad6_div(sad6_rdiv(1.0, sadv6_dot(dr01, dr01)),
+                         sadv6_dot(dr21, dr21));
+    temp = sad6_mul(sad6_sqrt(temp), sadv6_dot(dr01, dr21));
+    if (temp.val > 0.999999)
+        temp = sad6_const(0.999999);
+    else if (temp.val < -0.999999)
+        temp = sad6_const(-0.999999);
+    temp = sad6_acos(temp);
+    value[0] = temp.val;
+    Vec3 frc01 = Vec3(temp.d[0], temp.d[1], temp.d[2]);
+    Vec3 frc21 = Vec3(temp.d[3], temp.d[4], temp.d[5]);
+    crd_grads[pc.atom0] = frc01;
+    crd_grads[pc.atom1] = v3_neg(v3_add(frc01, frc21));
+    crd_grads[pc.atom2] = frc21;
+    virial[0] = lt_add(virial_from_force_dis(frc01, r0),
+                       virial_from_force_dis(frc21, r2));
+}

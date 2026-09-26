@@ -1,4 +1,4 @@
-﻿#include "restrain_cv.h"
+#include "restrain_cv.h"
 
 static __global__ void restrain_force_and_energy(
     int atom_numbers, float* cv_value, VECTOR* crd_grads, float weight,
@@ -240,6 +240,23 @@ void RESTRAIN_CV::Restraint(int atom_numbers, VECTOR* crd, Boundary boundary,
         cv->Compute(atom_numbers, crd, boundary, need, step);
         if (!need_pressure)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int atom_numbers;
+                float weight, reference, period;
+                int ene_index;
+                int need_potential;
+            } params{atom_numbers, local_weight, reference[i],
+                     period[i],    i,            need_potential};
+            const void* buffers[] = {cv->d_value, cv->crd_grads, frc, d_ene,
+                                     this->d_ene};
+            VK_LAUNCH(bias_restrain_force_and_energy,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      cv->device_stream);
+#else
             Launch_Device_Kernel(
                 restrain_force_and_energy,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -248,9 +265,28 @@ void RESTRAIN_CV::Restraint(int atom_numbers, VECTOR* crd, Boundary boundary,
                 atom_numbers, cv->d_value, cv->crd_grads, local_weight,
                 reference[i], period[i], frc, d_ene, this->d_ene + i,
                 need_potential);
+#endif
         }
         else
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int atom_numbers;
+                float weight, reference, period;
+                int ene_index;
+                int need_potential;
+            } params{atom_numbers, local_weight, reference[i],
+                     period[i],    i,            need_potential};
+            const void* buffers[] = {cv->d_value, cv->crd_grads, cv->virial,
+                                     frc,         d_ene,         this->d_ene,
+                                     d_virial};
+            VK_LAUNCH(bias_restrain_force_and_energy_and_virial,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      cv->device_stream);
+#else
             Launch_Device_Kernel(
                 restrain_force_and_energy_and_virial,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -259,6 +295,7 @@ void RESTRAIN_CV::Restraint(int atom_numbers, VECTOR* crd, Boundary boundary,
                 atom_numbers, cv->d_value, cv->crd_grads, cv->virial,
                 local_weight, reference[i], period[i], frc, d_ene,
                 this->d_ene + i, d_virial, need_potential);
+#endif
         }
     }
 }

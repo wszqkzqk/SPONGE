@@ -1,0 +1,37 @@
+layout(set = 0, binding = 0, std430) buffer A_ { Vec3 A[]; };
+layout(set = 0, binding = 1, std430) buffer B_ { Vec3 B[]; };
+layout(set = 0, binding = 2, std430) buffer Cov { float covariance[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int atom_i = int(gl_WorkGroupID.x * gl_WorkGroupSize.x *
+                         gl_WorkGroupSize.y +
+                     gl_LocalInvocationID.x * gl_WorkGroupSize.y +
+                     gl_LocalInvocationID.y);
+    float c11 = 0.0, c12 = 0.0, c13 = 0.0;
+    float c21 = 0.0, c22 = 0.0, c23 = 0.0;
+    float c31 = 0.0, c32 = 0.0, c33 = 0.0;
+    if (atom_i < pc.atom_numbers)
+    {
+        Vec3 a = A[atom_i];
+        Vec3 b = B[atom_i];
+        c11 = a.x * b.x;
+        c12 = a.x * b.y;
+        c13 = a.x * b.z;
+        c21 = a.y * b.x;
+        c22 = a.y * b.y;
+        c23 = a.y * b.z;
+        c31 = a.z * b.x;
+        c32 = a.z * b.y;
+        c33 = a.z * b.z;
+    }
+    warp_afadd(covariance[0], c11);
+    warp_afadd(covariance[1], c12);
+    warp_afadd(covariance[2], c13);
+    warp_afadd(covariance[3], c21);
+    warp_afadd(covariance[4], c22);
+    warp_afadd(covariance[5], c23);
+    warp_afadd(covariance[6], c31);
+    warp_afadd(covariance[7], c32);
+    warp_afadd(covariance[8], c33);
+}

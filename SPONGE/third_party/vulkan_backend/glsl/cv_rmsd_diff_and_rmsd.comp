@@ -1,0 +1,36 @@
+layout(set = 0, binding = 0, std430) buffer Points { Vec3 points[]; };
+layout(set = 0, binding = 1, std430) buffer RotRef { Vec3 rotated_reference[]; };
+layout(set = 0, binding = 2, std430) buffer Value { float d_value[]; };
+layout(set = 0, binding = 3, std430) buffer Atom { int atom[]; };
+layout(set = 0, binding = 4, std430) buffer CrdGrads { Vec3 crd_grads[]; };
+layout(set = 0, binding = 5, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    if (tid == 0u) virial[0] = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    barrier();
+    float rmsd = 0.0;
+    for (int i = int(tid); i < pc.atom_numbers; i += int(gl_WorkGroupSize.x))
+    {
+        Vec3 diff = v3_sub(points[i], rotated_reference[i]);
+        rmsd += diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+    }
+    rmsd = block_sum(rmsd);
+    float rmsd0 = sqrt(rmsd / pc.atom_numbers);
+    if (tid == 0u) d_value[0] = rmsd0;
+    rmsd0 *= pc.atom_numbers;
+    LTMat local_virial = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (int i = int(tid); i < pc.atom_numbers; i += int(gl_WorkGroupSize.x))
+    {
+        int atom_i = atom[i];
+        Vec3 diff = v3_sub(points[i], rotated_reference[i]);
+        diff.x /= rmsd0;
+        diff.y /= rmsd0;
+        diff.z /= rmsd0;
+        crd_grads[atom_i] = diff;
+        local_virial = lt_add(local_virial,
+                              virial_from_force_dis(diff, points[i]));
+    }
+    aadd_lt(virial[0], local_virial);
+}

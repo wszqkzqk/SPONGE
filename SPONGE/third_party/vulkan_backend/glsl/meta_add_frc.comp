@@ -1,0 +1,14 @@
+layout(set = 0, binding = 0, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 1, std430) buffer CvGrad { Vec3 cv_grad[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float dheight_dcv;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    frc[i] = v3_sub(frc[i], v3_scale(cv_grad[i], pc.dheight_dcv));
+}

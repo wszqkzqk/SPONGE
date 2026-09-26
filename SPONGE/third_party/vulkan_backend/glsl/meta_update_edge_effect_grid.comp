@@ -1,0 +1,76 @@
+layout(set = 0, binding = 0, std430) buffer NumPoints { int num_points[]; };
+layout(set = 0, binding = 1, std430) buffer Lower { float lower[]; };
+layout(set = 0, binding = 2, std430) buffer Spacing { float spacing[]; };
+layout(set = 0, binding = 3, std430) buffer Sigmas { float sigmas[]; };
+layout(set = 0, binding = 4, std430) buffer Periods { float periods[]; };
+layout(set = 0, binding = 5, std430) buffer ScatterCrd { float scatter_coordinates[]; };
+layout(set = 0, binding = 6, std430) buffer NormalLse { float normal_lse[]; };
+layout(set = 0, binding = 7, std430) buffer NormalForce { float normal_force[]; };
+layout(push_constant) uniform Params
+{
+    int total_size, ndim, scatter_size;
+    int do_negative;
+}
+pc;
+void main()
+{
+    int gidx = int(gl_GlobalInvocationID.x);
+    if (gidx >= pc.total_size) return;
+    float values[8];
+    float nf[8];
+    int flat_index = gidx;
+    for (int d = 0; d < pc.ndim; ++d)
+    {
+        int i = flat_index % num_points[d];
+        flat_index /= num_points[d];
+        values[d] = lower[d] + (float(i) + 0.5) * spacing[d];
+        nf[d] = 0.0;
+    }
+    float max_log = -1.0e30;
+    float sum_exp = 0.0;
+    for (int index = 0; index < pc.scatter_size; ++index)
+    {
+        float diffs[8];
+        float pregauss = 0.0;
+        float hill_potential = 1.0;
+        for (int d = 0; d < pc.ndim; ++d)
+        {
+            float diff = values[d] - scatter_coordinates[index * pc.ndim + d];
+            if (periods[d] != 0.0)
+            {
+                diff -= round(diff / periods[d]) * periods[d];
+            }
+            diffs[d] = diff;
+            float scaled = diff * sigmas[d];
+            float gauss = exp(-0.5 * scaled * scaled);
+            pregauss -= 0.5 * scaled * scaled;
+            hill_potential *= gauss;
+        }
+        if (pc.do_negative != 0)
+        {
+            for (int d = 0; d < pc.ndim; ++d)
+            {
+                nf[d] += -diffs[d] * sigmas[d] * sigmas[d] * hill_potential;
+            }
+        }
+        if (pregauss > max_log)
+        {
+            sum_exp = (sum_exp == 0.0)
+                          ? 1.0
+                          : sum_exp * exp(max_log - pregauss) + 1.0;
+            max_log = pregauss;
+        }
+        else
+        {
+            sum_exp += exp(pregauss - max_log);
+        }
+    }
+    normal_lse[gidx] = max_log + log(sum_exp);
+    if (pc.do_negative != 0)
+    {
+        for (int d = 0; d < pc.ndim; ++d)
+        {
+            normal_force[gidx * pc.ndim + d] = nf[d];
+        }
+    }
+}

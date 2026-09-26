@@ -1,0 +1,31 @@
+layout(set = 0, binding = 0, std430) buffer CvValue { float cv_value[]; };
+layout(set = 0, binding = 1, std430) buffer CrdGrads { Vec3 crd_grads[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 3, std430) buffer Energy { float energy[]; };
+layout(set = 0, binding = 4, std430) buffer SelfEne { float self_ene[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float weight;
+    int ene_index;
+    int need_potential;
+}
+pc;
+void main()
+{
+    if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u)
+    {
+        if (pc.need_potential != 0)
+        {
+            atomicAdd(energy[0], pc.weight * cv_value[0]);
+            self_ene[pc.ene_index] = pc.weight * cv_value[0];
+        }
+    }
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < uint(pc.atom_numbers);
+         i += stride)
+    {
+        Vec3 force = v3_scale(crd_grads[i], -pc.weight);
+        aadd_v3(frc[i], force);
+    }
+}

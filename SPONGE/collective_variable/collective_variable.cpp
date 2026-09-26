@@ -1,4 +1,4 @@
-﻿#include "collective_variable.h"
+#include "collective_variable.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -1289,7 +1289,7 @@ void COLLECTIVE_VARIABLE_PROTOTYPE::Super_Initial(
     Device_Malloc_Safely((void**)&d_value, sizeof(float));
     deviceMemset(crd_grads, 0, sizeof(VECTOR) * total_atom_numbers);
     deviceMemset(virial, 0, sizeof(LTMatrix3));
-#ifdef GPU_ARCH_NAME
+#if defined(GPU_ARCH_NAME) || defined(USE_VULKAN)
     deviceStreamCreate(&device_stream);
 #endif
     last_update_step[CV_NEED_GPU_VALUE] = -1;

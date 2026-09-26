@@ -1,0 +1,15 @@
+layout(set = 0, binding = 0, std430) buffer Ref { Vec3 reference[]; };
+layout(set = 0, binding = 1, std430) buffer R_ { float R[]; };
+layout(set = 0, binding = 2, std430) buffer Out { Vec3 rotated_reference[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    Vec3 inp_crd = reference[atom_i];
+    Vec3 out_crd;
+    out_crd.x = inp_crd.x * R[0] + inp_crd.y * R[3] + inp_crd.z * R[6];
+    out_crd.y = inp_crd.x * R[1] + inp_crd.y * R[4] + inp_crd.z * R[7];
+    out_crd.z = inp_crd.x * R[2] + inp_crd.y * R[5] + inp_crd.z * R[8];
+    rotated_reference[atom_i] = out_crd;
+}

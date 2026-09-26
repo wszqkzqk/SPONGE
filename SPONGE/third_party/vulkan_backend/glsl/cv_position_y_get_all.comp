@@ -1,0 +1,13 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Value { float value[]; };
+layout(set = 0, binding = 2, std430) buffer CrdGrads { Vec3 crd_grads[]; };
+layout(set = 0, binding = 3, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params { int atom; } pc;
+void main()
+{
+    Vec3 this_crd = crd[pc.atom];
+    value[0] = this_crd.y;
+    Vec3 this_frc = Vec3(0.0, 1.0, 0.0);
+    crd_grads[pc.atom] = this_frc;
+    virial[0] = virial_from_force_dis(this_crd, this_frc);
+}

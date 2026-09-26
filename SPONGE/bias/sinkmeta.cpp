@@ -1,7 +1,14 @@
-﻿#include "sinkmeta.h"
+#include "sinkmeta.h"
 
 #include "../utils/float_classification.hpp"
 #include "../utils/h5md/h5_structural_state.hpp"
+
+#ifdef USE_VULKAN
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static float Evaluate_Gaussian_Switch(const float rij, const float center,
                                       const float inv_w, const float period,
@@ -1714,12 +1721,30 @@ void META::Edge_Effect(const int dim, const int scatter_size)
             mscatter->Alloc_Device();
             deviceMemcpy(d_hill_inv_w, esigmas.data(), sizeof(float) * ndim,
                          deviceMemcpyHostToDevice);
+#ifdef USE_VULKAN
+            struct
+            {
+                int total_size, ndim, scatter_size;
+                int do_negative;
+            } params{total, ndim, scatter_size, static_cast<int>(do_negative)};
+            const void* buffers[] = {mgrid->d_num_points,
+                                     mgrid->d_lower,
+                                     mgrid->d_spacing,
+                                     d_hill_inv_w,
+                                     mscatter->d_periods,
+                                     mscatter->d_coordinates,
+                                     mgrid->d_normal_lse,
+                                     mgrid->d_normal_force};
+            VK_LAUNCH(meta_update_edge_effect_grid, total, 1, 32, 1, buffers,
+                      &params, NULL);
+#else
             Launch_Device_Kernel(Update_Edge_Effect_Grid, total, 32, 0, NULL,
                                  total, ndim, scatter_size, mgrid->d_num_points,
                                  mgrid->d_lower, mgrid->d_spacing, d_hill_inv_w,
                                  mscatter->d_periods, mscatter->d_coordinates,
                                  static_cast<int>(do_negative),
                                  mgrid->d_normal_lse, mgrid->d_normal_force);
+#endif
             mgrid->Sync_To_Host();
             for (int gidx = 0; gidx < mgrid->total_size; ++gidx)
             {
@@ -1944,12 +1969,34 @@ void META::Add_Potential(float temp, int steps)
             deviceMemcpy(d_hill_inv_w, h_inv_w, sizeof(float) * ndim,
                          deviceMemcpyHostToDevice);
             int update_force = (!mscatter->force.empty()) ? 1 : 0;
+#ifdef USE_VULKAN
+            struct
+            {
+                int num_points, ndim;
+                float factor;
+                int update_force;
+                int use_cutoff;
+            } params{scatter_size, ndim, factor, update_force,
+                     do_cutoff ? 1 : 0};
+            const void* buffers[] = {mscatter->d_coordinates,
+                                     mscatter->d_periods,
+                                     d_hill_centers,
+                                     d_hill_inv_w,
+                                     d_cutoff,
+                                     mscatter->d_potential,
+                                     vk_or_dummy(mscatter->d_force,
+                                                 mscatter->d_potential)};
+            VK_LAUNCH(meta_update_scatter_with_hill,
+                      (scatter_size + 255) / 256, 1, 256, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(
                 Update_Scatter_With_Hill, (scatter_size + 255) / 256, 256, 0,
                 NULL, scatter_size, ndim, mscatter->d_coordinates,
                 mscatter->d_periods, d_hill_centers, d_hill_inv_w, factor,
                 update_force, do_cutoff ? 1 : 0, d_cutoff,
                 mscatter->d_potential, mscatter->d_force);
+#endif
             mscatter->Sync_To_Host();
         }
         // Update grid potential and force with hill on device
@@ -1969,12 +2016,30 @@ void META::Add_Potential(float temp, int steps)
             deviceMemcpy(d_hill_periods, h_periods, sizeof(float) * ndim,
                          deviceMemcpyHostToDevice);
             int update_force = (!subhill && !mgrid->force.empty()) ? 1 : 0;
+#ifdef USE_VULKAN
+            struct
+            {
+                int total_size, ndim;
+                float factor;
+                int update_force;
+            } params{mgrid->total_size, ndim, factor, update_force};
+            const void* buffers[] = {
+                mgrid->d_num_points, mgrid->d_lower,
+                mgrid->d_spacing,    d_hill_centers,
+                d_hill_inv_w,        d_hill_periods,
+                mgrid->d_potential,
+                vk_or_dummy(mgrid->d_force, mgrid->d_potential)};
+            VK_LAUNCH(meta_update_grid_with_hill,
+                      (mgrid->total_size + 255) / 256, 1, 256, 1, buffers,
+                      &params, NULL);
+#else
             Launch_Device_Kernel(
                 Update_Grid_With_Hill, (mgrid->total_size + 255) / 256, 256, 0,
                 NULL, mgrid->total_size, ndim, mgrid->d_num_points,
                 mgrid->d_lower, mgrid->d_spacing, d_hill_centers, d_hill_inv_w,
                 d_hill_periods, factor, update_force, mgrid->d_potential,
                 mgrid->d_force);
+#endif
             mgrid->Sync_To_Host();
         }
     }
@@ -2742,19 +2807,50 @@ void META::Meta_Force_With_Energy_And_Virial(int atom_numbers, VECTOR* frc,
 
     for (int i = 0; i < cvs.size(); ++i)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+            float dheight_dcv;
+        } frc_params{atom_numbers, Dpotential_local[i]};
+        const void* frc_buffers[] = {frc, cvs[i]->crd_grads};
+        VK_LAUNCH(meta_add_frc, atom_numbers + 31 / 32, 1, 32, 1, frc_buffers,
+                  &frc_params, NULL);
+#else
         Launch_Device_Kernel(Add_Frc, (atom_numbers + 31 / 32), 32, 0, NULL,
                              atom_numbers, frc, cvs[i]->crd_grads,
                              Dpotential_local[i]);
+#endif
         if (need_pressure)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                float dU_dCV;
+            } virial_params{Dpotential_local[i]};
+            const void* virial_buffers[] = {d_virial, cvs[i]->virial};
+            VK_LAUNCH(meta_add_virial, 1, 1, 1, 1, virial_buffers,
+                      &virial_params, NULL);
+#else
             Launch_Device_Kernel(Add_Virial, 1, 1, 0, NULL, d_virial,
                                  Dpotential_local[i], cvs[i]->virial);
+#endif
         }
     }
     if (need_potential)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            float to_add;
+        } potential_params{potential_local};
+        const void* potential_buffers[] = {d_potential};
+        VK_LAUNCH(meta_add_potential, 1, 1, 1, 1, potential_buffers,
+                  &potential_params, NULL);
+#else
         Launch_Device_Kernel(Add_Potential_Kernel, 1, 1, 0, NULL, d_potential,
                              potential_local);
+#endif
     }
 }
 

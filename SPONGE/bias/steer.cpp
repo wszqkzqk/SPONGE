@@ -1,4 +1,4 @@
-﻿#include "steer.h"
+#include "steer.h"
 
 static __global__ void steer_force_and_energy(int atom_numbers, float* cv_value,
                                               VECTOR* crd_grads, float weight,
@@ -159,6 +159,22 @@ void STEER_CV::Steer(int atom_numbers, VECTOR* crd, Boundary boundary, int step,
         cv->Compute(atom_numbers, crd, boundary, need, step);
         if (!need_pressure)
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int atom_numbers;
+                float weight;
+                int ene_index;
+                int need_potential;
+            } params{atom_numbers, weight[i], i, need_potential};
+            const void* buffers[] = {cv->d_value, cv->crd_grads, frc, d_ene,
+                                     this->d_ene};
+            VK_LAUNCH(bias_steer_force_and_energy,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      cv->device_stream);
+#else
             Launch_Device_Kernel(
                 steer_force_and_energy,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -166,9 +182,27 @@ void STEER_CV::Steer(int atom_numbers, VECTOR* crd, Boundary boundary, int step,
                 CONTROLLER::device_max_thread, 0, cv->device_stream,
                 atom_numbers, cv->d_value, cv->crd_grads, weight[i], frc, d_ene,
                 this->d_ene + i, need_potential);
+#endif
         }
         else
         {
+#ifdef USE_VULKAN
+            struct
+            {
+                int atom_numbers;
+                float weight;
+                int ene_index;
+                int need_potential;
+            } params{atom_numbers, weight[i], i, need_potential};
+            const void* buffers[] = {cv->d_value, cv->crd_grads, cv->virial,
+                                     frc,         d_ene,         this->d_ene,
+                                     d_virial};
+            VK_LAUNCH(bias_steer_force_and_energy_and_virial,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      cv->device_stream);
+#else
             Launch_Device_Kernel(
                 steer_force_and_energy_and_virial,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -176,6 +210,7 @@ void STEER_CV::Steer(int atom_numbers, VECTOR* crd, Boundary boundary, int step,
                 CONTROLLER::device_max_thread, 0, cv->device_stream,
                 atom_numbers, cv->d_value, cv->crd_grads, cv->virial, weight[i],
                 frc, d_ene, this->d_ene + i, d_virial, need_potential);
+#endif
         }
     }
 }

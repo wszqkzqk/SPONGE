@@ -1,0 +1,23 @@
+layout(set = 0, binding = 0, std430) buffer FirstNbrs { int firstnbrs[]; };
+layout(set = 0, binding = 1, std430) buffer NumNbrs { int numnbrs[]; };
+layout(set = 0, binding = 2, std430) buffer JList { int jlist[]; };
+layout(set = 0, binding = 3, std430) buffer HVal { float h_val[]; };
+layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 5, std430) buffer Eta { float eta[]; };
+layout(set = 0, binding = 6, std430) buffer P { float p[]; };
+layout(set = 0, binding = 7, std430) buffer ApBuf { float Ap[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_types[i];
+    float sum = eta[type_i] * p[i];
+    int begin = firstnbrs[i];
+    int end = begin + numnbrs[i];
+    for (int idx = begin; idx < end; idx++)
+    {
+        sum += h_val[idx] * p[jlist[idx]];
+    }
+    Ap[i] = sum;
+}

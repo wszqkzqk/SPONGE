@@ -1,0 +1,170 @@
+layout(set = 0, binding = 0, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 1, std430) buffer Mass { float mass[]; };
+layout(set = 0, binding = 2, std430) buffer DeltaBuf { float Delta[]; };
+layout(set = 0, binding = 3, std430) buffer DeltaLp { float Delta_lp[]; };
+layout(set = 0, binding = 4, std430) buffer DeltaLpTemp { float Delta_lp_temp[]; };
+layout(set = 0, binding = 5, std430) buffer DDeltaLp { float dDelta_lp[]; };
+layout(set = 0, binding = 6, std430) buffer BoS { float bo_s[]; };
+layout(set = 0, binding = 7, std430) buffer BoPi { float bo_pi[]; };
+layout(set = 0, binding = 8, std430) buffer BoPi2 { float bo_pi2[]; };
+layout(set = 0, binding = 9, std430) buffer POvun1 { float p_ovun1[]; };
+layout(set = 0, binding = 10, std430) buffer DeS { float De_s[]; };
+layout(set = 0, binding = 11, std430) buffer PLp2 { float p_lp2[]; };
+layout(set = 0, binding = 12, std430) buffer Valency { float valency[]; };
+layout(set = 0, binding = 13, std430) buffer POvun2 { float p_ovun2[]; };
+layout(set = 0, binding = 14, std430) buffer POvun5 { float p_ovun5[]; };
+layout(set = 0, binding = 15, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 16, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 17, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 18, std430) buffer CdDeltaBuf { float CdDelta[]; };
+layout(set = 0, binding = 19, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 20, std430) buffer EnergyOvunSum { float energy_ovun_sum[]; };
+layout(set = 0, binding = 21, std430) buffer EnergyElpSum { float energy_elp_sum[]; };
+layout(set = 0, binding = 22, std430) buffer BondCount { int bond_count[]; };
+layout(set = 0, binding = 23, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 24, std430) buffer BondNbr { int bond_nbr[]; };
+layout(set = 0, binding = 25, std430) buffer BondIdx { int bond_idx[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int atom_type_numbers;
+    float p_ovun3;
+    float p_ovun4;
+    float p_ovun6;
+    float p_ovun7;
+    float p_ovun8;
+    int need_atom_energy;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_type[i];
+    float m = mass[type_i];
+    float dfvl = (m > 21.0) ? 0.0 : 1.0;
+    float val = valency[type_i];
+
+    float s_ovun1 = 0.0;
+    float s_ovun2 = 0.0;
+
+    int start = bond_offset[i];
+    int end = start + bond_count[i];
+    for (int kk = start; kk < end; kk++)
+    {
+        int j = bond_nbr[kk];
+        int b = bond_idx[kk];
+        float b_s = bo_s[b];
+        float b_pi = bo_pi[b];
+        float b_pi2 = bo_pi2[b];
+        float bo_total = b_s + b_pi + b_pi2;
+
+        if (bo_total < 1e-10) continue;
+
+        int type_j = atom_type[j];
+        int pair_idx = type_i * pc.atom_type_numbers + type_j;
+
+        s_ovun1 += p_ovun1[pair_idx] * De_s[pair_idx] * bo_total;
+
+        float dfvl_j = (mass[type_j] > 21.0) ? 0.0 : 1.0;
+        s_ovun2 += (Delta[j] - dfvl_j * Delta_lp_temp[j]) * (b_pi + b_pi2);
+    }
+
+    float en_ovun = 0.0;
+    float en_lp = 0.0;
+    float cdd = 0.0;
+
+    float delta_lp_i = Delta_lp[i];
+    float p_lp2_val = p_lp2[type_i];
+    float expvd2 = exp(-75.0 * delta_lp_i);
+    float inv_expvd2 = 1.0 / (1.0 + expvd2);
+
+    en_lp = p_lp2_val * delta_lp_i * inv_expvd2;
+    float dElp = p_lp2_val * inv_expvd2 +
+                 75.0 * p_lp2_val * delta_lp_i * expvd2 * inv_expvd2 *
+                     inv_expvd2;
+    cdd += dElp * dDelta_lp[i];
+
+    float exp_ovun1 = pc.p_ovun3 * exp(pc.p_ovun4 * s_ovun2);
+    float inv_exp_ovun1 = 1.0 / (1.0 + exp_ovun1);
+    float Delta_lpcorr = Delta[i] - (dfvl * Delta_lp_temp[i]) * inv_exp_ovun1;
+
+    float p_ovun2_val = p_ovun2[type_i];
+    float exp_ovun2 = exp(p_ovun2_val * Delta_lpcorr);
+    float inv_exp_ovun2 = 1.0 / (1.0 + exp_ovun2);
+
+    float DlpVi = 1.0 / (Delta_lpcorr + val + 1e-8);
+    float CEover1 = Delta_lpcorr * DlpVi * inv_exp_ovun2;
+
+    float e_ov = s_ovun1 * CEover1;
+    en_ovun += e_ov;
+
+    float CEover2 =
+        s_ovun1 * DlpVi * inv_exp_ovun2 *
+        (1.0 -
+         Delta_lpcorr * (DlpVi + p_ovun2_val * exp_ovun2 * inv_exp_ovun2));
+    float CEover3 = CEover2 * (1.0 - dfvl * dDelta_lp[i] * inv_exp_ovun1);
+    float CEover4 = CEover2 * (dfvl * Delta_lp_temp[i]) * pc.p_ovun4 *
+                    exp_ovun1 * inv_exp_ovun1 * inv_exp_ovun1;
+
+    cdd += CEover3;
+
+    float p_ovun5_val = p_ovun5[type_i];
+    float exp_ovun2n = 1.0 / exp_ovun2;
+    float exp_ovun6 = exp(pc.p_ovun6 * Delta_lpcorr);
+    float exp_ovun8 = pc.p_ovun7 * exp(pc.p_ovun8 * s_ovun2);
+    float inv_exp_ovun2n = 1.0 / (1.0 + exp_ovun2n);
+    float inv_exp_ovun8 = 1.0 / (1.0 + exp_ovun8);
+
+    float e_un =
+        -p_ovun5_val * (1.0 - exp_ovun6) * inv_exp_ovun2n * inv_exp_ovun8;
+    en_ovun += e_un;
+
+    float CEunder1 = inv_exp_ovun2n *
+                     (p_ovun5_val * pc.p_ovun6 * exp_ovun6 * inv_exp_ovun8 +
+                      p_ovun2_val * e_un * exp_ovun2n);
+    float CEunder2 = -e_un * pc.p_ovun8 * exp_ovun8 * inv_exp_ovun8;
+    float CEunder3 = CEunder1 * (1.0 - dfvl * dDelta_lp[i] * inv_exp_ovun1);
+
+    cdd += CEunder3;
+
+    afadd(CdDelta[i], cdd);
+
+    float CEunder4 = CEunder1 * (dfvl * Delta_lp_temp[i]) * pc.p_ovun4 *
+                         exp_ovun1 * inv_exp_ovun1 * inv_exp_ovun1 +
+                     CEunder2;
+    float CE_sum_4 = CEover4 + CEunder4;
+
+    for (int kk = start; kk < end; kk++)
+    {
+        int j = bond_nbr[kk];
+        int b = bond_idx[kk];
+        float b_s = bo_s[b];
+        float b_pi = bo_pi[b];
+        float b_pi2 = bo_pi2[b];
+        float bo_total = b_s + b_pi + b_pi2;
+
+        if (bo_total < 1e-10) continue;
+
+        int type_j = atom_type[j];
+        int pair_idx = type_i * pc.atom_type_numbers + type_j;
+
+        float de_dbo_s = CEover1 * p_ovun1[pair_idx] * De_s[pair_idx];
+        float de_dbo_pi =
+            de_dbo_s + CE_sum_4 * (Delta[j] - dfvl * Delta_lp_temp[j]);
+        float de_dbo_pi2 = de_dbo_pi;
+
+        afadd(dE_dBO_s[b], de_dbo_s);
+        afadd(dE_dBO_pi[b], de_dbo_pi);
+        afadd(dE_dBO_pi2[b], de_dbo_pi2);
+
+        float dfvl_j = (mass[type_j] > 21.0) ? 0.0 : 1.0;
+        float term =
+            CE_sum_4 * (1.0 - dfvl_j * dDelta_lp[j]) * (b_pi + b_pi2);
+        afadd(CdDelta[j], term);
+    }
+
+    if (pc.need_atom_energy != 0) afadd(atom_energy[i], en_ovun + en_lp);
+    afadd(energy_ovun_sum[0], en_ovun);
+    afadd(energy_elp_sum[0], en_lp);
+}

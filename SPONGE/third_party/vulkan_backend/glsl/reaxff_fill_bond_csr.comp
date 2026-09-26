@@ -1,0 +1,20 @@
+layout(set = 0, binding = 0, std430) buffer BondI { int bond_i[]; };
+layout(set = 0, binding = 1, std430) buffer BondJ { int bond_j[]; };
+layout(set = 0, binding = 2, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 3, std430) buffer FillCount { int fill_count[]; };
+layout(set = 0, binding = 4, std430) buffer BondNbr { int bond_nbr[]; };
+layout(set = 0, binding = 5, std430) buffer BondIdx { int bond_idx[]; };
+layout(push_constant) uniform Params { int num_bonds; } pc;
+void main()
+{
+    int b = int(gl_GlobalInvocationID.x);
+    if (b >= pc.num_bonds) return;
+    int i = bond_i[b];
+    int j = bond_j[b];
+    int pos_i = bond_offset[i] + atomicAdd(fill_count[i], 1);
+    bond_nbr[pos_i] = j;
+    bond_idx[pos_i] = b;
+    int pos_j = bond_offset[j] + atomicAdd(fill_count[j], 1);
+    bond_nbr[pos_j] = i;
+    bond_idx[pos_j] = b;
+}

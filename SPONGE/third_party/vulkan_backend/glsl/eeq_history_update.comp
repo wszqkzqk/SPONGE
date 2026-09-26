@@ -1,0 +1,23 @@
+layout(set = 0, binding = 0, std430) buffer Hist { float hist[]; };
+layout(set = 0, binding = 1, std430) buffer X { float x[]; };
+layout(push_constant) uniform Params
+{
+    int n;
+    int stride;
+    int nprev;
+    int hist_size;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    int slot = pc.nprev;
+    if (slot >= pc.hist_size)
+    {
+        for (int k = 0; k + 1 < pc.hist_size; k++)
+            hist[k * pc.stride + i] = hist[(k + 1) * pc.stride + i];
+        slot = pc.hist_size - 1;
+    }
+    hist[slot * pc.stride + i] = x[i];
+}

@@ -1,0 +1,171 @@
+struct HBEntry
+{
+    float r0_hb;
+    float p_hb1;
+    float p_hb2;
+    float p_hb3;
+};
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 2, std430) buffer IsHydrogen { int is_hydrogen[]; };
+layout(set = 0, binding = 3, std430) buffer HBInfo { ivec2 hb_info[]; };
+layout(set = 0, binding = 4, std430) buffer HBEntries { HBEntry hb_entries[]; };
+layout(set = 0, binding = 5, std430) buffer BoS { float bo_s[]; };
+layout(set = 0, binding = 6, std430) buffer BoPi { float bo_pi[]; };
+layout(set = 0, binding = 7, std430) buffer BoPi2 { float bo_pi2[]; };
+layout(set = 0, binding = 8, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 9, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 10, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 11, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 12, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 13, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 14, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 15, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 16, std430) buffer EnergyHBSum { float energy_hb_sum[]; };
+layout(set = 0, binding = 17, std430) buffer BondCount { int bond_count[]; };
+layout(set = 0, binding = 18, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 19, std430) buffer BondNbr { int bond_nbr[]; };
+layout(set = 0, binding = 20, std430) buffer BondIdx { int bond_idx[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int h = int(gl_GlobalInvocationID.x);
+    if (h >= pc.atom_numbers) return;
+    if (is_hydrogen[h] == 0) return;
+    int type_h = atom_type[h];
+    Vec3 rh = crd[h];
+
+    float en_hb = 0.0;
+
+    int bc_h = bond_count[h];
+    int bo_h = bond_offset[h];
+    int nl_count = int(nl_raw[h].x);
+    int nl_base = h * pc.max_neighbor_numbers;
+    for (int pd = 0; pd < bc_h; pd++)
+    {
+        int b_dh = bond_idx[bo_h + pd];
+        int d = bond_nbr[bo_h + pd];
+        int type_d = atom_type[d];
+        float bo_dh_val = bo_s[b_dh] + bo_pi[b_dh] + bo_pi2[b_dh];
+        if (bo_dh_val < 0.01) continue;
+
+        Vec3 rd = crd[d];
+        Vec3 ddh = get_displacement_periodic(rd, rh, pc.boundary);
+        float r_dh = v3_len(ddh);
+
+        for (int pa = 0; pa < nl_count; pa++)
+        {
+            int a = nl_serial[nl_base + pa];
+            if (a == d) continue;
+            int type_a = atom_type[a];
+
+            int hb_idx = (type_d * pc.atom_type_numbers + type_h) *
+                             pc.atom_type_numbers +
+                         type_a;
+            ivec2 info = hb_info[hb_idx];
+            if (info.y == 0) continue;
+
+            Vec3 ra = crd[a];
+            Vec3 dah = get_displacement_periodic(ra, rh, pc.boundary);
+            float r_ah = v3_len(dah);
+            if (r_ah > 7.5) continue;
+
+            float cos_theta = v3_dot(ddh, dah) / (r_dh * r_ah);
+            cos_theta = clamp(cos_theta, -1.0, 1.0);
+            float theta = acos(cos_theta);
+
+            float sin_half_theta = sin(theta * 0.5);
+            float sin_p4 = sin_half_theta * sin_half_theta * sin_half_theta *
+                           sin_half_theta;
+
+            for (int e = 0; e < info.y; e++)
+            {
+                HBEntry param = hb_entries[info.x + e];
+
+                Sad1 s_bo_dh = Sad1(bo_dh_val, 1.0);
+                Sad1 s_f_hb = sad1_rsub_c(
+                    1.0, sad1_exp(sad1_scale(s_bo_dh, -param.p_hb2)));
+
+                float exp_hb3 = exp(-param.p_hb3 *
+                                    (param.r0_hb / r_ah + r_ah / param.r0_hb -
+                                     2.0));
+
+                Sad1 s_en_total = sad1_scale(
+                    sad1_scale(sad1_scale(s_f_hb, param.p_hb1), exp_hb3),
+                    sin_p4);
+
+                afadd(dE_dBO_s[b_dh], s_en_total.d0);
+                afadd(dE_dBO_pi[b_dh], s_en_total.d0);
+                afadd(dE_dBO_pi2[b_dh], s_en_total.d0);
+
+                float dE_dr_ah = param.p_hb1 * s_f_hb.val * sin_p4 * exp_hb3 *
+                                 (-param.p_hb3) *
+                                 (-param.r0_hb / (r_ah * r_ah) +
+                                  1.0 / param.r0_hb);
+
+                float f_ah = -dE_dr_ah;
+                Vec3 f_a_rad = v3_scale(dah, f_ah / r_ah);
+                aadd_v3(frc[a], f_a_rad);
+                aadd_v3(frc[h], v3_neg(f_a_rad));
+
+                float dE_dsinp4 = param.p_hb1 * s_f_hb.val * exp_hb3;
+                float dsinp4_dtheta = 4.0 * sin_half_theta * sin_half_theta *
+                                      sin_half_theta * cos(theta * 0.5) * 0.5;
+                float dE_dtheta = dE_dsinp4 * dsinp4_dtheta;
+
+                float sin_theta = sin(theta);
+                if (sin_theta < 1e-5) sin_theta = 1e-5;
+                float dE_dcos = dE_dtheta / (-sin_theta);
+
+                float inv_rdh = 1.0 / r_dh;
+                float inv_rah = 1.0 / r_ah;
+
+                Vec3 fd, fa, fh;
+                fd.x = dE_dcos * (dah.x * inv_rdh * inv_rah -
+                                  ddh.x * cos_theta * inv_rdh * inv_rdh);
+                fd.y = dE_dcos * (dah.y * inv_rdh * inv_rah -
+                                  ddh.y * cos_theta * inv_rdh * inv_rdh);
+                fd.z = dE_dcos * (dah.z * inv_rdh * inv_rah -
+                                  ddh.z * cos_theta * inv_rdh * inv_rdh);
+
+                fa.x = dE_dcos * (ddh.x * inv_rdh * inv_rah -
+                                  dah.x * cos_theta * inv_rah * inv_rah);
+                fa.y = dE_dcos * (ddh.y * inv_rdh * inv_rah -
+                                  dah.y * cos_theta * inv_rah * inv_rah);
+                fa.z = dE_dcos * (ddh.z * inv_rdh * inv_rah -
+                                  dah.z * cos_theta * inv_rah * inv_rah);
+
+                fh.x = -(fd.x + fa.x);
+                fh.y = -(fd.y + fa.y);
+                fh.z = -(fd.z + fa.z);
+
+                aadd_v3(frc[d], v3_neg(fd));
+                aadd_v3(frc[a], v3_neg(fa));
+                aadd_v3(frc[h], v3_neg(fh));
+                if (pc.need_virial != 0)
+                {
+                    Vec3 f_d = v3_neg(fd);
+                    Vec3 f_a = v3_neg(fa);
+                    LTMat v = lt_add(
+                        lt_add(virial_from_force_dis(f_a_rad, dah),
+                               virial_from_force_dis(f_d, ddh)),
+                        virial_from_force_dis(f_a, dah));
+                    aadd_lt(atom_virial[h], v);
+                }
+
+                en_hb += s_en_total.val;
+            }
+        }
+    }
+    afadd(energy_hb_sum[0], en_hb);
+    if (pc.need_atom_energy != 0) afadd(atom_energy[h], en_hb);
+}

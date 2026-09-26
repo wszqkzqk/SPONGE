@@ -1,0 +1,13 @@
+layout(set = 0, binding = 0, std430) buffer Out { float out_[]; };
+layout(set = 0, binding = 1, std430) buffer Types { int types[]; };
+layout(set = 0, binding = 2, std430) buffer Chi { float chi[]; };
+layout(set = 0, binding = 3, std430) buffer Eta { float eta[]; };
+layout(set = 0, binding = 4, std430) buffer Q { float q[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    int t = types[i];
+    out_[i] = chi[t] * q[i] + 0.5 * eta[t] * q[i] * q[i];
+}

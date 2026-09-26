@@ -1,0 +1,62 @@
+layout(set = 0, binding = 0, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 1, std430) buffer TotalCorrBO { float total_corrected_bo[]; };
+layout(set = 0, binding = 2, std430) buffer Valency { float valency[]; };
+layout(set = 0, binding = 3, std430) buffer ValencyE { float valency_e[]; };
+layout(set = 0, binding = 4, std430) buffer ValencyBoc { float valency_boc[]; };
+layout(set = 0, binding = 5, std430) buffer ValencyVal { float valency_val[]; };
+layout(set = 0, binding = 6, std430) buffer Mass { float mass[]; };
+layout(set = 0, binding = 7, std430) buffer DDelta { float d_Delta[]; };
+layout(set = 0, binding = 8, std430) buffer DDeltaBoc { float d_Delta_boc[]; };
+layout(set = 0, binding = 9, std430) buffer DDeltaVal { float d_Delta_val[]; };
+layout(set = 0, binding = 10, std430) buffer DDeltaLp { float d_Delta_lp[]; };
+layout(set = 0, binding = 11, std430) buffer DNlp { float d_nlp[]; };
+layout(set = 0, binding = 12, std430) buffer DVlpex { float d_vlpex[]; };
+layout(set = 0, binding = 13, std430) buffer DDeltaLpTemp { float d_Delta_lp_temp[]; };
+layout(set = 0, binding = 14, std430) buffer DdDeltaLp { float d_dDelta_lp[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float p_lp1;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type = atom_type[i];
+    float total_bo = total_corrected_bo[i];
+
+    float val = valency[type];
+    float val_e = valency_e[type];
+    float val_boc = valency_boc[type];
+    float val_val = valency_val[type];
+    float m = mass[type];
+
+    d_Delta[i] = total_bo - val;
+    d_Delta_boc[i] = total_bo - val_boc;
+    d_Delta_val[i] = total_bo - val_val;
+
+    float Delta_e = total_bo - val_e;
+
+    float vlpex = Delta_e - 2.0 * float(int(Delta_e / 2.0));
+    d_vlpex[i] = vlpex;
+
+    float explp1 = exp(-pc.p_lp1 * (2.0 + vlpex) * (2.0 + vlpex));
+    float nlp = explp1 - float(int(Delta_e / 2.0));
+    d_nlp[i] = nlp;
+
+    float nlp_opt = 0.5 * (val_e - val);
+    d_Delta_lp[i] = nlp_opt - nlp;
+
+    float Clp = 2.0 * pc.p_lp1 * explp1 * (2.0 + vlpex);
+    d_dDelta_lp[i] = Clp;
+
+    if (m > 21.0)
+    {
+        d_Delta_lp_temp[i] = 0.0;
+    }
+    else
+    {
+        d_Delta_lp_temp[i] = d_Delta_lp[i];
+    }
+}

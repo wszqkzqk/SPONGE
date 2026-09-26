@@ -1,4 +1,33 @@
-﻿#include "over_under.h"
+#include "over_under.h"
+
+#ifdef USE_VULKAN
+struct ReaxffDeltaVkParams
+{
+    int atom_numbers;
+    float p_lp1;
+};
+static_assert(sizeof(ReaxffDeltaVkParams) == 8,
+              "ReaxffDeltaVkParams must match the GLSL push constant layout");
+
+struct ReaxffOvunVkParams
+{
+    int atom_numbers;
+    int atom_type_numbers;
+    float p_ovun3;
+    float p_ovun4;
+    float p_ovun6;
+    float p_ovun7;
+    float p_ovun8;
+    int need_atom_energy;
+};
+static_assert(sizeof(ReaxffOvunVkParams) == 32,
+              "ReaxffOvunVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Calculate_Delta_Kernel(
     int atom_numbers, const int* atom_type, const float* total_corrected_bo,
@@ -480,16 +509,75 @@ void REAXFF_OVER_UNDER::Calculate_Over_Under_Energy_And_Force(
     dim3 blockSize(128);
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
 
+#ifdef USE_VULKAN
+    ReaxffDeltaVkParams delta_params{atom_numbers, p_lp1};
+    const void* delta_buffers[] = {d_atom_type,
+                                   bo_module->d_total_corrected_bond_order,
+                                   d_valency,
+                                   d_valency_e,
+                                   d_valency_boc,
+                                   d_valency_val,
+                                   d_mass,
+                                   d_Delta,
+                                   d_Delta_boc,
+                                   d_Delta_val,
+                                   d_Delta_lp,
+                                   d_nlp,
+                                   d_vlpex,
+                                   d_Delta_lp_temp,
+                                   d_dDelta_lp};
+    VK_LAUNCH(reaxff_calculate_delta, gridSize.x, 1, blockSize.x, 1,
+              delta_buffers, &delta_params, NULL);
+#else
     Launch_Device_Kernel(Calculate_Delta_Kernel, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_atom_type,
                          bo_module->d_total_corrected_bond_order, d_valency,
                          d_valency_e, d_valency_boc, d_valency_val, d_mass,
                          p_lp1, d_Delta, d_Delta_boc, d_Delta_val, d_Delta_lp,
                          d_nlp, d_vlpex, d_Delta_lp_temp, d_dDelta_lp);
+#endif
 
     deviceMemset(d_energy_elp_sum, 0, sizeof(float));
     deviceMemset(d_energy_ovun_sum, 0, sizeof(float));
 
+#ifdef USE_VULKAN
+    ReaxffOvunVkParams params{atom_numbers,
+                              atom_type_numbers,
+                              p_ovun3,
+                              p_ovun4,
+                              p_ovun6,
+                              p_ovun7,
+                              p_ovun8,
+                              need_atom_energy && atom_energy != NULL ? 1 : 0};
+    const void* buffers[] = {d_atom_type,
+                             d_mass,
+                             d_Delta,
+                             d_Delta_lp,
+                             d_Delta_lp_temp,
+                             d_dDelta_lp,
+                             bo_module->d_corrected_bo_s,
+                             bo_module->d_corrected_bo_pi,
+                             bo_module->d_corrected_bo_pi2,
+                             d_p_ovun1,
+                             d_De_s,
+                             d_p_lp2,
+                             d_valency,
+                             d_p_ovun2,
+                             d_p_ovun5,
+                             d_dE_dBO_s,
+                             d_dE_dBO_pi,
+                             d_dE_dBO_pi2,
+                             d_CdDelta,
+                             vk_or_dummy(atom_energy, d_energy_elp_sum),
+                             d_energy_ovun_sum,
+                             d_energy_elp_sum,
+                             bo_module->d_bond_count,
+                             bo_module->d_bond_offset,
+                             bo_module->d_bond_nbr,
+                             bo_module->d_bond_idx};
+    VK_LAUNCH(reaxff_ovun_energy_force, gridSize.x, 1, blockSize.x, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(
         Calculate_Energy_Force_Prep_Kernel, gridSize, blockSize, 0, NULL,
         atom_numbers, d_atom_type, d_mass, d_Delta, d_Delta_lp, d_Delta_lp_temp,
@@ -500,6 +588,7 @@ void REAXFF_OVER_UNDER::Calculate_Over_Under_Energy_And_Force(
         need_atom_energy ? atom_energy : NULL, d_energy_ovun_sum,
         d_energy_elp_sum, bo_module->d_bond_count, bo_module->d_bond_offset,
         bo_module->d_bond_nbr, bo_module->d_bond_idx);
+#endif
 }
 
 void REAXFF_OVER_UNDER::Step_Print(CONTROLLER* controller)

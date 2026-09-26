@@ -1,0 +1,22 @@
+layout(set = 0, binding = 0, std430) buffer BondCount { int bond_count[]; };
+layout(set = 0, binding = 1, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 2, std430) buffer BondIdx { int bond_idx[]; };
+layout(set = 0, binding = 3, std430) buffer BoS { float bo_s[]; };
+layout(set = 0, binding = 4, std430) buffer BoPi { float bo_pi[]; };
+layout(set = 0, binding = 5, std430) buffer BoPi2 { float bo_pi2[]; };
+layout(set = 0, binding = 6, std430) buffer TotalBO { float total_bo[]; };
+layout(push_constant) uniform Params { int atom_numbers; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    float sum = 0.0;
+    int start = bond_offset[i];
+    int end = start + bond_count[i];
+    for (int k = start; k < end; k++)
+    {
+        int b = bond_idx[k];
+        sum += bo_s[b] + bo_pi[b] + bo_pi2[b];
+    }
+    total_bo[i] = sum;
+}

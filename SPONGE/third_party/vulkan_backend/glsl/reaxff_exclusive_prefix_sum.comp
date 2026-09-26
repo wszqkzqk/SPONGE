@@ -1,0 +1,12 @@
+layout(set = 0, binding = 0, std430) buffer Input { int in_arr[]; };
+layout(set = 0, binding = 1, std430) buffer Output { int out_arr[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    out_arr[0] = 0;
+    for (int i = 0; i < pc.n; i++)
+    {
+        out_arr[i + 1] = out_arr[i] + in_arr[i];
+    }
+}

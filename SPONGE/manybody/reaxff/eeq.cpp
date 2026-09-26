@@ -15,6 +15,43 @@
 #include <thrust/scan.h>
 #endif
 
+#ifdef USE_VULKAN
+struct EeqHMatrixVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    int atom_type_numbers;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EeqHMatrixVkParams) == 68,
+              "EeqHMatrixVkParams must match the GLSL push constant layout");
+
+struct EeqForceVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    int atom_type_numbers;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(EeqForceVkParams) == 72,
+              "EeqForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
+
 void REAXFF_EEQ::Initial(CONTROLLER* controller, int atom_numbers,
                          const char* parameter_in_file,
                          const char* type_in_file)
@@ -689,10 +726,21 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
 
     // ---- Build H matrix CSR ----
+#ifdef USE_VULKAN
+    EeqHMatrixVkParams count_params{atom_numbers, boundary, cutoff,
+                                    atom_type_numbers,
+                                    vk_nl_stride(fnl_d_nl, atom_numbers)};
+    const void* count_buffers[] = {d_crd,         d_atom_type, d_shield,
+                                   fnl_d_nl,      fnl_d_nl[0].atom_serial,
+                                   d_h_numnbrs};
+    VK_LAUNCH(eeq_count_h_matrix, gridSize.x, 1, blockSize.x, 1, count_buffers,
+              &count_params, NULL);
+#else
     Launch_Device_Kernel(EEQ_Count_H_Matrix_Entries, gridSize, blockSize, 0,
                          NULL, atom_numbers, d_crd, d_atom_type, d_shield,
                          atom_type_numbers, fnl_d_nl, boundary, cutoff,
                          d_h_numnbrs);
+#endif
 
     int total_nnz = 0;
 #if !defined(USE_CPU) && !defined(USE_VULKAN)
@@ -731,10 +779,21 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     }
     if (total_nnz > 0)
     {
+#ifdef USE_VULKAN
+        EeqHMatrixVkParams fill_params{atom_numbers, boundary, cutoff,
+                                       atom_type_numbers,
+                                       vk_nl_stride(fnl_d_nl, atom_numbers)};
+        const void* fill_buffers[] = {d_crd,      d_atom_type, d_shield,
+                                      fnl_d_nl,   fnl_d_nl[0].atom_serial,
+                                      d_h_firstnbrs, d_h_jlist, d_h_val};
+        VK_LAUNCH(eeq_fill_h_matrix, gridSize.x, 1, blockSize.x, 1,
+                  fill_buffers, &fill_params, NULL);
+#else
         Launch_Device_Kernel(EEQ_Fill_H_Matrix, gridSize, blockSize, 0, NULL,
                              atom_numbers, d_crd, d_atom_type, d_shield,
                              atom_type_numbers, fnl_d_nl, boundary, cutoff,
                              d_h_firstnbrs, d_h_jlist, d_h_val);
+#endif
     }
 
     // ---- CG solver ----
@@ -798,6 +857,90 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
             // p = z + beta*p
             CG_Update_P_Kernel<<<gridSize, blockSize>>>(atom_numbers, d_p, d_z,
                                                         d_cg_beta);
+        }
+    };
+#elif defined(USE_VULKAN)
+    // Vulkan path: Jacobi-preconditioned CG, device-side scalars
+    auto solve = [&](float* x, float* b_in, bool warm)
+    {
+        struct
+        {
+            int n;
+        } n_params{atom_numbers};
+        if (!warm)
+        {
+            deviceMemset(x, 0, sizeof(float) * atom_numbers);
+            const void* copy_buffers[] = {d_r, b_in};
+            VK_LAUNCH(eeq_vector_copy, gridSize.x, 1, blockSize.x, 1,
+                      copy_buffers, &n_params, NULL);
+        }
+        else
+        {
+            const void* mv_buffers[] = {d_h_firstnbrs, d_h_numnbrs, d_h_jlist,
+                                        d_h_val,       d_atom_type, d_eta,
+                                        x,             d_Ap};
+            VK_LAUNCH(eeq_matvec, gridSize.x, 1, blockSize.x, 1, mv_buffers,
+                      &n_params, NULL);
+            const void* sub_buffers[] = {d_r, b_in, d_Ap};
+            VK_LAUNCH(eeq_vector_subtract, gridSize.x, 1, blockSize.x, 1,
+                      sub_buffers, &n_params, NULL);
+        }
+
+        deviceMemset(d_rr_old, 0, sizeof(float));
+        const void* init_buffers[] = {d_r,      d_z,         d_p,
+                                      d_eta,    d_atom_type, d_rr_old};
+        VK_LAUNCH(eeq_cg_init, gridSize.x, 1, blockSize.x, 1, init_buffers,
+                  &n_params, NULL);
+
+        const int check_interval = 5;
+        float h_rz = 0;
+
+        for (int iter = 0; iter < max_iter; iter++)
+        {
+            // Check convergence every check_interval iterations
+            if (iter % check_interval == 0)
+            {
+                deviceMemcpy(&h_rz, d_rr_old, sizeof(float),
+                             deviceMemcpyDeviceToHost);
+                if (fabsf(h_rz) < tolerance * tolerance) break;
+            }
+
+            const void* mv_buffers[] = {d_h_firstnbrs, d_h_numnbrs, d_h_jlist,
+                                        d_h_val,       d_atom_type, d_eta,
+                                        d_p,           d_Ap};
+            VK_LAUNCH(eeq_matvec, gridSize.x, 1, blockSize.x, 1, mv_buffers,
+                      &n_params, NULL);
+
+            deviceMemset(d_pAp_buf, 0, sizeof(float));
+            const void* dot_buffers[] = {d_p, d_Ap, d_pAp_buf};
+            VK_LAUNCH(eeq_dot_product, gridSize.x, 1, blockSize.x, 1,
+                      dot_buffers, &n_params, NULL);
+
+            // alpha = rz_old / pAp (on device)
+            struct
+            {
+                int unused;
+            } dummy_params{0};
+            const void* alpha_buffers[] = {d_rr_old, d_pAp_buf, d_cg_alpha};
+            VK_LAUNCH(eeq_cg_alpha, 1, 1, 1, 1, alpha_buffers, &dummy_params,
+                      NULL);
+
+            deviceMemset(d_rr_new, 0, sizeof(float));
+            const void* xr_buffers[] = {x,       d_r,      d_p,
+                                        d_Ap,    d_z,      d_eta,
+                                        d_atom_type, d_cg_alpha, d_rr_new};
+            VK_LAUNCH(eeq_cg_update_xr, gridSize.x, 1, blockSize.x, 1,
+                      xr_buffers, &n_params, NULL);
+
+            // beta = rz_new/rz_old, rz_old = rz_new (on device)
+            const void* beta_buffers[] = {d_rr_old, d_rr_new, d_cg_beta};
+            VK_LAUNCH(eeq_cg_beta, 1, 1, 1, 1, beta_buffers, &dummy_params,
+                      NULL);
+
+            // p = z + beta*p
+            const void* p_buffers[] = {d_p, d_z, d_cg_beta};
+            VK_LAUNCH(eeq_cg_update_p, gridSize.x, 1, blockSize.x, 1,
+                      p_buffers, &n_params, NULL);
         }
     };
 #else
@@ -875,30 +1018,92 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     };
 #endif
 
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+    } n_params{atom_numbers};
+    const void* b_chi_buffers[] = {d_b, d_atom_type, d_chi};
+    VK_LAUNCH(eeq_setup_b_chi, gridSize.x, 1, blockSize.x, 1, b_chi_buffers,
+              &n_params, NULL);
+#else
     Launch_Device_Kernel(Setup_B_Chi, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_b, d_atom_type, d_chi);
+#endif
     bool warm = nprev > 0;
     if (warm)
     {
         const float* c = EXTRAP_COEFFS[nprev - 1];
+#ifdef USE_VULKAN
+        struct
+        {
+            int n;
+            int stride;
+            int nprev;
+            float c0, c1, c2, c3, c4;
+        } extrap_params{atom_numbers, atom_numbers, nprev,
+                        c[0],         c[1],         c[2],
+                        c[3],         c[4]};
+        const void* extrap_buffers[] = {d_t, d_t_hist};
+        VK_LAUNCH(eeq_extrapolate, gridSize.x, 1, blockSize.x, 1,
+                  extrap_buffers, &extrap_params, NULL);
+#else
         Launch_Device_Kernel(Extrapolate_Vector_Kernel, gridSize, blockSize, 0,
                              NULL, atom_numbers, d_t, d_t_hist, atom_numbers,
                              nprev, c[0], c[1], c[2], c[3], c[4]);
+#endif
     }
     solve(d_t, d_b, warm);
 
+#ifdef USE_VULKAN
+    const void* b_one_buffers[] = {d_b};
+    VK_LAUNCH(eeq_setup_b_one, gridSize.x, 1, blockSize.x, 1, b_one_buffers,
+              &n_params, NULL);
+#else
     Launch_Device_Kernel(Setup_B_One, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_b);
+#endif
     if (warm)
     {
         const float* c = EXTRAP_COEFFS[nprev - 1];
+#ifdef USE_VULKAN
+        struct
+        {
+            int n;
+            int stride;
+            int nprev;
+            float c0, c1, c2, c3, c4;
+        } extrap_params{atom_numbers, atom_numbers, nprev,
+                        c[0],         c[1],         c[2],
+                        c[3],         c[4]};
+        const void* extrap_buffers[] = {d_s, d_s_hist};
+        VK_LAUNCH(eeq_extrapolate, gridSize.x, 1, blockSize.x, 1,
+                  extrap_buffers, &extrap_params, NULL);
+#else
         Launch_Device_Kernel(Extrapolate_Vector_Kernel, gridSize, blockSize, 0,
                              NULL, atom_numbers, d_s, d_s_hist, atom_numbers,
                              nprev, c[0], c[1], c[2], c[3], c[4]);
+#endif
     }
     solve(d_s, d_b, warm);
 
     // Update extrapolation history
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+        int stride;
+        int nprev;
+        int hist_size;
+    } hist_params{atom_numbers, atom_numbers, nprev, HIST_SIZE};
+    const void* hist_t_buffers[] = {d_t_hist, d_t};
+    VK_LAUNCH(eeq_history_update, gridSize.x, 1, blockSize.x, 1,
+              hist_t_buffers, &hist_params, NULL);
+    const void* hist_s_buffers[] = {d_s_hist, d_s};
+    VK_LAUNCH(eeq_history_update, gridSize.x, 1, blockSize.x, 1,
+              hist_s_buffers, &hist_params, NULL);
+    if (nprev < HIST_SIZE) nprev++;
+#else
     if (nprev < HIST_SIZE)
     {
         deviceMemcpy(d_t_hist + nprev * atom_numbers, d_t,
@@ -923,6 +1128,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
         deviceMemcpy(d_s_hist + (HIST_SIZE - 1) * atom_numbers, d_s,
                      sizeof(float) * atom_numbers, deviceMemcpyDeviceToDevice);
     }
+#endif
 
     float sum_t = 0, sum_s = 0;
     Sum_Of_List(d_t, d_temp_sum, atom_numbers);
@@ -933,6 +1139,25 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     float Qtot = 0;
     float mu = (Qtot - sum_t) / sum_s;
 
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+        float mu;
+    } scale_add_params{atom_numbers, mu};
+    const void* scale_add_buffers[] = {d_q, d_t, d_s};
+    VK_LAUNCH(eeq_vector_scale_add, gridSize.x, 1, blockSize.x, 1,
+              scale_add_buffers, &scale_add_params, NULL);
+
+    const void* mv_buffers[] = {d_h_firstnbrs, d_h_numnbrs, d_h_jlist, d_h_val,
+                                d_atom_type,   d_eta,       d_q,       d_Ap};
+    VK_LAUNCH(eeq_matvec, gridSize.x, 1, blockSize.x, 1, mv_buffers, &n_params,
+              NULL);
+
+    const void* epol_buffers[] = {d_r, d_atom_type, d_chi, d_eta, d_q};
+    VK_LAUNCH(eeq_epol, gridSize.x, 1, blockSize.x, 1, epol_buffers, &n_params,
+              NULL);
+#else
     Launch_Device_Kernel(Vector_Scale_Add, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_q, d_t, d_s, mu);
 
@@ -943,15 +1168,22 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     Launch_Device_Kernel(EEQ_Calculate_Epol_Kernel, gridSize, blockSize, 0,
                          NULL, atom_numbers, d_r, d_atom_type, d_chi, d_eta,
                          d_q);
+#endif
 
     float sum_epol = 0;
     Sum_Of_List(d_r, d_temp_sum, atom_numbers);
     deviceMemcpy(&sum_epol, d_temp_sum, sizeof(float),
                  deviceMemcpyDeviceToHost);
 
+#ifdef USE_VULKAN
+    const void* eele_buffers[] = {d_r, d_atom_type, d_eta, d_q, d_Ap};
+    VK_LAUNCH(eeq_eele, gridSize.x, 1, blockSize.x, 1, eele_buffers, &n_params,
+              NULL);
+#else
     Launch_Device_Kernel(EEQ_Calculate_Eele_Kernel, gridSize, blockSize, 0,
                          NULL, atom_numbers, d_r, d_atom_type, d_eta, d_q,
                          d_Ap);
+#endif
 
     float sum_eele = 0;
     Sum_Of_List(d_r, d_temp_sum, atom_numbers);
@@ -961,22 +1193,58 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     h_energy = sum_epol + sum_eele;
     if (d_energy != NULL)
     {
+#ifdef USE_VULKAN
+        const void* dist_buffers[] = {d_energy, d_q,  d_atom_type,
+                                      d_chi,    d_eta, d_Ap};
+        VK_LAUNCH(eeq_distribute_energy, gridSize.x, 1, blockSize.x, 1,
+                  dist_buffers, &n_params, NULL);
+#else
         Launch_Device_Kernel(EEQ_Distribute_Energy_Kernel, gridSize, blockSize,
                              0, NULL, atom_numbers, d_energy, d_q, d_atom_type,
                              d_chi, d_eta, d_Ap);
+#endif
     }
 
     if (frc != NULL)
     {
+#ifdef USE_VULKAN
+        EeqForceVkParams force_params{atom_numbers, boundary, cutoff,
+                                      atom_type_numbers,
+                                      need_virial && atom_virial != NULL ? 1
+                                                                         : 0,
+                                      vk_nl_stride(fnl_d_nl, atom_numbers)};
+        const void* force_buffers[] = {d_crd,
+                                       d_atom_type,
+                                       d_shield,
+                                       d_q,
+                                       frc,
+                                       fnl_d_nl,
+                                       fnl_d_nl[0].atom_serial,
+                                       vk_or_dummy(atom_virial, frc)};
+        VK_LAUNCH(eeq_force, gridSize.x, 1, blockSize.x, 1, force_buffers,
+                  &force_params, NULL);
+#else
         Launch_Device_Kernel(EEQ_Calculate_Force_Kernel, gridSize, blockSize, 0,
                              NULL, atom_numbers, d_crd, d_atom_type, d_shield,
                              atom_type_numbers, d_q, frc, fnl_d_nl, boundary,
                              cutoff, need_virial ? atom_virial : NULL);
+#endif
     }
 
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+        float scale;
+    } convert_params{atom_numbers, CONSTANT_SPONGE_CHARGE_SCALE};
+    const void* convert_buffers[] = {d_charge, d_q};
+    VK_LAUNCH(eeq_convert_charge, gridSize.x, 1, blockSize.x, 1,
+              convert_buffers, &convert_params, NULL);
+#else
     Launch_Device_Kernel(EEQ_Convert_Charge_Unit, gridSize, blockSize, 0, NULL,
                          atom_numbers, d_charge, d_q,
                          CONSTANT_SPONGE_CHARGE_SCALE);
+#endif
 }
 
 void REAXFF_EEQ::Step_Print(CONTROLLER* controller)

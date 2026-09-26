@@ -1,0 +1,11 @@
+layout(set = 0, binding = 0, std430) buffer RrOld { float rr_old[]; };
+layout(set = 0, binding = 1, std430) buffer RrNew { float rr_new[]; };
+layout(set = 0, binding = 2, std430) buffer Beta { float beta[]; };
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    float old_val = rr_old[0];
+    float new_val = rr_new[0];
+    beta[0] = (old_val != 0.0) ? new_val / old_val : 0.0;
+    rr_old[0] = new_val;
+}

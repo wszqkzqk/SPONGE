@@ -1,0 +1,8 @@
+layout(set = 0, binding = 0, std430) buffer B { float b[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    b[i] = 1.0;
+}

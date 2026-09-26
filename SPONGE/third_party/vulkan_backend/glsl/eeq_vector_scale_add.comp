@@ -1,0 +1,15 @@
+layout(set = 0, binding = 0, std430) buffer Q { float q[]; };
+layout(set = 0, binding = 1, std430) buffer T { float t[]; };
+layout(set = 0, binding = 2, std430) buffer S { float s[]; };
+layout(push_constant) uniform Params
+{
+    int n;
+    float mu;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    q[i] = t[i] + pc.mu * s[i];
+}

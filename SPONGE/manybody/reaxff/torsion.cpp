@@ -1,6 +1,29 @@
-﻿#include "torsion.h"
+#include "torsion.h"
 
 #include "bond_order.h"  // for find_bond_index
+
+#ifdef USE_VULKAN
+struct ReaxffTorsionVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float p_tor2;
+    float p_tor3;
+    float p_tor4;
+    float p_cot2;
+    float thb_cut;
+    int atom_type_numbers;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(sizeof(ReaxffTorsionVkParams) == 88,
+              "ReaxffTorsionVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Calculate_Torsion_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_type,
@@ -690,6 +713,41 @@ void REAXFF_TORSION::Calculate_Torsion_Energy_And_Force(
     deviceMemset(d_energy_tor_sum, 0, sizeof(float));
     deviceMemset(d_energy_cot_sum, 0, sizeof(float));
 
+#ifdef USE_VULKAN
+    ReaxffTorsionVkParams params{atom_numbers,
+                                 boundary,
+                                 p_tor2,
+                                 p_tor3,
+                                 p_tor4,
+                                 p_cot2,
+                                 thb_cut,
+                                 atom_type_numbers,
+                                 atom_energy != NULL ? 1 : 0,
+                                 need_virial && atom_virial != NULL ? 1 : 0};
+    const void* buffers[] = {crd,
+                             d_atom_type,
+                             Delta_boc,
+                             d_torsion_info,
+                             d_torsion_entries,
+                             bo_module->d_corrected_bo_s,
+                             bo_module->d_corrected_bo_pi,
+                             bo_module->d_corrected_bo_pi2,
+                             d_dE_dBO_s,
+                             d_dE_dBO_pi,
+                             d_dE_dBO_pi2,
+                             d_CdDelta,
+                             vk_or_dummy(atom_energy, d_energy_tor_sum),
+                             frc,
+                             vk_or_dummy(atom_virial, frc),
+                             d_energy_tor_sum,
+                             d_energy_cot_sum,
+                             bo_module->d_bond_count,
+                             bo_module->d_bond_offset,
+                             bo_module->d_bond_nbr,
+                             bo_module->d_bond_idx};
+    VK_LAUNCH(reaxff_torsion, gridSize.x, 1, blockSize.x, 1, buffers, &params,
+              NULL);
+#else
     Launch_Device_Kernel(
         Calculate_Torsion_Kernel, gridSize, blockSize, 0, NULL, atom_numbers,
         crd, d_atom_type, p_tor2, p_tor3, p_tor4, p_cot2, thb_cut, Delta_boc,
@@ -699,6 +757,7 @@ void REAXFF_TORSION::Calculate_Torsion_Energy_And_Force(
         d_CdDelta, boundary, atom_energy, frc, need_virial ? atom_virial : NULL,
         d_energy_tor_sum, d_energy_cot_sum, bo_module->d_bond_count,
         bo_module->d_bond_offset, bo_module->d_bond_nbr, bo_module->d_bond_idx);
+#endif
 }
 
 void REAXFF_TORSION::Step_Print(CONTROLLER* controller)

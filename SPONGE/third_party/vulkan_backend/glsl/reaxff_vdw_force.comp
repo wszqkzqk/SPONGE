@@ -1,0 +1,101 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 2, std430) buffer Params_ { float params_[]; };
+layout(set = 0, binding = 3, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 4, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 7, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 8, std430) buffer EnergySum { float energy_sum[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    float p_vdw1;
+    int ntypes;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+
+Sad1 reax_vdw_energy_sad(Sad1 r, int param_idx)
+{
+    float rvdw = params_[param_idx + 0];
+    float epsilon = params_[param_idx + 1];
+    float alpha = params_[param_idx + 2];
+    float gamma_w = params_[param_idx + 3];
+
+    if (r.val > pc.cutoff) return Sad1(0.0, 0.0);
+
+    Sad1 x = sad1_scale(r, 1.0 / pc.cutoff);
+    Sad1 x4 = sad1_mul(sad1_mul(sad1_mul(x, x), x), x);
+    Sad1 x5 = sad1_mul(x4, x);
+    Sad1 x6 = sad1_mul(x5, x);
+    Sad1 x7 = sad1_mul(x6, x);
+
+    Sad1 tap = sad1_add(
+        sad1_sub(sad1_add(sad1_rsub_c(1.0, sad1_scale(x4, 35.0)),
+                          sad1_scale(x5, 84.0)),
+                 sad1_scale(x6, 70.0)),
+        sad1_scale(x7, 20.0));
+
+    float inv_gamma = 1.0 / gamma_w;
+    Sad1 inv_gamma_p = sad1_powf(Sad1(inv_gamma, 0.0), Sad1(pc.p_vdw1, 0.0));
+    Sad1 r_p = sad1_powf(r, Sad1(pc.p_vdw1, 0.0));
+    Sad1 shielded_r =
+        sad1_powf(sad1_add(r_p, inv_gamma_p), Sad1(1.0 / pc.p_vdw1, 0.0));
+
+    Sad1 exp_term =
+        sad1_scale(sad1_rsub_c(1.0, sad1_scale(shielded_r, 1.0 / rvdw)), alpha);
+    Sad1 term1 = sad1_exp(exp_term);
+    Sad1 term2 = sad1_scale(sad1_exp(sad1_scale(exp_term, 0.5)), -2.0);
+
+    return sad1_mul(sad1_scale(tap, epsilon), sad1_add(term1, term2));
+}
+
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_types[i];
+    Vec3 ri = crd[i];
+    Vec3 fi = v3(0.0, 0.0, 0.0);
+    LTMat vi = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    float en_i = 0.0;
+    int count = int(nl_raw[i].x);
+    int base = i * pc.max_neighbor_numbers;
+    for (int jj = 0; jj < count; jj++)
+    {
+        int j = nl_serial[base + jj];
+        int type_j = atom_types[j];
+        if (j <= i) continue;
+        Vec3 rj = crd[j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float rij = v3_len(drij);
+        if (rij >= pc.cutoff) continue;
+
+        int param_idx = (type_i * pc.ntypes + type_j) * 8;
+        Sad1 rij_sad = Sad1(rij, 1.0);
+        Sad1 energy_sad = reax_vdw_energy_sad(rij_sad, param_idx);
+
+        float force_mag = -energy_sad.d0 / rij;
+        Vec3 fij = v3_scale(drij, force_mag);
+
+        fi = v3_add(fi, fij);
+        aadd_v3(frc[j], v3_neg(fij));
+
+        if (pc.need_virial != 0)
+            vi = lt_add(vi, virial_from_force_dis(fij, drij));
+
+        if (pc.need_atom_energy != 0)
+        {
+            en_i += energy_sad.val;
+            afadd(energy_sum[0], energy_sad.val);
+        }
+    }
+    aadd_v3(frc[i], fi);
+    if (pc.need_atom_energy != 0) atom_energy[i] += en_i;
+    if (pc.need_virial != 0) aadd_lt(atom_virial[i], vi);
+}

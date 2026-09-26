@@ -1,0 +1,56 @@
+layout(set = 0, binding = 0, std430) buffer PairI { int pair_i[]; };
+layout(set = 0, binding = 1, std430) buffer PairJ { int pair_j[]; };
+layout(set = 0, binding = 2, std430) buffer Distances { float distances[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 4, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 5, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 6, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 7, std430) buffer CdDeltaBuf { float CdDelta[]; };
+layout(set = 0, binding = 8, std430) buffer DboSDr { float dbo_s_dr[]; };
+layout(set = 0, binding = 9, std430) buffer DboPiDr { float dbo_pi_dr[]; };
+layout(set = 0, binding = 10, std430) buffer DboPi2Dr { float dbo_pi2_dr[]; };
+layout(set = 0, binding = 11, std430) buffer DboRawTotalDr { float dbo_raw_total_dr[]; };
+layout(set = 0, binding = 12, std430) buffer CdDeltaPrime { float CdDelta_prime[]; };
+layout(set = 0, binding = 13, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 14, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(push_constant) uniform Params
+{
+    int num_pairs;
+    Boundary boundary;
+    int need_virial;
+}
+pc;
+void main()
+{
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.num_pairs) return;
+    int i = pair_i[idx];
+    int j = pair_j[idx];
+    float r_val = distances[idx];
+    if (r_val < 0.0001) return;
+    float de_dbo_s_total = dE_dBO_s[idx];
+    float de_dbo_pi_total = dE_dBO_pi[idx];
+    float de_dbo_pi2_total = dE_dBO_pi2[idx];
+
+    float eff_cdd = CdDelta[i] + CdDelta[j];
+
+    float de_dr = (de_dbo_s_total + eff_cdd) * dbo_s_dr[idx] +
+                  (de_dbo_pi_total + eff_cdd) * dbo_pi_dr[idx] +
+                  (de_dbo_pi2_total + eff_cdd) * dbo_pi2_dr[idx];
+
+    de_dr += (CdDelta_prime[i] + CdDelta_prime[j]) * dbo_raw_total_dr[idx];
+
+    float force_mag = -de_dr;
+
+    Vec3 ri = crd[i];
+    Vec3 rj = crd[j];
+    Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+
+    Vec3 f = v3_scale(drij, force_mag / r_val);
+
+    aadd_v3(frc[i], f);
+    aadd_v3(frc[j], v3_neg(f));
+
+    if (pc.need_virial != 0)
+        aadd_lt(atom_virial[i], virial_from_force_dis(f, drij));
+}

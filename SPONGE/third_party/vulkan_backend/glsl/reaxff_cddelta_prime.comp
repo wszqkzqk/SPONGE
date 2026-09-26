@@ -1,0 +1,37 @@
+layout(set = 0, binding = 0, std430) buffer PairI { int pair_i[]; };
+layout(set = 0, binding = 1, std430) buffer PairJ { int pair_j[]; };
+layout(set = 0, binding = 2, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 3, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 4, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 5, std430) buffer CdDeltaBuf { float CdDelta[]; };
+layout(set = 0, binding = 6, std430) buffer DboSDDeltaI { float dbo_s_dDelta_i[]; };
+layout(set = 0, binding = 7, std430) buffer DboPiDDeltaI { float dbo_pi_dDelta_i[]; };
+layout(set = 0, binding = 8, std430) buffer DboPi2DDeltaI { float dbo_pi2_dDelta_i[]; };
+layout(set = 0, binding = 9, std430) buffer DboSDDeltaJ { float dbo_s_dDelta_j[]; };
+layout(set = 0, binding = 10, std430) buffer DboPiDDeltaJ { float dbo_pi_dDelta_j[]; };
+layout(set = 0, binding = 11, std430) buffer DboPi2DDeltaJ { float dbo_pi2_dDelta_j[]; };
+layout(set = 0, binding = 12, std430) buffer CdDeltaPrime { float CdDelta_prime[]; };
+layout(push_constant) uniform Params { int num_pairs; } pc;
+void main()
+{
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.num_pairs) return;
+    int i = pair_i[idx];
+    int j = pair_j[idx];
+
+    float de_dbo_s_total = dE_dBO_s[idx];
+    float de_dbo_pi_total = dE_dBO_pi[idx];
+    float de_dbo_pi2_total = dE_dBO_pi2[idx];
+
+    float eff_cdd = CdDelta[i] + CdDelta[j];
+
+    float term_i = (de_dbo_s_total + eff_cdd) * dbo_s_dDelta_i[idx] +
+                   (de_dbo_pi_total + eff_cdd) * dbo_pi_dDelta_i[idx] +
+                   (de_dbo_pi2_total + eff_cdd) * dbo_pi2_dDelta_i[idx];
+    afadd(CdDelta_prime[i], term_i);
+
+    float term_j = (de_dbo_s_total + eff_cdd) * dbo_s_dDelta_j[idx] +
+                   (de_dbo_pi_total + eff_cdd) * dbo_pi_dDelta_j[idx] +
+                   (de_dbo_pi2_total + eff_cdd) * dbo_pi2_dDelta_j[idx];
+    afadd(CdDelta_prime[j], term_j);
+}

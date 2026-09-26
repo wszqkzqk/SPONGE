@@ -1,0 +1,98 @@
+layout(set = 0, binding = 0, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 4, std430) buffer RS { float r_s[]; };
+layout(set = 0, binding = 5, std430) buffer RP { float r_p[]; };
+layout(set = 0, binding = 6, std430) buffer RPP { float r_pp[]; };
+layout(set = 0, binding = 7, std430) buffer Bo1 { float bo_1[]; };
+layout(set = 0, binding = 8, std430) buffer Bo2 { float bo_2[]; };
+layout(set = 0, binding = 9, std430) buffer Bo3 { float bo_3[]; };
+layout(set = 0, binding = 10, std430) buffer Bo4 { float bo_4[]; };
+layout(set = 0, binding = 11, std430) buffer Bo5 { float bo_5[]; };
+layout(set = 0, binding = 12, std430) buffer Bo6 { float bo_6[]; };
+layout(set = 0, binding = 13, std430) buffer RoPi { float ro_pi[]; };
+layout(set = 0, binding = 14, std430) buffer RoPi2 { float ro_pi2[]; };
+layout(set = 0, binding = 15, std430) buffer TotalBO { float total_bond_order[]; };
+layout(set = 0, binding = 16, std430) buffer PairI { int pair_i[]; };
+layout(set = 0, binding = 17, std430) buffer PairJ { int pair_j[]; };
+layout(set = 0, binding = 18, std430) buffer Distances { float distances[]; };
+layout(set = 0, binding = 19, std430) buffer NumPairs { int num_pairs[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    int atom_type_numbers;
+    float bo_cut;
+    int max_pairs;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_type[i];
+    if (type_i < 0 || type_i >= pc.atom_type_numbers) return;
+    Vec3 ri = crd[i];
+    int count = int(nl_raw[i].x);
+    int base = i * pc.max_neighbor_numbers;
+    float cutoff2 = pc.cutoff * pc.cutoff;
+    for (int nn = 0; nn < count; nn++)
+    {
+        int j = nl_serial[base + nn];
+        if (j <= i) continue;
+        int type_j = atom_type[j];
+        if (type_j < 0 || type_j >= pc.atom_type_numbers) continue;
+        Vec3 rj = crd[j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float r2 = v3_dot(drij, drij);
+        if (r2 >= cutoff2 || r2 <= 0.0001) continue;
+        float r = sqrt(r2);
+        int idx = type_i * pc.atom_type_numbers + type_j;
+        float ros = r_s[idx];
+        float bo_s = 0.0;
+        if (ros > 0.0)
+        {
+            float C12 = bo_1[idx] * pow(r / ros, bo_2[idx]);
+            bo_s = (1.0 + pc.bo_cut) * exp(C12);
+        }
+        float bo_p = 0.0;
+        if (ro_pi[type_i] > 0.0 && ro_pi[type_j] > 0.0)
+        {
+            float rop = r_p[idx];
+            if (rop > 0.0)
+            {
+                float C34 = bo_3[idx] * pow(r / rop, bo_4[idx]);
+                bo_p = exp(C34);
+            }
+        }
+        float bo_p2 = 0.0;
+        if (ro_pi2[type_i] > 0.0 && ro_pi2[type_j] > 0.0)
+        {
+            float rop2 = r_pp[idx];
+            if (rop2 > 0.0)
+            {
+                float C56 = bo_5[idx] * pow(r / rop2, bo_6[idx]);
+                bo_p2 = exp(C56);
+            }
+        }
+        float total_bo = bo_s + bo_p + bo_p2;
+        if (total_bo >= pc.bo_cut)
+        {
+            bo_s -= pc.bo_cut;
+            if (bo_s < 0.0) bo_s = 0.0;
+            total_bo -= pc.bo_cut;
+            afadd(total_bond_order[i], total_bo);
+            afadd(total_bond_order[j], total_bo);
+            int pos = atomicAdd(num_pairs[0], 1);
+            if (pos < pc.max_pairs)
+            {
+                pair_i[pos] = i;
+                pair_j[pos] = j;
+                distances[pos] = r;
+            }
+        }
+    }
+}

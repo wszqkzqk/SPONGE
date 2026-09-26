@@ -1,0 +1,76 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 2, std430) buffer Shield { float shield[]; };
+layout(set = 0, binding = 3, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 4, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 5, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 6, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    int atom_type_numbers;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_types[i];
+    float qi = charge[i];
+    if (abs(qi) < 1e-10) return;
+    Vec3 ri = crd[i];
+    int nl_count = int(nl_raw[i].x);
+    int base = i * pc.max_neighbor_numbers;
+    for (int j_idx = 0; j_idx < nl_count; j_idx++)
+    {
+        int atom_j = nl_serial[base + j_idx];
+        if (atom_j <= i) continue;
+
+        float qj = charge[atom_j];
+        if (abs(qj) < 1e-10) continue;
+
+        int type_j = atom_types[atom_j];
+
+        Vec3 rj = crd[atom_j];
+        Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);
+        float r2 = v3_dot(drij, drij);
+        float r = sqrt(r2);
+
+        if (r < pc.cutoff)
+        {
+            float inv_cutoff = 1.0 / pc.cutoff;
+            float x = r * inv_cutoff;
+            float x2 = x * x;
+            float x4 = x2 * x2;
+            float x5 = x4 * x;
+            float x6 = x5 * x;
+            float x7 = x6 * x;
+
+            float taper_val =
+                20.0 * x7 - 70.0 * x6 + 84.0 * x5 - 35.0 * x4 + 1.0;
+            float x3 = x2 * x;
+            float dtaper_dr = inv_cutoff * (140.0 * x6 - 420.0 * x5 +
+                                            420.0 * x4 - 140.0 * x3);
+
+            float shield_ij = shield[type_i * pc.atom_type_numbers + type_j];
+            float u = r2 * r + shield_ij;
+            float inv_u_cbrt = 1.0 / pow(u, 1.0 / 3.0);
+
+            float dH_dr = 332.05221729 * (dtaper_dr * inv_u_cbrt -
+                                          taper_val * r2 * inv_u_cbrt / u);
+
+            float force_mag = -qi * qj * dH_dr / r;
+
+            Vec3 f = v3_scale(drij, force_mag);
+            aadd_v3(frc[i], f);
+            aadd_v3(frc[atom_j], v3_neg(f));
+            if (pc.need_virial != 0)
+                aadd_lt(atom_virial[i], virial_from_force_dis(f, drij));
+        }
+    }
+}

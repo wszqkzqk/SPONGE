@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer Energy { float energy[]; };
+layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 2, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 3, std430) buffer Chi { float chi[]; };
+layout(set = 0, binding = 4, std430) buffer Eta { float eta[]; };
+layout(set = 0, binding = 5, std430) buffer AqBuf { float Aq[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    int type_i = atom_types[i];
+    float qi = charge[i];
+    float e_pol_i = chi[type_i] * qi + 0.5 * eta[type_i] * qi * qi;
+    float e_ele_i = 0.5 * qi * (Aq[i] - eta[type_i] * qi);
+    afadd(energy[i], e_pol_i + e_ele_i);
+}

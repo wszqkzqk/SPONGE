@@ -1,0 +1,22 @@
+layout(set = 0, binding = 0, std430) buffer R { float r[]; };
+layout(set = 0, binding = 1, std430) buffer Z { float z[]; };
+layout(set = 0, binding = 2, std430) buffer P { float p[]; };
+layout(set = 0, binding = 3, std430) buffer Eta { float eta[]; };
+layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 5, std430) buffer RzOut { float rz_out[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    float value = 0.0;
+    if (i < pc.n)
+    {
+        float diag = eta[atom_types[i]];
+        float zi = (diag != 0.0) ? r[i] / diag : r[i];
+        z[i] = zi;
+        p[i] = zi;
+        value = r[i] * zi;
+    }
+    float sum = block_sum(value);
+    if (gl_LocalInvocationID.x == 0u) afadd(rz_out[0], sum);
+}

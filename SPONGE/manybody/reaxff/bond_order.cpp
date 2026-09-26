@@ -1,4 +1,53 @@
-﻿#include "bond_order.h"
+#include "bond_order.h"
+
+#ifdef USE_VULKAN
+struct ReaxffUboVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    int atom_type_numbers;
+    float bo_cut;
+    int max_pairs;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(ReaxffUboVkParams) == 76,
+              "ReaxffUboVkParams must match the GLSL push constant layout");
+
+struct ReaxffBocVkParams
+{
+    int num_pairs;
+    int atom_type_numbers;
+    float gp_boc1;
+    float gp_boc2;
+    float bo_cut;
+    int write_mode;
+};
+static_assert(sizeof(ReaxffBocVkParams) == 24,
+              "ReaxffBocVkParams must match the GLSL push constant layout");
+
+struct ReaxffForceProjectionVkParams
+{
+    int num_pairs;
+    Boundary boundary;
+    int need_virial;
+};
+static_assert(sizeof(ReaxffForceProjectionVkParams) == 60,
+              "ReaxffForceProjectionVkParams must match the GLSL push "
+              "constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 // Use neighbor list instead of O(N^2) all-pairs scan
 static __global__ void Calculate_Uncorrected_Bond_Orders_Kernel(
@@ -920,12 +969,40 @@ void REAXFF_BOND_ORDER::Calculate_Uncorrected_Bond_Orders_GPU(
     deviceMemcpy(d_num_pairs_ptr, &h_num_pairs, sizeof(int),
                  deviceMemcpyHostToDevice);
 
+#ifdef USE_VULKAN
+    ReaxffUboVkParams params{atom_numbers,      boundary,  cutoff,
+                             atom_type_numbers, gp_bo_cut, max_bonds,
+                             vk_nl_stride(d_nl, atom_numbers)};
+    const void* buffers[] = {d_nl,
+                             d_nl[0].atom_serial,
+                             d_crd,
+                             d_atom_type,
+                             d_r_s,
+                             d_r_p,
+                             d_r_pp,
+                             d_bo_1,
+                             d_bo_2,
+                             d_bo_3,
+                             d_bo_4,
+                             d_bo_5,
+                             d_bo_6,
+                             d_ro_pi,
+                             d_ro_pi2,
+                             d_total_bond_order,
+                             d_pair_i,
+                             d_pair_j,
+                             d_distances,
+                             d_num_pairs_ptr};
+    VK_LAUNCH(reaxff_uncorrected_bond_orders, gridSize.x, 1, blockSize.x, 1,
+              buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         Calculate_Uncorrected_Bond_Orders_Kernel, gridSize, blockSize, 0, NULL,
         atom_numbers, d_crd, boundary, cutoff, d_atom_type, d_r_s, d_r_p,
         d_r_pp, d_bo_1, d_bo_2, d_bo_3, d_bo_4, d_bo_5, d_bo_6, d_ro_pi,
         d_ro_pi2, atom_type_numbers, gp_bo_cut, d_total_bond_order, d_nl,
         d_pair_i, d_pair_j, d_distances, max_bonds, d_num_pairs_ptr);
+#endif
 }
 
 void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Orders_GPU(
@@ -940,6 +1017,75 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Orders_GPU(
     dim3 blockSize = {CONTROLLER::device_max_thread};
     dim3 gridSize = {(num_pairs + blockSize.x - 1) / blockSize.x};
 
+#ifdef USE_VULKAN
+    const void* buffers_main[] = {d_pair_i,
+                                  d_pair_j,
+                                  d_distances,
+                                  d_atom_type,
+                                  d_r_s,
+                                  d_r_p,
+                                  d_r_pp,
+                                  d_bo_1,
+                                  d_bo_2,
+                                  d_bo_3,
+                                  d_bo_4,
+                                  d_bo_5,
+                                  d_bo_6,
+                                  d_ro_pi,
+                                  d_ro_pi2,
+                                  d_valency,
+                                  d_valency_val,
+                                  d_ovc,
+                                  d_v13cor,
+                                  d_p_boc3,
+                                  d_p_boc4,
+                                  d_p_boc5,
+                                  d_total_bond_order,
+                                  d_corrected_bo_s,
+                                  d_corrected_bo_pi,
+                                  d_corrected_bo_pi2,
+                                  d_dbo_s_dr,
+                                  d_dbo_pi_dr,
+                                  d_dbo_pi2_dr,
+                                  d_dbo_raw_total_dr};
+    ReaxffBocVkParams params{num_pairs, atom_type_numbers, gp_boc1,
+                             gp_boc2,   gp_bo_cut,          0};
+    VK_LAUNCH(reaxff_apply_bond_order_corrections, gridSize.x, 1, blockSize.x,
+              1, buffers_main, &params, NULL);
+    const void* buffers_ddelta[] = {d_pair_i,
+                                    d_pair_j,
+                                    d_distances,
+                                    d_atom_type,
+                                    d_r_s,
+                                    d_r_p,
+                                    d_r_pp,
+                                    d_bo_1,
+                                    d_bo_2,
+                                    d_bo_3,
+                                    d_bo_4,
+                                    d_bo_5,
+                                    d_bo_6,
+                                    d_ro_pi,
+                                    d_ro_pi2,
+                                    d_valency,
+                                    d_valency_val,
+                                    d_ovc,
+                                    d_v13cor,
+                                    d_p_boc3,
+                                    d_p_boc4,
+                                    d_p_boc5,
+                                    d_total_bond_order,
+                                    d_dbo_s_dDelta_i,
+                                    d_dbo_pi_dDelta_i,
+                                    d_dbo_pi2_dDelta_i,
+                                    d_dbo_s_dDelta_j,
+                                    d_dbo_pi_dDelta_j,
+                                    d_dbo_pi2_dDelta_j,
+                                    d_dbo_raw_total_dr};
+    params.write_mode = 1;
+    VK_LAUNCH(reaxff_apply_bond_order_corrections, gridSize.x, 1, blockSize.x,
+              1, buffers_ddelta, &params, NULL);
+#else
     Launch_Device_Kernel(
         Apply_Bond_Order_Corrections_Kernel, gridSize, blockSize, 0, NULL,
         num_pairs, d_pair_i, d_pair_j, d_distances, d_crd, boundary,
@@ -951,6 +1097,7 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Orders_GPU(
         d_dbo_pi2_dr, d_dbo_s_dDelta_i, d_dbo_pi_dDelta_i, d_dbo_pi2_dDelta_i,
         d_dbo_s_dDelta_j, d_dbo_pi_dDelta_j, d_dbo_pi2_dDelta_j,
         d_dbo_raw_total_dr);
+#endif
 }
 
 void REAXFF_BOND_ORDER::Build_Bond_CSR(int atom_numbers, int num_bonds)
@@ -967,18 +1114,49 @@ void REAXFF_BOND_ORDER::Build_Bond_CSR(int atom_numbers, int num_bonds)
 
     // Phase 1: Count bonds per atom
     deviceMemset(d_bond_count, 0, sizeof(int) * atom_numbers);
+#ifdef USE_VULKAN
+    struct
+    {
+        int num_bonds;
+    } count_params{num_bonds};
+    const void* count_buffers[] = {d_pair_i, d_pair_j, d_bond_count};
+    VK_LAUNCH(reaxff_count_bonds_per_atom, gridSize_bonds.x, 1, blockSize.x, 1,
+              count_buffers, &count_params, NULL);
+#else
     Launch_Device_Kernel(Count_Bonds_Per_Atom_Kernel, gridSize_bonds, blockSize,
                          0, NULL, num_bonds, d_pair_i, d_pair_j, d_bond_count);
+#endif
 
     // Phase 2: Exclusive prefix sum
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+    } prefix_params{atom_numbers};
+    const void* prefix_buffers[] = {d_bond_count, d_bond_offset};
+    VK_LAUNCH(reaxff_exclusive_prefix_sum, 1, 1, 1, 1, prefix_buffers,
+              &prefix_params, NULL);
+#else
     Launch_Device_Kernel(Exclusive_Prefix_Sum_Kernel, dim3(1), dim3(1), 0, NULL,
                          atom_numbers, d_bond_count, d_bond_offset);
+#endif
 
     // Phase 3: Fill CSR
     deviceMemset(d_fill_count, 0, sizeof(int) * atom_numbers);
+#ifdef USE_VULKAN
+    struct
+    {
+        int num_bonds;
+    } fill_params{num_bonds};
+    const void* fill_buffers[] = {d_pair_i,   d_pair_j,    d_bond_offset,
+                                  d_fill_count, d_bond_nbr, d_bond_idx};
+    VK_LAUNCH(reaxff_fill_bond_csr, gridSize_bonds.x, 1, blockSize.x, 1,
+              fill_buffers, &fill_params, NULL);
+#else
     Launch_Device_Kernel(Fill_Bond_CSR_Kernel, gridSize_bonds, blockSize, 0,
                          NULL, num_bonds, d_pair_i, d_pair_j, d_bond_offset,
                          d_fill_count, d_bond_nbr, d_bond_idx);
+#endif
 }
 
 void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
@@ -1034,11 +1212,24 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
         dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
         deviceMemset(d_total_corrected_bond_order, 0,
                      sizeof(float) * atom_numbers);
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } params{atom_numbers};
+        const void* buffers[] = {d_bond_count, d_bond_offset, d_bond_idx,
+                                 d_corrected_bo_s, d_corrected_bo_pi,
+                                 d_corrected_bo_pi2,
+                                 d_total_corrected_bond_order};
+        VK_LAUNCH(reaxff_reduce_total_corrected_bo, gridSize.x, 1, blockSize.x,
+                  1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(Reduce_Total_Corrected_Bond_Order_Kernel, gridSize,
                              blockSize, 0, NULL, atom_numbers, d_bond_count,
                              d_bond_offset, d_bond_idx, d_corrected_bo_s,
                              d_corrected_bo_pi, d_corrected_bo_pi2,
                              d_total_corrected_bond_order);
+#endif
     }
 }
 
@@ -1053,6 +1244,34 @@ void REAXFF_BOND_ORDER::Calculate_Forces(int atom_numbers, const VECTOR* d_crd,
     dim3 blockSize = {CONTROLLER::device_max_thread};
     dim3 gridSize = {(h_num_pairs + blockSize.x - 1) / blockSize.x};
 
+#ifdef USE_VULKAN
+    struct
+    {
+        int num_pairs;
+    } cdd_params{h_num_pairs};
+    const void* cdd_buffers[] = {d_pair_i,          d_pair_j,
+                                 d_dE_dBO_s,        d_dE_dBO_pi,
+                                 d_dE_dBO_pi2,      d_CdDelta,
+                                 d_dbo_s_dDelta_i,  d_dbo_pi_dDelta_i,
+                                 d_dbo_pi2_dDelta_i, d_dbo_s_dDelta_j,
+                                 d_dbo_pi_dDelta_j, d_dbo_pi2_dDelta_j,
+                                 d_CdDelta_prime};
+    VK_LAUNCH(reaxff_cddelta_prime, gridSize.x, 1, blockSize.x, 1, cdd_buffers,
+              &cdd_params, NULL);
+
+    ReaxffForceProjectionVkParams proj_params{h_num_pairs, boundary,
+                                              need_virial};
+    const void* proj_buffers[] = {d_pair_i,          d_pair_j,
+                                  d_pair_distances,  d_crd,
+                                  d_dE_dBO_s,        d_dE_dBO_pi,
+                                  d_dE_dBO_pi2,      d_CdDelta,
+                                  d_dbo_s_dr,        d_dbo_pi_dr,
+                                  d_dbo_pi2_dr,      d_dbo_raw_total_dr,
+                                  d_CdDelta_prime,   d_frc,
+                                  vk_or_dummy(atom_virial, d_frc)};
+    VK_LAUNCH(reaxff_force_projection, gridSize.x, 1, blockSize.x, 1,
+              proj_buffers, &proj_params, NULL);
+#else
     Launch_Device_Kernel(Calculate_CdDelta_Prime_Kernel, gridSize, blockSize, 0,
                          NULL, h_num_pairs, d_pair_i, d_pair_j, d_dE_dBO_s,
                          d_dE_dBO_pi, d_dE_dBO_pi2, d_CdDelta, d_dbo_s_dDelta_i,
@@ -1066,6 +1285,7 @@ void REAXFF_BOND_ORDER::Calculate_Forces(int atom_numbers, const VECTOR* d_crd,
         d_dE_dBO_s, d_dE_dBO_pi, d_dE_dBO_pi2, d_CdDelta, d_dbo_s_dr,
         d_dbo_pi_dr, d_dbo_pi2_dr, d_dbo_raw_total_dr, d_CdDelta_prime, d_frc,
         need_virial ? atom_virial : NULL);
+#endif
 }
 
 void REAXFF_BOND_ORDER::Clear_Derivatives(int atom_numbers, float* d_CdDelta)

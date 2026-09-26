@@ -1,0 +1,10 @@
+layout(set = 0, binding = 0, std430) buffer B { float b[]; };
+layout(set = 0, binding = 1, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 2, std430) buffer Chi { float chi[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    b[i] = -chi[atom_types[i]];
+}

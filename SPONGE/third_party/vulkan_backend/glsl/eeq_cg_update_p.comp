@@ -1,0 +1,10 @@
+layout(set = 0, binding = 0, std430) buffer P { float p[]; };
+layout(set = 0, binding = 1, std430) buffer Z { float z[]; };
+layout(set = 0, binding = 2, std430) buffer DBeta { float d_beta[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    p[i] = z[i] + d_beta[0] * p[i];
+}

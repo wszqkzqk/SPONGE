@@ -1,4 +1,32 @@
-﻿#include "vdw.h"
+#include "vdw.h"
+
+#ifdef USE_VULKAN
+struct ReaxffVdwVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float cutoff;
+    float p_vdw1;
+    int ntypes;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(ReaxffVdwVkParams) == 80,
+              "ReaxffVdwVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 static const int p_rvdw = 0;
 static const int p_epsilon = 1;
@@ -419,11 +447,33 @@ void REAXFF_VDW::REAXFF_VDW_Force_With_Atom_Energy_And_Virial(
     dim3 blockSize(128);
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
 
+#ifdef USE_VULKAN
+    ReaxffVdwVkParams params{atom_numbers,
+                             boundary,
+                             cutoff,
+                             this->p_vdw1,
+                             atom_type_numbers,
+                             atom_energy != NULL ? 1 : 0,
+                             need_virial && atom_virial != NULL ? 1 : 0,
+                             vk_nl_stride(nl, atom_numbers)};
+    const void* buffers[] = {crd,
+                             d_atom_type,
+                             d_twobody_params,
+                             nl,
+                             nl[0].atom_serial,
+                             frc,
+                             vk_or_dummy(atom_virial, frc),
+                             vk_or_dummy(atom_energy, d_energy_sum),
+                             d_energy_sum};
+    VK_LAUNCH(reaxff_vdw_force, gridSize.x, 1, blockSize.x, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(REAXFF_VDW_Force_CUDA, gridSize, blockSize, 0, NULL,
                          atom_numbers, crd, frc, boundary, nl, d_atom_type,
                          d_twobody_params, atom_type_numbers, cutoff,
                          this->p_vdw1, atom_energy,
                          need_virial ? atom_virial : NULL, d_energy_sum);
+#endif
 }
 
 void REAXFF_VDW::Step_Print(CONTROLLER* controller)

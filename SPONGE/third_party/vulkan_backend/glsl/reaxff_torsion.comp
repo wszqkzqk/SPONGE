@@ -1,0 +1,559 @@
+struct Sad6
+{
+    float val, d0, d1, d2, d3, d4, d5;
+};
+Sad6 sad6_var(float v, int id)
+{
+    return Sad6(v, id == 0 ? 1.0 : 0.0, id == 1 ? 1.0 : 0.0,
+                id == 2 ? 1.0 : 0.0, id == 3 ? 1.0 : 0.0, id == 4 ? 1.0 : 0.0,
+                id == 5 ? 1.0 : 0.0);
+}
+Sad6 sad6_const(float v) { return Sad6(v, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
+Sad6 sad6_add(Sad6 a, Sad6 b)
+{
+    return Sad6(a.val + b.val, a.d0 + b.d0, a.d1 + b.d1, a.d2 + b.d2,
+                a.d3 + b.d3, a.d4 + b.d4, a.d5 + b.d5);
+}
+Sad6 sad6_sub(Sad6 a, Sad6 b)
+{
+    return Sad6(a.val - b.val, a.d0 - b.d0, a.d1 - b.d1, a.d2 - b.d2,
+                a.d3 - b.d3, a.d4 - b.d4, a.d5 - b.d5);
+}
+Sad6 sad6_add_c(Sad6 a, float c)
+{
+    return Sad6(a.val + c, a.d0, a.d1, a.d2, a.d3, a.d4, a.d5);
+}
+Sad6 sad6_sub_c(Sad6 a, float c)
+{
+    return Sad6(a.val - c, a.d0, a.d1, a.d2, a.d3, a.d4, a.d5);
+}
+Sad6 sad6_rsub_c(float c, Sad6 a)
+{
+    return Sad6(c - a.val, -a.d0, -a.d1, -a.d2, -a.d3, -a.d4, -a.d5);
+}
+Sad6 sad6_scale(Sad6 a, float s)
+{
+    return Sad6(a.val * s, a.d0 * s, a.d1 * s, a.d2 * s, a.d3 * s, a.d4 * s,
+                a.d5 * s);
+}
+Sad6 sad6_mul(Sad6 a, Sad6 b)
+{
+    return Sad6(a.val * b.val, a.d0 * b.val + a.val * b.d0,
+                a.d1 * b.val + a.val * b.d1, a.d2 * b.val + a.val * b.d2,
+                a.d3 * b.val + a.val * b.d3, a.d4 * b.val + a.val * b.d4,
+                a.d5 * b.val + a.val * b.d5);
+}
+Sad6 sad6_div(Sad6 a, Sad6 b)
+{
+    float q = a.val / b.val;
+    return Sad6(q, (a.d0 - q * b.d0) / b.val, (a.d1 - q * b.d1) / b.val,
+                (a.d2 - q * b.d2) / b.val, (a.d3 - q * b.d3) / b.val,
+                (a.d4 - q * b.d4) / b.val, (a.d5 - q * b.d5) / b.val);
+}
+Sad6 sad6_exp(Sad6 a)
+{
+    float e = exp(a.val);
+    return Sad6(e, e * a.d0, e * a.d1, e * a.d2, e * a.d3, e * a.d4, e * a.d5);
+}
+
+struct Sad9
+{
+    float val, d0, d1, d2, d3, d4, d5, d6, d7, d8;
+};
+Sad9 sad9_var(float v, int id)
+{
+    return Sad9(v, id == 0 ? 1.0 : 0.0, id == 1 ? 1.0 : 0.0,
+                id == 2 ? 1.0 : 0.0, id == 3 ? 1.0 : 0.0, id == 4 ? 1.0 : 0.0,
+                id == 5 ? 1.0 : 0.0, id == 6 ? 1.0 : 0.0, id == 7 ? 1.0 : 0.0,
+                id == 8 ? 1.0 : 0.0);
+}
+Sad9 sad9_const(float v)
+{
+    return Sad9(v, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+Sad9 sad9_add(Sad9 a, Sad9 b)
+{
+    return Sad9(a.val + b.val, a.d0 + b.d0, a.d1 + b.d1, a.d2 + b.d2,
+                a.d3 + b.d3, a.d4 + b.d4, a.d5 + b.d5, a.d6 + b.d6,
+                a.d7 + b.d7, a.d8 + b.d8);
+}
+Sad9 sad9_sub(Sad9 a, Sad9 b)
+{
+    return Sad9(a.val - b.val, a.d0 - b.d0, a.d1 - b.d1, a.d2 - b.d2,
+                a.d3 - b.d3, a.d4 - b.d4, a.d5 - b.d5, a.d6 - b.d6,
+                a.d7 - b.d7, a.d8 - b.d8);
+}
+Sad9 sad9_neg(Sad9 a)
+{
+    return Sad9(-a.val, -a.d0, -a.d1, -a.d2, -a.d3, -a.d4, -a.d5, -a.d6,
+                -a.d7, -a.d8);
+}
+Sad9 sad9_add_c(Sad9 a, float c)
+{
+    return Sad9(a.val + c, a.d0, a.d1, a.d2, a.d3, a.d4, a.d5, a.d6, a.d7,
+                a.d8);
+}
+Sad9 sad9_sub_c(Sad9 a, float c)
+{
+    return Sad9(a.val - c, a.d0, a.d1, a.d2, a.d3, a.d4, a.d5, a.d6, a.d7,
+                a.d8);
+}
+Sad9 sad9_rsub_c(float c, Sad9 a)
+{
+    return Sad9(c - a.val, -a.d0, -a.d1, -a.d2, -a.d3, -a.d4, -a.d5, -a.d6,
+                -a.d7, -a.d8);
+}
+Sad9 sad9_scale(Sad9 a, float s)
+{
+    return Sad9(a.val * s, a.d0 * s, a.d1 * s, a.d2 * s, a.d3 * s, a.d4 * s,
+                a.d5 * s, a.d6 * s, a.d7 * s, a.d8 * s);
+}
+Sad9 sad9_mul(Sad9 a, Sad9 b)
+{
+    return Sad9(a.val * b.val, a.d0 * b.val + a.val * b.d0,
+                a.d1 * b.val + a.val * b.d1, a.d2 * b.val + a.val * b.d2,
+                a.d3 * b.val + a.val * b.d3, a.d4 * b.val + a.val * b.d4,
+                a.d5 * b.val + a.val * b.d5, a.d6 * b.val + a.val * b.d6,
+                a.d7 * b.val + a.val * b.d7, a.d8 * b.val + a.val * b.d8);
+}
+Sad9 sad9_div(Sad9 a, Sad9 b)
+{
+    float q = a.val / b.val;
+    return Sad9(q, (a.d0 - q * b.d0) / b.val, (a.d1 - q * b.d1) / b.val,
+                (a.d2 - q * b.d2) / b.val, (a.d3 - q * b.d3) / b.val,
+                (a.d4 - q * b.d4) / b.val, (a.d5 - q * b.d5) / b.val,
+                (a.d6 - q * b.d6) / b.val, (a.d7 - q * b.d7) / b.val,
+                (a.d8 - q * b.d8) / b.val);
+}
+Sad9 sad9_sqrt(Sad9 a)
+{
+    float s = sqrt(a.val);
+    float df = 0.5 / s;
+    return Sad9(s, df * a.d0, df * a.d1, df * a.d2, df * a.d3, df * a.d4,
+                df * a.d5, df * a.d6, df * a.d7, df * a.d8);
+}
+Sad9 sad9_sin(Sad9 a)
+{
+    float df = cos(a.val);
+    return Sad9(sin(a.val), df * a.d0, df * a.d1, df * a.d2, df * a.d3,
+                df * a.d4, df * a.d5, df * a.d6, df * a.d7, df * a.d8);
+}
+Sad9 sad9_cos(Sad9 a)
+{
+    float df = -sin(a.val);
+    return Sad9(cos(a.val), df * a.d0, df * a.d1, df * a.d2, df * a.d3,
+                df * a.d4, df * a.d5, df * a.d6, df * a.d7, df * a.d8);
+}
+Sad9 sad9_acos(Sad9 a)
+{
+    float df = -1.0 / sqrt(1.0 - a.val * a.val);
+    return Sad9(acos(a.val), df * a.d0, df * a.d1, df * a.d2, df * a.d3,
+                df * a.d4, df * a.d5, df * a.d6, df * a.d7, df * a.d8);
+}
+Sad9 sad9_atan2(Sad9 y, Sad9 x)
+{
+    float r2 = x.val * x.val + y.val * y.val;
+    float df_dy = x.val / r2;
+    float df_dx = -y.val / r2;
+    return Sad9(atan(y.val, x.val), df_dx * x.d0 + df_dy * y.d0,
+                df_dx * x.d1 + df_dy * y.d1, df_dx * x.d2 + df_dy * y.d2,
+                df_dx * x.d3 + df_dy * y.d3, df_dx * x.d4 + df_dy * y.d4,
+                df_dx * x.d5 + df_dy * y.d5, df_dx * x.d6 + df_dy * y.d6,
+                df_dx * x.d7 + df_dy * y.d7, df_dx * x.d8 + df_dy * y.d8);
+}
+
+struct SadVec9
+{
+    Sad9 x, y, z;
+};
+Sad9 sadvec9_dot(SadVec9 a, SadVec9 b)
+{
+    return sad9_add(sad9_add(sad9_mul(a.x, b.x), sad9_mul(a.y, b.y)),
+                    sad9_mul(a.z, b.z));
+}
+SadVec9 sadvec9_cross(SadVec9 a, SadVec9 b)
+{
+    SadVec9 v;
+    v.x = sad9_sub(sad9_mul(a.y, b.z), sad9_mul(a.z, b.y));
+    v.y = sad9_sub(sad9_mul(a.z, b.x), sad9_mul(a.x, b.z));
+    v.z = sad9_sub(sad9_mul(a.x, b.y), sad9_mul(a.y, b.x));
+    return v;
+}
+SadVec9 sadvec9_scale(SadVec9 a, float s)
+{
+    SadVec9 v;
+    v.x = sad9_scale(a.x, s);
+    v.y = sad9_scale(a.y, s);
+    v.z = sad9_scale(a.z, s);
+    return v;
+}
+
+struct TorsionEntry
+{
+    float p_tor1;
+    float V1, V2, V3;
+    float p_tor2;
+    float p_cot1;
+};
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 2, std430) buffer DeltaBoc { float Delta_boc[]; };
+layout(set = 0, binding = 3, std430) buffer TorsionInfo { ivec2 torsion_info[]; };
+layout(set = 0, binding = 4, std430) buffer TorsionEntries { TorsionEntry torsion_entries[]; };
+layout(set = 0, binding = 5, std430) buffer BoS { float bo_s[]; };
+layout(set = 0, binding = 6, std430) buffer BoPi { float bo_pi[]; };
+layout(set = 0, binding = 7, std430) buffer BoPi2 { float bo_pi2[]; };
+layout(set = 0, binding = 8, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 9, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 10, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 11, std430) buffer CdDeltaBuf { float CdDelta[]; };
+layout(set = 0, binding = 12, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 13, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 14, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 15, std430) buffer EnergyTorSum { float energy_tor_sum[]; };
+layout(set = 0, binding = 16, std430) buffer EnergyCotSum { float energy_cot_sum[]; };
+layout(set = 0, binding = 17, std430) buffer BondCount { int bond_count[]; };
+layout(set = 0, binding = 18, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 19, std430) buffer BondNbr { int bond_nbr[]; };
+layout(set = 0, binding = 20, std430) buffer BondIdx { int bond_idx[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    float p_tor2;
+    float p_tor3;
+    float p_tor4;
+    float p_cot2;
+    float thb_cut;
+    int atom_type_numbers;
+    int need_atom_energy;
+    int need_virial;
+}
+pc;
+void main()
+{
+    int j = int(gl_GlobalInvocationID.x);
+    if (j >= pc.atom_numbers) return;
+    int type_j = atom_type[j];
+    if (type_j < 0) return;
+    Vec3 rj = crd[j];
+    float delta_j_val = Delta_boc[j];
+
+    float en_tor = 0.0;
+    float en_cot = 0.0;
+
+    int bc_j = bond_count[j];
+    int bo_j = bond_offset[j];
+
+    for (int pk = 0; pk < bc_j; pk++)
+    {
+        int b_jk = bond_idx[bo_j + pk];
+        int k = bond_nbr[bo_j + pk];
+        if (j >= k) continue;
+
+        int type_k = atom_type[k];
+        float bo_jk_val = bo_s[b_jk] + bo_pi[b_jk] + bo_pi2[b_jk];
+        if (bo_jk_val <= pc.thb_cut) continue;
+        float bo_jk_pi_val = bo_pi[b_jk];
+
+        Vec3 rk = crd[k];
+        Vec3 djk = get_displacement_periodic(rj, rk, pc.boundary);
+        float r_jk = v3_len(djk);
+        float delta_k_val = Delta_boc[k];
+
+        int bc_k = bond_count[k];
+        int bo_k = bond_offset[k];
+
+        for (int pi = 0; pi < bc_j; pi++)
+        {
+            int b_ij = bond_idx[bo_j + pi];
+            int i = bond_nbr[bo_j + pi];
+            if (i == k) continue;
+            int type_i = atom_type[i];
+            float bo_ij_val = bo_s[b_ij] + bo_pi[b_ij] + bo_pi2[b_ij];
+            if (bo_ij_val <= pc.thb_cut) continue;
+
+            Vec3 ri = crd[i];
+            Vec3 dji = get_displacement_periodic(rj, ri, pc.boundary);
+            float r_ij = v3_len(dji);
+
+            for (int pl = 0; pl < bc_k; pl++)
+            {
+                int b_kl = bond_idx[bo_k + pl];
+                int l = bond_nbr[bo_k + pl];
+                if (l == j || l == i) continue;
+                int type_l = atom_type[l];
+                float bo_kl_val = bo_s[b_kl] + bo_pi[b_kl] + bo_pi2[b_kl];
+                if (bo_kl_val <= pc.thb_cut) continue;
+                if (bo_ij_val * bo_jk_val * bo_kl_val <= pc.thb_cut) continue;
+
+                Vec3 rl = crd[l];
+                Vec3 dkl = get_displacement_periodic(rk, rl, pc.boundary);
+                float r_kl = v3_len(dkl);
+
+                float cos_ijk = v3_dot(dji, djk) / (r_ij * r_jk);
+                cos_ijk = clamp(cos_ijk, -1.0, 1.0);
+                float sin_ijk = sin(acos(cos_ijk));
+                if (sin_ijk < 1e-5) sin_ijk = 1e-5;
+
+                float cos_jkl = v3_dot(v3_neg(djk), dkl) / (r_jk * r_kl);
+                cos_jkl = clamp(cos_jkl, -1.0, 1.0);
+                float sin_jkl = sin(acos(cos_jkl));
+                if (sin_jkl < 1e-5) sin_jkl = 1e-5;
+
+                float unnorm_cos_phi =
+                    -v3_dot(dji, djk) * v3_dot(djk, dkl) +
+                    (r_jk * r_jk) * v3_dot(dji, dkl);
+                Vec3 cross_jk_kl = v3_cross(djk, dkl);
+                float unnorm_sin_phi = -r_jk * v3_dot(dji, cross_jk_kl);
+                float phi = atan(unnorm_sin_phi, unnorm_cos_phi);
+                float cos_phi = cos(phi);
+
+                int quartet_idx =
+                    (((type_i * pc.atom_type_numbers + type_j) *
+                          pc.atom_type_numbers +
+                      type_k) *
+                         pc.atom_type_numbers +
+                     type_l);
+                ivec2 info = torsion_info[quartet_idx];
+
+                SadVec9 s_dji;
+                s_dji.x = sad9_var(dji.x, 0);
+                s_dji.y = sad9_var(dji.y, 1);
+                s_dji.z = sad9_var(dji.z, 2);
+                SadVec9 s_djk;
+                s_djk.x = sad9_var(djk.x, 3);
+                s_djk.y = sad9_var(djk.y, 4);
+                s_djk.z = sad9_var(djk.z, 5);
+                SadVec9 s_dkl;
+                s_dkl.x = sad9_var(dkl.x, 6);
+                s_dkl.y = sad9_var(dkl.y, 7);
+                s_dkl.z = sad9_var(dkl.z, 8);
+
+                Sad9 s_r_ij = sad9_sqrt(sadvec9_dot(s_dji, s_dji));
+                Sad9 s_r_jk = sad9_sqrt(sadvec9_dot(s_djk, s_djk));
+                Sad9 s_r_kl = sad9_sqrt(sadvec9_dot(s_dkl, s_dkl));
+
+                Sad9 s_cos_ijk = sad9_div(sadvec9_dot(s_dji, s_djk),
+                                          sad9_mul(s_r_ij, s_r_jk));
+                if (s_cos_ijk.val > 1.0) s_cos_ijk = sad9_const(1.0);
+                if (s_cos_ijk.val < -1.0) s_cos_ijk = sad9_const(-1.0);
+                Sad9 s_sin_ijk = sad9_sin(sad9_acos(s_cos_ijk));
+                if (s_sin_ijk.val < 1e-5) s_sin_ijk = sad9_const(1e-5);
+
+                Sad9 s_cos_jkl = sad9_div(sadvec9_dot(sadvec9_scale(s_djk, -1.0),
+                                                      s_dkl),
+                                          sad9_mul(s_r_jk, s_r_kl));
+                if (s_cos_jkl.val > 1.0) s_cos_jkl = sad9_const(1.0);
+                if (s_cos_jkl.val < -1.0) s_cos_jkl = sad9_const(-1.0);
+                Sad9 s_sin_jkl = sad9_sin(sad9_acos(s_cos_jkl));
+                if (s_sin_jkl.val < 1e-5) s_sin_jkl = sad9_const(1e-5);
+
+                Sad9 s_unnorm_cos_phi = sad9_add(
+                    sad9_neg(sad9_mul(sadvec9_dot(s_dji, s_djk),
+                                      sadvec9_dot(s_djk, s_dkl))),
+                    sad9_mul(sad9_mul(s_r_jk, s_r_jk),
+                             sadvec9_dot(s_dji, s_dkl)));
+                SadVec9 s_cross_jk_kl = sadvec9_cross(s_djk, s_dkl);
+                Sad9 s_unnorm_sin_phi =
+                    sad9_neg(sad9_mul(s_r_jk, sadvec9_dot(s_dji,
+                                                          s_cross_jk_kl)));
+                Sad9 s_phi = sad9_atan2(s_unnorm_sin_phi, s_unnorm_cos_phi);
+                Sad9 s_cos_phi = sad9_cos(s_phi);
+
+                for (int e = 0; e < info.y; e++)
+                {
+                    TorsionEntry param = torsion_entries[info.x + e];
+
+                    Sad6 s_bo_ij = sad6_var(bo_ij_val, 0);
+                    Sad6 s_bo_jk = sad6_var(bo_jk_val, 1);
+                    Sad6 s_bo_kl = sad6_var(bo_kl_val, 2);
+                    Sad6 s_delta_j = sad6_var(delta_j_val, 3);
+                    Sad6 s_delta_k = sad6_var(delta_k_val, 4);
+                    Sad6 s_bo_jk_pi = sad6_var(bo_jk_pi_val, 5);
+
+                    Sad6 s_boa_ij = sad6_sub_c(s_bo_ij, pc.thb_cut);
+                    Sad6 s_boa_jk = sad6_sub_c(s_bo_jk, pc.thb_cut);
+                    Sad6 s_boa_kl = sad6_sub_c(s_bo_kl, pc.thb_cut);
+
+                    Sad6 s_fn10 = sad6_mul(
+                        sad6_mul(
+                            sad6_rsub_c(1.0,
+                                        sad6_exp(sad6_scale(s_boa_ij,
+                                                            -pc.p_tor2))),
+                            sad6_rsub_c(1.0,
+                                        sad6_exp(sad6_scale(s_boa_jk,
+                                                            -pc.p_tor2)))),
+                        sad6_rsub_c(1.0,
+                                    sad6_exp(sad6_scale(s_boa_kl,
+                                                        -pc.p_tor2))));
+                    Sad6 s_dsum = sad6_add(s_delta_j, s_delta_k);
+                    Sad6 s_exp_tor3 = sad6_exp(sad6_scale(s_dsum, -pc.p_tor3));
+                    Sad6 s_exp_tor4 = sad6_exp(sad6_scale(s_dsum, pc.p_tor4));
+                    Sad6 s_f11_DjDk = sad6_div(
+                        sad6_add_c(s_exp_tor3, 2.0),
+                        sad6_add(sad6_add_c(s_exp_tor3, 1.0), s_exp_tor4));
+
+                    Sad6 s_tor_diff =
+                        sad6_sub(sad6_rsub_c(2.0, s_bo_jk_pi), s_f11_DjDk);
+                    Sad6 s_exp_tor1 = sad6_exp(sad6_scale(
+                        sad6_mul(s_tor_diff, s_tor_diff), param.p_tor1));
+                    Sad6 s_CV = sad6_scale(
+                        sad6_add_c(
+                            sad6_add_c(
+                                sad6_scale(
+                                    sad6_scale(s_exp_tor1, param.V2),
+                                    1.0 - cos(2.0 * phi)),
+                                param.V1 * (1.0 + cos_phi)),
+                            param.V3 * (1.0 + cos(3.0 * phi))),
+                        0.5);
+
+                    Sad6 s_en_tor = sad6_mul(
+                        sad6_scale(sad6_scale(s_fn10, sin_ijk), sin_jkl),
+                        s_CV);
+
+                    Sad6 s_en_cot = sad6_const(0.0);
+                    if (abs(param.p_cot1) > 0.0001)
+                    {
+                        Sad6 s_cot_diff_ij = sad6_sub_c(s_boa_ij, 1.5);
+                        Sad6 s_cot_diff_jk = sad6_sub_c(s_boa_jk, 1.5);
+                        Sad6 s_cot_diff_kl = sad6_sub_c(s_boa_kl, 1.5);
+                        Sad6 s_fn12 = sad6_mul(
+                            sad6_mul(
+                                sad6_exp(sad6_scale(
+                                    sad6_mul(s_cot_diff_ij, s_cot_diff_ij),
+                                    -pc.p_cot2)),
+                                sad6_exp(sad6_scale(
+                                    sad6_mul(s_cot_diff_jk, s_cot_diff_jk),
+                                    -pc.p_cot2))),
+                            sad6_exp(sad6_scale(
+                                sad6_mul(s_cot_diff_kl, s_cot_diff_kl),
+                                -pc.p_cot2)));
+                        s_en_cot = sad6_scale(
+                            sad6_scale(s_fn12, param.p_cot1),
+                            1.0 +
+                                (cos_phi * cos_phi - 1.0) * sin_ijk * sin_jkl);
+                    }
+
+                    Sad6 s_en_total = sad6_add(s_en_tor, s_en_cot);
+
+                    afadd(dE_dBO_s[b_ij], s_en_total.d0);
+                    afadd(dE_dBO_pi[b_ij], s_en_total.d0);
+                    afadd(dE_dBO_pi2[b_ij], s_en_total.d0);
+
+                    afadd(dE_dBO_s[b_jk], s_en_total.d1);
+                    afadd(dE_dBO_pi[b_jk], s_en_total.d1 + s_en_total.d5);
+                    afadd(dE_dBO_pi2[b_jk], s_en_total.d1);
+
+                    afadd(dE_dBO_s[b_kl], s_en_total.d2);
+                    afadd(dE_dBO_pi[b_kl], s_en_total.d2);
+                    afadd(dE_dBO_pi2[b_kl], s_en_total.d2);
+
+                    afadd(CdDelta[j], s_en_total.d3);
+                    afadd(CdDelta[k], s_en_total.d4);
+
+                    float boa_ij_val = bo_ij_val - pc.thb_cut;
+                    float boa_jk_val = bo_jk_val - pc.thb_cut;
+                    float boa_kl_val = bo_kl_val - pc.thb_cut;
+                    float fn10_val = (1.0 - exp(-pc.p_tor2 * boa_ij_val)) *
+                                     (1.0 - exp(-pc.p_tor2 * boa_jk_val)) *
+                                     (1.0 - exp(-pc.p_tor2 * boa_kl_val));
+                    float exp_tor3_val =
+                        exp(-pc.p_tor3 * (delta_j_val + delta_k_val));
+                    float exp_tor4_val =
+                        exp(pc.p_tor4 * (delta_j_val + delta_k_val));
+                    float f11_DjDk_val =
+                        (2.0 + exp_tor3_val) /
+                        (1.0 + exp_tor3_val + exp_tor4_val);
+                    float tor_diff_val =
+                        2.0 - bo_jk_pi_val - f11_DjDk_val;
+                    float exp_tor1_val =
+                        exp(param.p_tor1 * tor_diff_val * tor_diff_val);
+
+                    Sad9 s_cv_dir = sad9_scale(
+                        sad9_add(
+                            sad9_add(
+                                sad9_scale(
+                                    sad9_add_c(s_cos_phi, 1.0),
+                                    param.V1),
+                                sad9_scale(
+                                    sad9_rsub_c(
+                                        1.0,
+                                        sad9_cos(sad9_scale(s_phi, 2.0))),
+                                    param.V2 * exp_tor1_val)),
+                            sad9_scale(
+                                sad9_add_c(
+                                    sad9_cos(sad9_scale(s_phi, 3.0)), 1.0),
+                                param.V3)),
+                        0.5);
+                    Sad9 s_en_tor_dir = sad9_mul(
+                        sad9_mul(sad9_scale(s_sin_ijk, fn10_val), s_sin_jkl),
+                        s_cv_dir);
+
+                    Sad9 s_en_cot_dir = sad9_const(0.0);
+                    if (abs(param.p_cot1) > 0.0001)
+                    {
+                        float cot_diff_ij_val = boa_ij_val - 1.5;
+                        float cot_diff_jk_val = boa_jk_val - 1.5;
+                        float cot_diff_kl_val = boa_kl_val - 1.5;
+                        float fn12_val =
+                            exp(-pc.p_cot2 * cot_diff_ij_val *
+                                cot_diff_ij_val) *
+                            exp(-pc.p_cot2 * cot_diff_jk_val *
+                                cot_diff_jk_val) *
+                            exp(-pc.p_cot2 * cot_diff_kl_val *
+                                cot_diff_kl_val);
+                        s_en_cot_dir = sad9_scale(
+                            sad9_add_c(
+                                sad9_mul(
+                                    sad9_mul(
+                                        sad9_sub_c(sad9_mul(s_cos_phi,
+                                                            s_cos_phi),
+                                                   1.0),
+                                        s_sin_ijk),
+                                    s_sin_jkl),
+                                1.0),
+                            param.p_cot1 * fn12_val);
+                    }
+                    Sad9 s_en_direct = sad9_add(s_en_tor_dir, s_en_cot_dir);
+
+                    Vec3 dE_ddji = v3(s_en_direct.d0, s_en_direct.d1,
+                                      s_en_direct.d2);
+                    Vec3 dE_ddjk = v3(s_en_direct.d3, s_en_direct.d4,
+                                      s_en_direct.d5);
+                    Vec3 dE_ddkl = v3(s_en_direct.d6, s_en_direct.d7,
+                                      s_en_direct.d8);
+
+                    Vec3 fi = dE_ddji;
+                    Vec3 fj = v3(-(dE_ddji.x + dE_ddjk.x),
+                                 -(dE_ddji.y + dE_ddjk.y),
+                                 -(dE_ddji.z + dE_ddjk.z));
+                    Vec3 fk = v3_sub(dE_ddjk, dE_ddkl);
+                    Vec3 fl = dE_ddkl;
+
+                    aadd_v3(frc[i], fi);
+                    aadd_v3(frc[j], fj);
+                    aadd_v3(frc[k], fk);
+                    aadd_v3(frc[l], fl);
+                    if (pc.need_virial != 0)
+                    {
+                        Vec3 dr_ji = v3_neg(dji);
+                        Vec3 dr_jk = v3_neg(djk);
+                        Vec3 dr_jl = v3_sub(dr_jk, dkl);
+                        LTMat v = lt_add(
+                            lt_add(virial_from_force_dis(fi, dr_ji),
+                                   virial_from_force_dis(fk, dr_jk)),
+                            virial_from_force_dis(fl, dr_jl));
+                        aadd_lt(atom_virial[j], v);
+                    }
+
+                    en_tor += s_en_tor.val;
+                    en_cot += s_en_cot.val;
+                }
+            }
+        }
+    }
+    afadd(energy_tor_sum[0], en_tor);
+    afadd(energy_cot_sum[0], en_cot);
+    if (pc.need_atom_energy != 0) afadd(atom_energy[j], en_tor + en_cot);
+}

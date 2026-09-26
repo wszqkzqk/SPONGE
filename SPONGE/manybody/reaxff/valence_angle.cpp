@@ -1,6 +1,28 @@
-﻿#include "valence_angle.h"
+#include "valence_angle.h"
 
 #include "bond_order.h"  // for find_bond_index
+
+#ifdef USE_VULKAN
+struct ReaxffAngleVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    float p_val6, p_val8, p_val9, p_val10;
+    float p_pen2, p_pen3, p_pen4;
+    float p_coa2, p_coa3, p_coa4;
+    float thb_cut, thb_cutsq;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(sizeof(ReaxffAngleVkParams) == 116,
+              "ReaxffAngleVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Calculate_Valence_Angle_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_type,
@@ -635,6 +657,58 @@ void REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force(
     deviceMemset(d_energy_pen_sum, 0, sizeof(float));
     deviceMemset(d_energy_coa_sum, 0, sizeof(float));
 
+#ifdef USE_VULKAN
+    ReaxffAngleVkParams vk_params{
+        atom_numbers,
+        boundary,
+        atom_type_numbers,
+        params.p_val6,
+        params.p_val8,
+        params.p_val9,
+        params.p_val10,
+        params.p_pen2,
+        params.p_pen3,
+        params.p_pen4,
+        params.p_coa2,
+        params.p_coa3,
+        params.p_coa4,
+        params.thb_cut,
+        params.thb_cutsq,
+        need_atom_energy && atom_energy != NULL ? 1 : 0,
+        need_virial && atom_virial != NULL ? 1 : 0};
+    const void* buffers[] = {crd,
+                             d_atom_type,
+                             Delta_boc,
+                             Delta,
+                             Delta_val,
+                             d_p_val3,
+                             d_p_val5,
+                             d_thbp_info,
+                             d_thbp_entries,
+                             bo_module->d_corrected_bo_s,
+                             bo_module->d_corrected_bo_pi,
+                             bo_module->d_corrected_bo_pi2,
+                             bo_module->d_total_corrected_bond_order,
+                             nlp,
+                             vlpex,
+                             dDelta_lp,
+                             d_dE_dBO_s,
+                             d_dE_dBO_pi,
+                             d_dE_dBO_pi2,
+                             CdDelta,
+                             vk_or_dummy(atom_energy, d_energy_ang_sum),
+                             frc,
+                             vk_or_dummy(atom_virial, frc),
+                             d_energy_ang_sum,
+                             d_energy_pen_sum,
+                             d_energy_coa_sum,
+                             bo_module->d_bond_count,
+                             bo_module->d_bond_offset,
+                             bo_module->d_bond_nbr,
+                             bo_module->d_bond_idx};
+    VK_LAUNCH(reaxff_valence_angle, gridSize.x, 1, blockSize.x, 1, buffers,
+              &vk_params, NULL);
+#else
     Launch_Device_Kernel(
         Calculate_Valence_Angle_Kernel, gridSize, blockSize, 0, NULL,
         atom_numbers, crd, d_atom_type, Delta_boc, Delta, Delta_val, d_p_val3,
@@ -646,6 +720,7 @@ void REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force(
         need_virial ? atom_virial : NULL, d_energy_ang_sum, d_energy_pen_sum,
         d_energy_coa_sum, bo_module->d_bond_count, bo_module->d_bond_offset,
         bo_module->d_bond_nbr, bo_module->d_bond_idx);
+#endif
 
 #ifdef USE_GPU
     deviceError_t err = deviceGetLastError();

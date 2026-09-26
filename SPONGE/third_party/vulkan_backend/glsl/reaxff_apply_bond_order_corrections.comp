@@ -1,0 +1,215 @@
+layout(set = 0, binding = 0, std430) buffer PairI { int pair_i[]; };
+layout(set = 0, binding = 1, std430) buffer PairJ { int pair_j[]; };
+layout(set = 0, binding = 2, std430) buffer Distances { float distances[]; };
+layout(set = 0, binding = 3, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 4, std430) buffer RS { float r_s[]; };
+layout(set = 0, binding = 5, std430) buffer RP { float r_p[]; };
+layout(set = 0, binding = 6, std430) buffer RPP { float r_pp[]; };
+layout(set = 0, binding = 7, std430) buffer Bo1 { float bo_1[]; };
+layout(set = 0, binding = 8, std430) buffer Bo2 { float bo_2[]; };
+layout(set = 0, binding = 9, std430) buffer Bo3 { float bo_3[]; };
+layout(set = 0, binding = 10, std430) buffer Bo4 { float bo_4[]; };
+layout(set = 0, binding = 11, std430) buffer Bo5 { float bo_5[]; };
+layout(set = 0, binding = 12, std430) buffer Bo6 { float bo_6[]; };
+layout(set = 0, binding = 13, std430) buffer RoPi { float ro_pi[]; };
+layout(set = 0, binding = 14, std430) buffer RoPi2 { float ro_pi2[]; };
+layout(set = 0, binding = 15, std430) buffer Valency { float valency[]; };
+layout(set = 0, binding = 16, std430) buffer ValencyVal { float valency_val[]; };
+layout(set = 0, binding = 17, std430) buffer Ovc { float ovc[]; };
+layout(set = 0, binding = 18, std430) buffer V13cor { float v13cor[]; };
+layout(set = 0, binding = 19, std430) buffer PBoc3 { float p_boc3[]; };
+layout(set = 0, binding = 20, std430) buffer PBoc4 { float p_boc4[]; };
+layout(set = 0, binding = 21, std430) buffer PBoc5 { float p_boc5[]; };
+layout(set = 0, binding = 22, std430) buffer TotalBO { float total_bond_order[]; };
+layout(set = 0, binding = 23, std430) buffer Out0 { float out0[]; };
+layout(set = 0, binding = 24, std430) buffer Out1 { float out1[]; };
+layout(set = 0, binding = 25, std430) buffer Out2 { float out2[]; };
+layout(set = 0, binding = 26, std430) buffer Out3 { float out3[]; };
+layout(set = 0, binding = 27, std430) buffer Out4 { float out4[]; };
+layout(set = 0, binding = 28, std430) buffer Out5 { float out5[]; };
+layout(set = 0, binding = 29, std430) buffer Out6 { float out6[]; };
+layout(push_constant) uniform Params
+{
+    int num_pairs;
+    int atom_type_numbers;
+    float gp_boc1;
+    float gp_boc2;
+    float bo_cut;
+    int write_mode;
+}
+pc;
+void main()
+{
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.num_pairs) return;
+    int i = pair_i[idx];
+    int j = pair_j[idx];
+    float r = distances[idx];
+    int type_i = atom_type[i];
+    int type_j = atom_type[j];
+    if (type_i < 0 || type_i >= pc.atom_type_numbers || type_j < 0 ||
+        type_j >= pc.atom_type_numbers)
+        return;
+    int pair_idx = type_i * pc.atom_type_numbers + type_j;
+
+    float ros = r_s[pair_idx];
+    float bo_s_raw_val = 0.0, dbo_s_raw_dr = 0.0;
+    if (ros > 0.0)
+    {
+        float ratio = r / ros;
+        float pow_ratio = pow(ratio, bo_2[pair_idx]);
+        bo_s_raw_val = (1.0 + pc.bo_cut) * exp(bo_1[pair_idx] * pow_ratio);
+        dbo_s_raw_dr = bo_s_raw_val * bo_1[pair_idx] * bo_2[pair_idx] *
+                       pow(ratio, bo_2[pair_idx] - 1.0) * (1.0 / ros);
+    }
+
+    float bo_p_val = 0.0, dbo_p_raw_dr = 0.0;
+    if (ro_pi[type_i] > 0.0 && ro_pi[type_j] > 0.0)
+    {
+        float rop = r_p[pair_idx];
+        if (rop > 0.0)
+        {
+            float ratio = r / rop;
+            float pow_ratio = pow(ratio, bo_4[pair_idx]);
+            bo_p_val = exp(bo_3[pair_idx] * pow_ratio);
+            dbo_p_raw_dr = bo_p_val * bo_3[pair_idx] * bo_4[pair_idx] *
+                           pow(ratio, bo_4[pair_idx] - 1.0) * (1.0 / rop);
+        }
+    }
+
+    float bo_p2_val = 0.0, dbo_p2_raw_dr = 0.0;
+    if (ro_pi2[type_i] > 0.0 && ro_pi2[type_j] > 0.0)
+    {
+        float rop2 = r_pp[pair_idx];
+        if (rop2 > 0.0)
+        {
+            float ratio = r / rop2;
+            float pow_ratio = pow(ratio, bo_6[pair_idx]);
+            bo_p2_val = exp(bo_5[pair_idx] * pow_ratio);
+            dbo_p2_raw_dr = bo_p2_val * bo_5[pair_idx] * bo_6[pair_idx] *
+                            pow(ratio, bo_6[pair_idx] - 1.0) * (1.0 / rop2);
+        }
+    }
+
+    float total_bo_raw = bo_s_raw_val + bo_p_val + bo_p2_val;
+    float dbo_raw_total_dr_val =
+        dbo_s_raw_dr + dbo_p_raw_dr + dbo_p2_raw_dr;
+
+    if (total_bo_raw >= pc.bo_cut)
+    {
+        Sad5 bo_s_raw = sad5_var(bo_s_raw_val, 0);
+        Sad5 bo_p = sad5_var(bo_p_val, 1);
+        Sad5 bo_p2 = sad5_var(bo_p2_val, 2);
+        Sad5 Delta_i = sad5_var(total_bond_order[i], 3);
+        Sad5 Delta_j = sad5_var(total_bond_order[j], 4);
+
+        Sad5 total_bo_orig =
+            sad5_sub_c(sad5_add(sad5_add(bo_s_raw, bo_p), bo_p2), pc.bo_cut);
+        Sad5 bo_s = sad5_sub_c(bo_s_raw, pc.bo_cut);
+        if (bo_s.val < 0.0) bo_s = sad5_const(0.0);
+
+        float ovc_val = ovc[pair_idx];
+        float v13cor_val = v13cor[pair_idx];
+
+        Sad5 f1 = sad5_const(1.0);
+        if (ovc_val >= 0.001)
+        {
+            Sad5 Deltap_i = sad5_sub_c(Delta_i, valency[type_i]);
+            Sad5 Deltap_j = sad5_sub_c(Delta_j, valency[type_j]);
+
+            Sad5 exp_p1i = sad5_exp(sad5_scale(Deltap_i, -pc.gp_boc1));
+            Sad5 exp_p1j = sad5_exp(sad5_scale(Deltap_j, -pc.gp_boc1));
+            Sad5 f2 = sad5_add(exp_p1i, exp_p1j);
+
+            Sad5 f3 = sad5_scale(
+                sad5_sub_c(sad5_log_sum_exp(sad5_scale(Deltap_i, -pc.gp_boc2),
+                                            sad5_scale(Deltap_j, -pc.gp_boc2)),
+                           0.6931471805599453),
+                -1.0 / pc.gp_boc2);
+
+            float val_i = valency[type_i];
+            float val_j = valency[type_j];
+
+            f1 = sad5_scale(
+                sad5_add(sad5_div(sad5_add_c(f2, val_i),
+                                  sad5_add(sad5_add_c(f2, val_i), f3)),
+                         sad5_div(sad5_add_c(f2, val_j),
+                                  sad5_add(sad5_add_c(f2, val_j), f3))),
+                0.5);
+        }
+
+        Sad5 f4 = sad5_const(1.0), f5 = sad5_const(1.0);
+        if (v13cor_val >= 0.001)
+        {
+            Sad5 Deltap_boc_i = sad5_sub_c(Delta_i, valency_val[type_i]);
+            Sad5 Deltap_boc_j = sad5_sub_c(Delta_j, valency_val[type_j]);
+
+            float p_boc3_val = p_boc3[pair_idx];
+            float p_boc4_val = p_boc4[pair_idx];
+            float p_boc5_val = p_boc5[pair_idx];
+
+            Sad5 exp_f4 = sad5_exp(sad5_add_c(
+                sad5_scale(sad5_sub(sad5_scale(sad5_mul(total_bo_orig,
+                                                        total_bo_orig),
+                                               p_boc4_val),
+                                    Deltap_boc_i),
+                           -p_boc3_val),
+                p_boc5_val));
+            Sad5 exp_f5 = sad5_exp(sad5_add_c(
+                sad5_scale(sad5_sub(sad5_scale(sad5_mul(total_bo_orig,
+                                                        total_bo_orig),
+                                               p_boc4_val),
+                                    Deltap_boc_j),
+                           -p_boc3_val),
+                p_boc5_val));
+
+            f4 = sad5_rdiv(1.0, sad5_add_c(exp_f4, 1.0));
+            f5 = sad5_rdiv(1.0, sad5_add_c(exp_f5, 1.0));
+        }
+
+        Sad5 A0 = sad5_mul(sad5_mul(f1, f4), f5);
+
+        Sad5 s_corrected_bo_pi = sad5_mul(sad5_mul(bo_p, A0), f1);
+        Sad5 s_corrected_bo_pi2 = sad5_mul(sad5_mul(bo_p2, A0), f1);
+        Sad5 s_corrected_bo_s =
+            sad5_sub(sad5_mul(total_bo_orig, A0),
+                     sad5_add(s_corrected_bo_pi, s_corrected_bo_pi2));
+        if (s_corrected_bo_s.val < 0.0) s_corrected_bo_s = sad5_const(0.0);
+
+        if (pc.write_mode == 0)
+        {
+            out0[idx] = s_corrected_bo_s.val;
+            out1[idx] = s_corrected_bo_pi.val;
+            out2[idx] = s_corrected_bo_pi2.val;
+            out3[idx] = s_corrected_bo_s.d0 * dbo_s_raw_dr +
+                        s_corrected_bo_s.d1 * dbo_p_raw_dr +
+                        s_corrected_bo_s.d2 * dbo_p2_raw_dr;
+            out4[idx] = s_corrected_bo_pi.d0 * dbo_s_raw_dr +
+                        s_corrected_bo_pi.d1 * dbo_p_raw_dr +
+                        s_corrected_bo_pi.d2 * dbo_p2_raw_dr;
+            out5[idx] = s_corrected_bo_pi2.d0 * dbo_s_raw_dr +
+                        s_corrected_bo_pi2.d1 * dbo_p_raw_dr +
+                        s_corrected_bo_pi2.d2 * dbo_p2_raw_dr;
+            out6[idx] = dbo_raw_total_dr_val;
+        }
+        else
+        {
+            out0[idx] = s_corrected_bo_s.d3;
+            out1[idx] = s_corrected_bo_pi.d3;
+            out2[idx] = s_corrected_bo_pi2.d3;
+            out3[idx] = s_corrected_bo_s.d4;
+            out4[idx] = s_corrected_bo_pi.d4;
+            out5[idx] = s_corrected_bo_pi2.d4;
+        }
+    }
+    else
+    {
+        out0[idx] = 0.0;
+        out1[idx] = 0.0;
+        out2[idx] = 0.0;
+        out3[idx] = 0.0;
+        out4[idx] = 0.0;
+        out5[idx] = 0.0;
+        if (pc.write_mode == 0) out6[idx] = 0.0;
+    }
+}

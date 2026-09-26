@@ -1,0 +1,86 @@
+layout(set = 0, binding = 0, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer AtomTypes { int atom_types[]; };
+layout(set = 0, binding = 3, std430) buffer Params_ { float params_[]; };
+layout(set = 0, binding = 4, std430) buffer BoS { float bo_s[]; };
+layout(set = 0, binding = 5, std430) buffer BoPi { float bo_pi[]; };
+layout(set = 0, binding = 6, std430) buffer BoPi2 { float bo_pi2[]; };
+layout(set = 0, binding = 7, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 8, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 9, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 10, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 11, std430) buffer EnergySum { float energy_sum[]; };
+layout(set = 0, binding = 12, std430) buffer BondCount { int bond_count[]; };
+layout(set = 0, binding = 13, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 14, std430) buffer BondNbr { int bond_nbr[]; };
+layout(set = 0, binding = 15, std430) buffer BondIdx { int bond_idx[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int ntypes;
+    int need_atom_energy;
+    int max_neighbor_numbers;
+}
+pc;
+
+int find_bond_index(int atom, int neighbor)
+{
+    int start = bond_offset[atom];
+    int end = start + bond_count[atom];
+    for (int k = start; k < end; k++)
+    {
+        if (bond_nbr[k] == neighbor) return bond_idx[k];
+    }
+    return -1;
+}
+
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.atom_numbers) return;
+    int type_i = atom_types[i];
+    float en_i = 0.0;
+    int count = int(nl_raw[i].x);
+    int base = i * pc.max_neighbor_numbers;
+    for (int jj = 0; jj < count; jj++)
+    {
+        int j = nl_serial[base + jj];
+        if (j <= i) continue;
+        int b = find_bond_index(i, j);
+        if (b < 0) continue;
+        int param_idx = (type_i * pc.ntypes + atom_types[j]) * 5;
+        float BO_s_ij = bo_s[b];
+        float BO_pi_ij = bo_pi[b];
+        float BO_pi2_ij = bo_pi2[b];
+        if (BO_s_ij + BO_pi_ij + BO_pi2_ij < 1e-10) continue;
+
+        float De_s_val = params_[param_idx + 0];
+        float De_p_val = params_[param_idx + 1];
+        float De_PP_val = params_[param_idx + 2];
+        float p_be1_val = params_[param_idx + 3];
+        float p_be2_val = params_[param_idx + 4];
+
+        Sad3 BO_s_sad = sad3_var(BO_s_ij, 0);
+        Sad3 BO_pi_sad = sad3_var(BO_pi_ij, 1);
+        Sad3 BO_pi2_sad = sad3_var(BO_pi2_ij, 2);
+
+        Sad3 pow_BOs_be2 = sad3_powf(BO_s_sad, sad3_var(p_be2_val, -1));
+        Sad3 exp_be12 = sad3_exp(
+            sad3_scale(sad3_rsub_c(1.0, pow_BOs_be2), p_be1_val));
+        Sad3 energy_sad = sad3_sub(
+            sad3_sub(sad3_scale(sad3_mul(BO_s_sad, exp_be12), -De_s_val),
+                     sad3_scale(BO_pi_sad, De_p_val)),
+            sad3_scale(BO_pi2_sad, De_PP_val));
+
+        afadd(dE_dBO_s[b], energy_sad.d0);
+        afadd(dE_dBO_pi[b], energy_sad.d1);
+        afadd(dE_dBO_pi2[b], energy_sad.d2);
+
+        if (pc.need_atom_energy != 0)
+        {
+            en_i += energy_sad.val;
+            afadd(energy_sum[0], energy_sad.val);
+        }
+    }
+    if (pc.need_atom_energy != 0) atom_energy[i] += en_i;
+}

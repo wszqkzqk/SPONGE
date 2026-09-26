@@ -1,6 +1,30 @@
-﻿#include "bond.h"
+#include "bond.h"
 
 #include "bond_order.h"  // for find_bond_index
+
+#ifdef USE_VULKAN
+struct ReaxffBondVkParams
+{
+    int atom_numbers;
+    int ntypes;
+    int need_atom_energy;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(ReaxffBondVkParams) == 16,
+              "ReaxffBondVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 static const int De_s = 0;
 static const int De_p = 1;
@@ -323,12 +347,36 @@ void REAXFF_BOND::REAXFF_Bond_Force_With_Atom_Energy_And_Virial(
     dim3 blockSize(128);
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
 
+#ifdef USE_VULKAN
+    ReaxffBondVkParams params{atom_numbers, atom_type_numbers,
+                              atom_energy != NULL ? 1 : 0,
+                              vk_nl_stride(nl, atom_numbers)};
+    const void* buffers[] = {nl,
+                             nl[0].atom_serial,
+                             d_atom_type,
+                             d_twobody_params,
+                             d_bo_s,
+                             d_bo_pi,
+                             d_bo_pi2,
+                             d_dE_dBO_s,
+                             d_dE_dBO_pi,
+                             d_dE_dBO_pi2,
+                             vk_or_dummy(atom_energy, d_energy_sum),
+                             d_energy_sum,
+                             d_bond_count,
+                             d_bond_offset,
+                             d_bond_nbr,
+                             d_bond_idx};
+    VK_LAUNCH(reaxff_bond_force, gridSize.x, 1, blockSize.x, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(REAXFF_Bond_Force_CUDA, gridSize, blockSize, 0, NULL,
                          atom_numbers, crd, frc, boundary, nl, d_atom_type,
                          d_twobody_params, atom_type_numbers, d_bo_s, d_bo_pi,
                          d_bo_pi2, d_dE_dBO_s, d_dE_dBO_pi, d_dE_dBO_pi2,
                          atom_energy, atom_virial, d_energy_sum, d_bond_count,
                          d_bond_offset, d_bond_nbr, d_bond_idx);
+#endif
 }
 
 void REAXFF_BOND::Step_Print(CONTROLLER* controller)

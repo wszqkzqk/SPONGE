@@ -1,0 +1,11 @@
+layout(set = 0, binding = 0, std430) buffer BondI { int bond_i[]; };
+layout(set = 0, binding = 1, std430) buffer BondJ { int bond_j[]; };
+layout(set = 0, binding = 2, std430) buffer BondCount { int bond_count[]; };
+layout(push_constant) uniform Params { int num_bonds; } pc;
+void main()
+{
+    int b = int(gl_GlobalInvocationID.x);
+    if (b >= pc.num_bonds) return;
+    atomicAdd(bond_count[bond_i[b]], 1);
+    atomicAdd(bond_count[bond_j[b]], 1);
+}

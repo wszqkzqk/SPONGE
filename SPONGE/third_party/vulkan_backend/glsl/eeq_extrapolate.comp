@@ -1,0 +1,21 @@
+layout(set = 0, binding = 0, std430) buffer Out { float out_[]; };
+layout(set = 0, binding = 1, std430) buffer Hist { float hist[]; };
+layout(push_constant) uniform Params
+{
+    int n;
+    int stride;
+    int nprev;
+    float c0, c1, c2, c3, c4;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    float val = pc.c0 * hist[i];
+    if (pc.nprev >= 2) val += pc.c1 * hist[pc.stride + i];
+    if (pc.nprev >= 3) val += pc.c2 * hist[2 * pc.stride + i];
+    if (pc.nprev >= 4) val += pc.c3 * hist[3 * pc.stride + i];
+    if (pc.nprev >= 5) val += pc.c4 * hist[4 * pc.stride + i];
+    out_[i] = val;
+}

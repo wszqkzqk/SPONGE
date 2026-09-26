@@ -1,0 +1,327 @@
+struct ThbpEntry
+{
+    float theta_00;
+    float p_val1, p_val2, p_val4, p_val7;
+    float p_pen1;
+    float p_coa1;
+};
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomType { int atom_type[]; };
+layout(set = 0, binding = 2, std430) buffer DeltaBoc { float Delta_boc[]; };
+layout(set = 0, binding = 3, std430) buffer DeltaBuf { float Delta[]; };
+layout(set = 0, binding = 4, std430) buffer DeltaVal { float Delta_val[]; };
+layout(set = 0, binding = 5, std430) buffer PVal3 { float p_val3[]; };
+layout(set = 0, binding = 6, std430) buffer PVal5 { float p_val5[]; };
+layout(set = 0, binding = 7, std430) buffer ThbpInfo { ivec2 thbp_info[]; };
+layout(set = 0, binding = 8, std430) buffer ThbpEntries { ThbpEntry thbp_entries[]; };
+layout(set = 0, binding = 9, std430) buffer BoS { float bo_s[]; };
+layout(set = 0, binding = 10, std430) buffer BoPi { float bo_pi[]; };
+layout(set = 0, binding = 11, std430) buffer BoPi2 { float bo_pi2[]; };
+layout(set = 0, binding = 12, std430) buffer TotalBO { float total_bo[]; };
+layout(set = 0, binding = 13, std430) buffer Nlp { float nlp[]; };
+layout(set = 0, binding = 14, std430) buffer Vlpex { float vlpex[]; };
+layout(set = 0, binding = 15, std430) buffer DDeltaLp { float dDelta_lp[]; };
+layout(set = 0, binding = 16, std430) buffer DEBoS { float dE_dBO_s[]; };
+layout(set = 0, binding = 17, std430) buffer DEBoPi { float dE_dBO_pi[]; };
+layout(set = 0, binding = 18, std430) buffer DEBoPi2 { float dE_dBO_pi2[]; };
+layout(set = 0, binding = 19, std430) buffer CdDeltaBuf { float CdDelta[]; };
+layout(set = 0, binding = 20, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 21, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 22, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 23, std430) buffer EnergyAngSum { float energy_ang_sum[]; };
+layout(set = 0, binding = 24, std430) buffer EnergyPenSum { float energy_pen_sum[]; };
+layout(set = 0, binding = 25, std430) buffer EnergyCoaSum { float energy_coa_sum[]; };
+layout(set = 0, binding = 26, std430) buffer BondCount { int bond_count[]; };
+layout(set = 0, binding = 27, std430) buffer BondOffset { int bond_offset[]; };
+layout(set = 0, binding = 28, std430) buffer BondNbr { int bond_nbr[]; };
+layout(set = 0, binding = 29, std430) buffer BondIdx { int bond_idx[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    float p_val6, p_val8, p_val9, p_val10;
+    float p_pen2, p_pen3, p_pen4;
+    float p_coa2, p_coa3, p_coa4;
+    float thb_cut, thb_cutsq;
+    int need_atom_energy;
+    int need_virial;
+}
+pc;
+void main()
+{
+    int j = int(gl_GlobalInvocationID.x);
+    if (j >= pc.atom_numbers) return;
+    int type_j = atom_type[j];
+    if (type_j < 0) return;
+    Vec3 rj = crd[j];
+
+    float p_val3_j = p_val3[type_j];
+    float p_val5_j = p_val5[type_j];
+    float delta_boc_j_val = Delta_boc[j];
+    float delta_j_val = Delta[j];
+    float delta_val_j_val = Delta_val[j];
+
+    float SBOp = 0.0, prod_SBO = 1.0;
+    int bc_j = bond_count[j];
+    int bo_j = bond_offset[j];
+    for (int t = 0; t < bc_j; t++)
+    {
+        int b_jt = bond_idx[bo_j + t];
+        float bo_jt = bo_s[b_jt] + bo_pi[b_jt] + bo_pi2[b_jt];
+
+        SBOp += (bo_pi[b_jt] + bo_pi2[b_jt]);
+        float bo_jt_sq = bo_jt * bo_jt;
+        float bo_jt_p4 = bo_jt_sq * bo_jt_sq;
+        prod_SBO *= exp(-bo_jt_p4 * bo_jt_p4);
+    }
+
+    bool has_lp_corr = (vlpex[j] < 0.0);
+    float vlpadj = has_lp_corr ? nlp[j] : 0.0;
+    float SBO =
+        SBOp + (1.0 - prod_SBO) * (-delta_boc_j_val - pc.p_val8 * vlpadj);
+    float dSBO1 = -8.0 * prod_SBO * (delta_boc_j_val + pc.p_val8 * vlpadj);
+    float dSBO2 = has_lp_corr
+                      ? (prod_SBO - 1.0) * (1.0 - pc.p_val8 * dDelta_lp[j])
+                      : (prod_SBO - 1.0);
+    float SBO2;
+    float CSBO2;
+    if (SBO <= 0.0)
+    {
+        SBO2 = 0.0;
+        CSBO2 = 0.0;
+    }
+    else if (SBO <= 1.0)
+    {
+        SBO2 = pow(SBO, pc.p_val9);
+        CSBO2 = pc.p_val9 * pow(SBO, pc.p_val9 - 1.0);
+    }
+    else if (SBO < 2.0)
+    {
+        SBO2 = 2.0 - pow(2.0 - SBO, pc.p_val9);
+        CSBO2 = pc.p_val9 * pow(2.0 - SBO, pc.p_val9 - 1.0);
+    }
+    else
+    {
+        SBO2 = 2.0;
+        CSBO2 = 0.0;
+    }
+
+    for (int bi = 0; bi < bc_j; bi++)
+    {
+        int b_ij = bond_idx[bo_j + bi];
+        int i = bond_nbr[bo_j + bi];
+        int type_i = atom_type[i];
+        float bo_ij_val = bo_s[b_ij] + bo_pi[b_ij] + bo_pi2[b_ij];
+        float boa_ij_val = bo_ij_val - pc.thb_cut;
+
+        if (boa_ij_val <= 0.0) continue;
+
+        Vec3 ri = crd[i];
+        Vec3 dji = get_displacement_periodic(rj, ri, pc.boundary);
+        float r_ij = v3_len(dji);
+
+        for (int bk = bi + 1; bk < bc_j; bk++)
+        {
+            int b_kj = bond_idx[bo_j + bk];
+            int k = bond_nbr[bo_j + bk];
+            int type_k = atom_type[k];
+            float bo_jk_val = bo_s[b_kj] + bo_pi[b_kj] + bo_pi2[b_kj];
+            float boa_jk_val = bo_jk_val - pc.thb_cut;
+
+            if (boa_jk_val <= 0.0) continue;
+            if (bo_ij_val * bo_jk_val <= pc.thb_cutsq) continue;
+
+            Vec3 rk = crd[k];
+            Vec3 djk = get_displacement_periodic(rj, rk, pc.boundary);
+            float r_jk = v3_len(djk);
+
+            float cos_theta = v3_dot(dji, djk) / (r_ij * r_jk);
+            cos_theta = clamp(cos_theta, -1.0, 1.0);
+            float theta = acos(cos_theta);
+
+            int tri_info_idx = (type_i * pc.atom_type_numbers + type_j) *
+                                   pc.atom_type_numbers +
+                               type_k;
+            ivec2 info = thbp_info[tri_info_idx];
+
+            for (int e = 0; e < info.y; e++)
+            {
+                ThbpEntry param = thbp_entries[info.x + e];
+                if (abs(param.p_val1) < 0.0001) continue;
+
+                Sad3 s_bo_ij = sad3_var(bo_ij_val, 0);
+                Sad3 s_bo_jk = sad3_var(bo_jk_val, 1);
+                Sad3 s_delta_j = sad3_var(delta_boc_j_val, 2);
+                Sad3 s_delta_pen =
+                    sad3_add_c(s_delta_j, delta_j_val - delta_boc_j_val);
+
+                Sad3 s_boa_ij = sad3_sub_c(s_bo_ij, pc.thb_cut);
+                Sad3 s_boa_jk = sad3_sub_c(s_bo_jk, pc.thb_cut);
+
+                Sad3 exp3ij = sad3_exp(sad3_scale(
+                    sad3_powf(s_boa_ij, sad3_var(param.p_val4, -1)),
+                    -p_val3_j));
+                Sad3 f7_ij = sad3_rsub_c(1.0, exp3ij);
+                Sad3 exp3jk = sad3_exp(sad3_scale(
+                    sad3_powf(s_boa_jk, sad3_var(param.p_val4, -1)),
+                    -p_val3_j));
+                Sad3 f7_jk = sad3_rsub_c(1.0, exp3jk);
+
+                Sad3 expval6 = sad3_exp(sad3_scale(s_delta_j, pc.p_val6));
+                Sad3 expval7 = sad3_exp(sad3_scale(s_delta_j, -param.p_val7));
+                Sad3 trm8 = sad3_add(sad3_add_c(expval6, 1.0), expval7);
+                Sad3 f8_Dj = sad3_rsub_c(
+                    p_val5_j,
+                    sad3_div(sad3_scale(sad3_add_c(expval6, 2.0),
+                                        p_val5_j - 1.0),
+                             trm8));
+
+                float theta_0 = (180.0 -
+                                 param.theta_00 *
+                                     (1.0 -
+                                      exp(-pc.p_val10 * (2.0 - SBO2)))) *
+                                (3.1415926535897932 / 180.0);
+                float sin_theta = sin(theta);
+                if (sin_theta < 1e-5) sin_theta = 1e-5;
+
+                float expval2theta =
+                    exp(-param.p_val2 * (theta_0 - theta) * (theta_0 - theta));
+                float val12theta =
+                    (param.p_val1 >= 0.0)
+                        ? param.p_val1 * (1.0 - expval2theta)
+                        : param.p_val1 * (-expval2theta);
+
+                Sad3 s_en_ang = sad3_scale(
+                    sad3_mul(sad3_mul(f7_ij, f7_jk), f8_Dj), val12theta);
+
+                Sad3 s_pen_diff_ij = sad3_sub_c(s_boa_ij, 2.0);
+                Sad3 s_pen_diff_jk = sad3_sub_c(s_boa_jk, 2.0);
+                Sad3 exp_pen2ij = sad3_exp(sad3_scale(
+                    sad3_mul(s_pen_diff_ij, s_pen_diff_ij), -pc.p_pen2));
+                Sad3 exp_pen2jk = sad3_exp(sad3_scale(
+                    sad3_mul(s_pen_diff_jk, s_pen_diff_jk), -pc.p_pen2));
+
+                Sad3 exp_pen3 = sad3_exp(sad3_scale(s_delta_pen, -pc.p_pen3));
+                Sad3 exp_pen4 = sad3_exp(sad3_scale(s_delta_pen, pc.p_pen4));
+                Sad3 trm_pen34 = sad3_add(sad3_add_c(exp_pen3, 1.0), exp_pen4);
+                Sad3 f9_Dj = sad3_div(sad3_add_c(exp_pen3, 2.0), trm_pen34);
+                Sad3 s_en_pen = sad3_mul(
+                    sad3_mul(sad3_scale(f9_Dj, param.p_pen1), exp_pen2ij),
+                    exp_pen2jk);
+
+                Sad3 exp_coa2 = sad3_exp(sad3_scale(
+                    sad3_sub_c(sad3_add_c(s_delta_j, delta_val_j_val),
+                               delta_boc_j_val),
+                    pc.p_coa2));
+                Sad3 s_coa_diff_i = sad3_var(total_bo[i] - bo_ij_val, -1);
+                Sad3 s_coa_diff_k = sad3_var(total_bo[k] - bo_jk_val, -1);
+                Sad3 s_coa_diff_ij =
+                    sad3_add_c(sad3_sub_c(s_boa_ij, 1.5), pc.thb_cut);
+                Sad3 s_coa_diff_jk =
+                    sad3_add_c(sad3_sub_c(s_boa_jk, 1.5), pc.thb_cut);
+
+                Sad3 s_en_coa = sad3_mul(
+                    sad3_mul(
+                        sad3_mul(
+                            sad3_mul(
+                                sad3_rdiv(param.p_coa1,
+                                          sad3_add_c(exp_coa2, 1.0)),
+                                sad3_exp(sad3_scale(
+                                    sad3_mul(s_coa_diff_i, s_coa_diff_i),
+                                    -pc.p_coa3))),
+                            sad3_exp(sad3_scale(
+                                sad3_mul(s_coa_diff_k, s_coa_diff_k),
+                                -pc.p_coa3))),
+                        sad3_exp(sad3_scale(
+                            sad3_mul(s_coa_diff_ij, s_coa_diff_ij),
+                            -pc.p_coa4))),
+                    sad3_exp(sad3_scale(sad3_mul(s_coa_diff_jk, s_coa_diff_jk),
+                                        -pc.p_coa4)));
+
+                Sad3 s_en_total =
+                    sad3_add(sad3_add(s_en_ang, s_en_pen), s_en_coa);
+
+                afadd(dE_dBO_s[b_ij], s_en_total.d0);
+                afadd(dE_dBO_pi[b_ij], s_en_total.d0);
+                afadd(dE_dBO_pi2[b_ij], s_en_total.d0);
+
+                afadd(dE_dBO_s[b_kj], s_en_total.d1);
+                afadd(dE_dBO_pi[b_kj], s_en_total.d1);
+                afadd(dE_dBO_pi2[b_kj], s_en_total.d1);
+
+                afadd(CdDelta[j], s_en_total.d2);
+
+                float dE_dtheta = -f7_ij.val * f7_jk.val * f8_Dj.val *
+                                  param.p_val1 * expval2theta * 2.0 *
+                                  param.p_val2 * (theta_0 - theta);
+                float Ctheta_0 = pc.p_val10 * (3.1415926535897932 / 180.0) *
+                                 param.theta_00 *
+                                 exp(-pc.p_val10 * (2.0 - SBO2));
+                float CEval5 = -dE_dtheta * Ctheta_0 * CSBO2;
+                float CEval6 = CEval5 * dSBO1;
+                float CEval7 = CEval5 * dSBO2;
+                afadd(CdDelta[j], CEval7);
+
+                for (int pt = 0; pt < bc_j; pt++)
+                {
+                    int b_jt = bond_idx[bo_j + pt];
+                    float bo_jt = bo_s[b_jt] + bo_pi[b_jt] + bo_pi2[b_jt];
+                    if (bo_jt <= 0.0) continue;
+                    float bo_jt_2 = bo_jt * bo_jt;
+                    float bo_jt_4 = bo_jt_2 * bo_jt_2;
+                    float bo_jt_7 = bo_jt_4 * bo_jt_2 * bo_jt;
+                    float dE_dbo_total = CEval6 * bo_jt_7;
+
+                    afadd(dE_dBO_s[b_jt], dE_dbo_total);
+                    afadd(dE_dBO_pi[b_jt], dE_dbo_total + CEval5);
+                    afadd(dE_dBO_pi2[b_jt], dE_dbo_total + CEval5);
+                }
+
+                float dcos_dtheta = -sin_theta;
+                float dE_dcos = dE_dtheta / dcos_dtheta;
+
+                float inv_rij = 1.0 / r_ij;
+                float inv_rjk = 1.0 / r_jk;
+
+                Vec3 fi, fk, fj;
+                fi.x = dE_dcos * (djk.x * inv_rij * inv_rjk -
+                                  dji.x * cos_theta * inv_rij * inv_rij);
+                fi.y = dE_dcos * (djk.y * inv_rij * inv_rjk -
+                                  dji.y * cos_theta * inv_rij * inv_rij);
+                fi.z = dE_dcos * (djk.z * inv_rij * inv_rjk -
+                                  dji.z * cos_theta * inv_rij * inv_rij);
+
+                fk.x = dE_dcos * (dji.x * inv_rij * inv_rjk -
+                                  djk.x * cos_theta * inv_rjk * inv_rjk);
+                fk.y = dE_dcos * (dji.y * inv_rij * inv_rjk -
+                                  djk.y * cos_theta * inv_rjk * inv_rjk);
+                fk.z = dE_dcos * (dji.z * inv_rij * inv_rjk -
+                                  djk.z * cos_theta * inv_rjk * inv_rjk);
+
+                fj.x = -(fi.x + fk.x);
+                fj.y = -(fi.y + fk.y);
+                fj.z = -(fi.z + fk.z);
+
+                aadd_v3(frc[i], fi);
+                aadd_v3(frc[j], fj);
+                aadd_v3(frc[k], fk);
+                if (pc.need_virial != 0)
+                {
+                    LTMat v = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                    v = lt_sub(lt_sub(v, virial_from_force_dis(fi, dji)),
+                               virial_from_force_dis(fk, djk));
+                    aadd_lt(atom_virial[j], v);
+                }
+
+                if (pc.need_atom_energy != 0)
+                {
+                    afadd(atom_energy[j], s_en_total.val);
+                    afadd(energy_ang_sum[0], s_en_ang.val);
+                    afadd(energy_pen_sum[0], s_en_pen.val);
+                    afadd(energy_coa_sum[0], s_en_coa.val);
+                }
+            }
+        }
+    }
+}

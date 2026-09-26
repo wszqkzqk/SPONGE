@@ -1,6 +1,32 @@
-﻿#include "hydrogen_bond.h"
+#include "hydrogen_bond.h"
 
 #include "bond_order.h"  // for find_bond_index
+
+#ifdef USE_VULKAN
+struct ReaxffHBVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    int atom_type_numbers;
+    int need_atom_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(ReaxffHBVkParams) == 72,
+              "ReaxffHBVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 static __global__ void Calculate_HB_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_type,
@@ -436,6 +462,37 @@ void REAXFF_HYDROGEN_BOND::Calculate_HB_Energy_And_Force(
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
     deviceMemset(d_energy_hb_sum, 0, sizeof(float));
 
+#ifdef USE_VULKAN
+    ReaxffHBVkParams params{atom_numbers,
+                            boundary,
+                            atom_type_numbers,
+                            atom_energy != NULL ? 1 : 0,
+                            need_virial && atom_virial != NULL ? 1 : 0,
+                            vk_nl_stride(nl, atom_numbers)};
+    const void* buffers[] = {crd,
+                             d_atom_type,
+                             d_is_hydrogen,
+                             d_hb_info,
+                             d_hb_entries,
+                             bo_module->d_corrected_bo_s,
+                             bo_module->d_corrected_bo_pi,
+                             bo_module->d_corrected_bo_pi2,
+                             d_dE_dBO_s,
+                             d_dE_dBO_pi,
+                             d_dE_dBO_pi2,
+                             nl,
+                             nl[0].atom_serial,
+                             vk_or_dummy(atom_energy, d_energy_hb_sum),
+                             frc,
+                             vk_or_dummy(atom_virial, frc),
+                             d_energy_hb_sum,
+                             bo_module->d_bond_count,
+                             bo_module->d_bond_offset,
+                             bo_module->d_bond_nbr,
+                             bo_module->d_bond_idx};
+    VK_LAUNCH(reaxff_hydrogen_bond, gridSize.x, 1, blockSize.x, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(
         Calculate_HB_Kernel, gridSize, blockSize, 0, NULL, atom_numbers, crd,
         d_atom_type, d_is_hydrogen, d_hb_info, d_hb_entries, atom_type_numbers,
@@ -444,6 +501,7 @@ void REAXFF_HYDROGEN_BOND::Calculate_HB_Energy_And_Force(
         boundary, nl, atom_energy, frc, need_virial ? atom_virial : NULL,
         d_energy_hb_sum, bo_module->d_bond_count, bo_module->d_bond_offset,
         bo_module->d_bond_nbr, bo_module->d_bond_idx);
+#endif
 }
 
 void REAXFF_HYDROGEN_BOND::Step_Print(CONTROLLER* controller)

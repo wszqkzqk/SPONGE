@@ -1,7 +1,25 @@
-﻿#include "angle.h"
+#include "angle.h"
 
 #include "../xponge/load/native/angle.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct AngleForceVkParams
+{
+    int angle_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(sizeof(AngleForceVkParams) == 68,
+              "AngleForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Angle_Force_With_Atom_Energy_And_Virial_Device(
     const int angle_numbers, const VECTOR* crd, Boundary boundary,
@@ -240,12 +258,27 @@ void ANGLE::Get_Local(int* atom_local, int local_atom_numbers,
     if (!is_initialized) return;
     num_angle_local = 0;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int angle_numbers;
+    } params{this->angle_numbers};
+    const void* buffers[] = {this->d_atom_a,         this->d_atom_b,
+                             this->d_atom_c,         atom_local_label,
+                             atom_local_id,          this->d_atom_a_local,
+                             this->d_atom_b_local,   this->d_atom_c_local,
+                             this->d_angle_k,        this->d_angle_theta0,
+                             this->d_angle_k_local,  this->d_angle_theta0_local,
+                             this->d_num_angle_local};
+    VK_LAUNCH(angle_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         get_local_device, 1, 1, 0, NULL, this->angle_numbers, this->d_atom_a,
         this->d_atom_b, this->d_atom_c, atom_local_label, atom_local_id,
         this->d_atom_a_local, this->d_atom_b_local, this->d_atom_c_local,
         this->d_angle_k, this->d_angle_theta0, this->d_angle_k_local,
         this->d_angle_theta0_local, this->d_num_angle_local);
+#endif
     deviceMemcpy(&this->num_angle_local, this->d_num_angle_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }
@@ -256,6 +289,28 @@ void ANGLE::Angle_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        AngleForceVkParams params{this->num_angle_local,
+                                  boundary,
+                                  this->local_atom_numbers,
+                                  need_atom_energy,
+                                  need_virial};
+        const void* buffers[] = {
+            crd,
+            this->d_atom_a_local,
+            this->d_atom_b_local,
+            this->d_atom_c_local,
+            this->d_angle_k_local,
+            this->d_angle_theta0_local,
+            frc,
+            vk_or_dummy(atom_energy, frc),
+            this->d_angle_ene,
+            vk_or_dummy(atom_virial_tensor, frc)};
+        VK_LAUNCH(angle_force,
+                  (angle_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Angle_Force_With_Atom_Energy_And_Virial_Device,
             (angle_numbers + CONTROLLER::device_max_thread - 1) /
@@ -265,6 +320,7 @@ void ANGLE::Angle_Force_With_Atom_Energy_And_Virial(
             this->d_atom_b_local, this->d_atom_c_local, this->d_angle_k_local,
             this->d_angle_theta0_local, frc, need_atom_energy, atom_energy,
             this->d_angle_ene, need_virial, atom_virial_tensor);
+#endif
     }
 }
 

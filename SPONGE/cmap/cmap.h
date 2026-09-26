@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "../common.h"
 #include "../control.h"
@@ -31,6 +31,9 @@ struct CMAP
     float* d_inter_coeff = NULL;
     float* grid_value = NULL;
     int* type_offset = NULL;
+#ifdef USE_VULKAN
+    int* d_type_offset = NULL;
+#endif
 
     // 插值系数矩阵的逆矩阵，相当于解线性方程组得到插值多项式系数
     /*

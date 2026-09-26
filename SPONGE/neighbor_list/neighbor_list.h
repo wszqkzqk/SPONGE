@@ -109,7 +109,7 @@ struct NEIGHBOR_LIST
                     int* d_neighbor_grid_ghost_overflow,
                     int* d_neighbor_list_overflow, ATOM_GROUP* d_nl,
                     int* excluded_list_start = NULL, int* excluded_list = NULL,
-                    int* excluded_numbers = NULL);
+                    int* excluded_numbers = NULL, int* d_serial_pool = NULL);
         void Clear();
     } updator;
 

@@ -1,7 +1,24 @@
-﻿#include "cmap.h"
+#include "cmap.h"
 
 #include "../xponge/load/native/cmap.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct CmapForceVkParams
+{
+    int cmap_numbers;
+    Boundary boundary;
+    int need_potential;
+    int need_pressure;
+};
+static_assert(sizeof(CmapForceVkParams) == 64,
+              "CmapForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 // clang-format off
 // 由于求导带来的系数矩阵的逆矩阵A_inv
@@ -134,6 +151,10 @@ void CMAP::Parameter_Host_to_Device()
                                   sizeof(float) * 16 * uniq_gridpoint_num);
     Device_Malloc_And_Copy_Safely((void**)&d_cmap_resolution, h_cmap_resolution,
                                   sizeof(int) * uniq_cmap_num);
+#ifdef USE_VULKAN
+    Device_Malloc_And_Copy_Safely((void**)&d_type_offset, type_offset,
+                                  sizeof(int) * uniq_cmap_num);
+#endif
     for (int i = 0; i < tot_cmap_num; i++)
     {
         h_coeff_ptr[i] = d_inter_coeff + type_offset[h_cmap_type[i]];
@@ -503,6 +524,28 @@ void CMAP::CMAP_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        CmapForceVkParams params{this->num_cmap_local, boundary,
+                                 need_potential, need_pressure};
+        const void* buffers[] = {crd,
+                                 this->d_atom_a_local,
+                                 this->d_atom_b_local,
+                                 this->d_atom_c_local,
+                                 this->d_atom_d_local,
+                                 this->d_atom_e_local,
+                                 this->d_cmap_type_local,
+                                 this->d_cmap_resolution,
+                                 this->d_type_offset,
+                                 this->d_inter_coeff,
+                                 frc,
+                                 vk_or_dummy(atom_energy, frc),
+                                 this->d_cmap_ene,
+                                 vk_or_dummy(atom_virial, frc)};
+        VK_LAUNCH(cmap_force,
+                  (tot_cmap_num + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             CMAP_Force_With_Atom_Energy_And_Virial_Device,
             (tot_cmap_num + CONTROLLER::device_max_thread - 1) /
@@ -513,6 +556,7 @@ void CMAP::CMAP_Force_With_Atom_Energy_And_Virial(
             this->d_cmap_type_local, this->d_cmap_resolution, this->d_coeff_ptr,
             frc, need_potential, atom_energy, d_cmap_ene, need_pressure,
             atom_virial);
+#endif
     }
 }
 
@@ -570,6 +614,28 @@ void CMAP::Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
     if (!is_initialized) return;
     num_cmap_local = 0;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int cmap_numbers;
+    } params{this->tot_cmap_num};
+    const void* buffers[] = {this->d_atom_a,
+                             this->d_atom_b,
+                             this->d_atom_c,
+                             this->d_atom_d,
+                             this->d_atom_e,
+                             this->d_cmap_type,
+                             atom_local_label,
+                             atom_local_id,
+                             this->d_atom_a_local,
+                             this->d_atom_b_local,
+                             this->d_atom_c_local,
+                             this->d_atom_d_local,
+                             this->d_atom_e_local,
+                             this->d_cmap_type_local,
+                             this->d_num_cmap_local};
+    VK_LAUNCH(cmap_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL, this->tot_cmap_num,
                          this->d_atom_a, this->d_atom_b, this->d_atom_c,
                          this->d_atom_d, this->d_atom_e, this->d_cmap_type,
@@ -577,6 +643,7 @@ void CMAP::Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
                          this->d_atom_b_local, this->d_atom_c_local,
                          this->d_atom_d_local, this->d_atom_e_local,
                          this->d_cmap_type_local, this->d_num_cmap_local);
+#endif
     deviceMemcpy(&num_cmap_local, d_num_cmap_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }

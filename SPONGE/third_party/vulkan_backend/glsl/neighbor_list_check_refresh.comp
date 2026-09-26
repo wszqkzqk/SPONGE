@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer CrdOld { Vec3 crd_old[]; };
+layout(set = 0, binding = 2, std430) buffer NeedRefresh { int d_need_refresh[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    float permit_square;
+}
+pc;
+void main()
+{
+    int tid = int(gl_GlobalInvocationID.x);
+    if (tid >= pc.atom_numbers) return;
+    Vec3 dr = get_displacement_periodic(crd[tid], crd_old[tid], pc.boundary);
+    if (v3_dot(dr, dr) > pc.permit_square) d_need_refresh[0] = 1;
+}

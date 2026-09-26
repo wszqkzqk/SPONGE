@@ -1,0 +1,12 @@
+layout(set = 0, binding = 0, std430) buffer Need { int need[]; };
+layout(set = 0, binding = 1, std430) buffer GridAtomNumbers { int grid_atom_numbers[]; };
+layout(set = 0, binding = 2, std430) buffer GridGhostNumbers { int grid_ghost_numbers[]; };
+layout(push_constant) uniform Params { int grid_numbers; } pc;
+void main()
+{
+    if (need[0] == 0) return;
+    int tid = int(gl_GlobalInvocationID.x);
+    if (tid >= pc.grid_numbers) return;
+    grid_atom_numbers[tid] = 0;
+    grid_ghost_numbers[tid] = 0;
+}

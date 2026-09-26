@@ -1,0 +1,185 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 3, std430) buffer AtomC { int atom_c[]; };
+layout(set = 0, binding = 4, std430) buffer AtomD { int atom_d[]; };
+layout(set = 0, binding = 5, std430) buffer AtomE { int atom_e[]; };
+layout(set = 0, binding = 6, std430) buffer CmapType { int cmap_type[]; };
+layout(set = 0, binding = 7, std430) buffer Resolution { int resolution[]; };
+layout(set = 0, binding = 8, std430) buffer TypeOffset { int type_offset[]; };
+layout(set = 0, binding = 9, std430) buffer InterCoeff { float inter_coeff[]; };
+layout(set = 0, binding = 10, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 11, std430) buffer AtomEnergy { float ene[]; };
+layout(set = 0, binding = 12, std430) buffer CmapEne { float cmap_ene[]; };
+layout(set = 0, binding = 13, std430) buffer AtomVirial { LTMat virial[]; };
+layout(push_constant) uniform Params
+{
+    int cmap_numbers;
+    Boundary boundary;
+    int need_potential;
+    int need_pressure;
+}
+pc;
+const float SPONGE_PI = 3.1415926535897932;
+LTMat lt_add(LTMat a, LTMat b)
+{
+    return LTMat(a.a11 + b.a11, a.a21 + b.a21, a.a22 + b.a22,
+                 a.a31 + b.a31, a.a32 + b.a32, a.a33 + b.a33);
+}
+int periodic_grid_index(int grid_cell, int reso)
+{
+    int grid_index = (grid_cell + reso / 2) % reso;
+    if (grid_index < 0) grid_index += reso;
+    return grid_index;
+}
+void main()
+{
+    int cmap_i = int(gl_GlobalInvocationID.x);
+    if (cmap_i >= pc.cmap_numbers) return;
+    int atom_i = atom_a[cmap_i];
+    int atom_j = atom_b[cmap_i];
+    int atom_k = atom_c[cmap_i];
+    int atom_l = atom_d[cmap_i];
+    int atom_m = atom_e[cmap_i];
+    Vec3 ri = crd[atom_i];
+    Vec3 rj = crd[atom_j];
+    Vec3 rk = crd[atom_k];
+    Vec3 rl = crd[atom_l];
+    Vec3 rm = crd[atom_m];
+    Vec3 drij = get_displacement(ri, rj, pc.boundary);
+    Vec3 drkj = get_displacement(rk, rj, pc.boundary);
+    Vec3 drkl = get_displacement(rk, rl, pc.boundary);
+    Vec3 r1_phi = v3_cross(drij, drkj);
+    Vec3 r2_phi = v3_cross(drkl, drkj);
+    float r1_1_r2_1_phi = (1.0 / v3_len(r1_phi)) * (1.0 / v3_len(r2_phi));
+    float phi = v3_dot(r1_phi, r2_phi) * r1_1_r2_1_phi;
+    phi = max(-0.999999, min(phi, 0.999999));
+    phi = acos(phi);
+    phi = SPONGE_PI - phi;
+    float sign_phi = v3_dot(v3_cross(r2_phi, r1_phi), drkj);
+    phi = copysignf(phi, sign_phi);
+    Vec3 drjk = get_displacement(rj, rk, pc.boundary);
+    Vec3 drlk = get_displacement(rl, rk, pc.boundary);
+    Vec3 drlm = get_displacement(rl, rm, pc.boundary);
+    Vec3 r1_psi = v3_cross(drjk, drlk);
+    Vec3 r2_psi = v3_cross(drlm, drlk);
+    float r1_1_r2_1_psi = (1.0 / v3_len(r1_psi)) * (1.0 / v3_len(r2_psi));
+    float psi = v3_dot(r1_psi, r2_psi) * r1_1_r2_1_psi;
+    psi = max(-0.999999, min(psi, 0.999999));
+    psi = acos(psi);
+    psi = SPONGE_PI - psi;
+    float sign_psi = v3_dot(v3_cross(r2_psi, r1_psi), drlk);
+    psi = copysignf(psi, sign_psi);
+    int ctype = cmap_type[cmap_i];
+    int temp_reso = resolution[ctype];
+    phi = phi / (2.0 * SPONGE_PI / float(temp_reso));
+    psi = psi / (2.0 * SPONGE_PI / float(temp_reso));
+    int phi_cell = int(floor(phi));
+    int psi_cell = int(floor(psi));
+    float parm_phi = phi - float(phi_cell);
+    float parm_psi = psi - float(psi_cell);
+    int locate_phi = periodic_grid_index(phi_cell, temp_reso);
+    int locate_psi = periodic_grid_index(psi_cell, temp_reso);
+    float parm_phi_2 = parm_phi * parm_phi;
+    float parm_phi_3 = parm_phi_2 * parm_phi;
+    float parm_psi_2 = parm_psi * parm_psi;
+    float parm_psi_3 = parm_psi_2 * parm_psi;
+    int locate =
+        type_offset[ctype] + 16 * (locate_phi * temp_reso + locate_psi);
+    float c[16];
+    for (int q = 0; q < 16; q++) c[q] = inter_coeff[locate + q];
+    float dE_dphi =
+        (c[4] + parm_psi * c[5] + parm_psi_2 * c[6] + parm_psi_3 * c[7]) +
+        2.0 * parm_phi *
+            (c[8] + parm_psi * c[9] + parm_psi_2 * c[10] + parm_psi_3 * c[11]) +
+        3.0 * parm_phi_2 * (c[12] + parm_psi * c[13] + parm_psi_2 * c[14] +
+                            parm_psi_3 * c[15]);
+    float dE_dpsi =
+        c[1] + 2.0 * parm_psi * c[2] + 3.0 * parm_psi_2 * c[3] +
+        parm_phi * (c[5] + 2.0 * parm_psi * c[6] + 3.0 * parm_psi_2 * c[7]) +
+        parm_phi_2 *
+            (c[9] + 2.0 * parm_psi * c[10] + 3.0 * parm_psi_2 * c[11]) +
+        parm_phi_3 *
+            (c[13] + 2.0 * parm_psi * c[14] + 3.0 * parm_psi_2 * c[15]);
+    dE_dphi = dE_dphi / (2.0 * SPONGE_PI / float(temp_reso));
+    dE_dpsi = dE_dpsi / (2.0 * SPONGE_PI / float(temp_reso));
+    Vec3 temp_phi_A = v3_cross(drij, drjk);
+    Vec3 temp_phi_B = v3_cross(drlk, drjk);
+    float len_drjk = sqrt(v3_dot(drjk, drjk));
+    float dot_phi_AA = v3_dot(temp_phi_A, temp_phi_A);
+    float dot_phi_BB = v3_dot(temp_phi_B, temp_phi_B);
+    float drij_drjk = v3_dot(drij, drjk);
+    float drlk_drjk = v3_dot(drlk, drjk);
+    Vec3 dphi_dri = v3_scale(temp_phi_A, -len_drjk / dot_phi_AA);
+    Vec3 dphi_drj =
+        v3_sub(v3_add(v3_scale(temp_phi_A, len_drjk / dot_phi_AA),
+                      v3_scale(temp_phi_A,
+                               drij_drjk / (dot_phi_AA * len_drjk))),
+               v3_scale(temp_phi_B, drlk_drjk / (dot_phi_BB * len_drjk)));
+    Vec3 dphi_drk =
+        v3_add(v3_sub(v3_scale(temp_phi_B, -len_drjk / dot_phi_BB),
+                      v3_scale(temp_phi_A,
+                               drij_drjk / (dot_phi_AA * len_drjk))),
+               v3_scale(temp_phi_B, drlk_drjk / (dot_phi_BB * len_drjk)));
+    Vec3 dphi_drl = v3_scale(temp_phi_B, len_drjk / dot_phi_BB);
+    Vec3 dphi_drm = Vec3(0.0, 0.0, 0.0);
+    Vec3 drml = get_displacement(rm, rl, pc.boundary);
+    Vec3 temp_psi_A = v3_cross(drjk, drkl);
+    Vec3 temp_psi_B = v3_cross(drml, drkl);
+    float len_drkl = sqrt(v3_dot(drkl, drkl));
+    float dot_psi_AA = v3_dot(temp_psi_A, temp_psi_A);
+    float dot_psi_BB = v3_dot(temp_psi_B, temp_psi_B);
+    float drjk_drkl = v3_dot(drjk, drkl);
+    float drml_drkl = v3_dot(drml, drkl);
+    Vec3 dpsi_dri = Vec3(0.0, 0.0, 0.0);
+    Vec3 dpsi_drj = v3_scale(temp_psi_A, -len_drkl / dot_psi_AA);
+    Vec3 dpsi_drk =
+        v3_sub(v3_add(v3_scale(temp_psi_A, len_drkl / dot_psi_AA),
+                      v3_scale(temp_psi_A,
+                               drjk_drkl / (dot_psi_AA * len_drkl))),
+               v3_scale(temp_psi_B, drml_drkl / (dot_psi_BB * len_drkl)));
+    Vec3 dpsi_drl =
+        v3_add(v3_sub(v3_scale(temp_psi_B, -len_drkl / dot_psi_BB),
+                      v3_scale(temp_psi_A,
+                               drjk_drkl / (dot_psi_AA * len_drkl))),
+               v3_scale(temp_psi_B, drml_drkl / (dot_psi_BB * len_drkl)));
+    Vec3 dpsi_drm = v3_scale(temp_psi_B, len_drkl / dot_psi_BB);
+    Vec3 fi = v3_neg(v3_add(v3_scale(dphi_dri, dE_dphi),
+                            v3_scale(dpsi_dri, dE_dpsi)));
+    Vec3 fj = v3_neg(v3_add(v3_scale(dphi_drj, dE_dphi),
+                            v3_scale(dpsi_drj, dE_dpsi)));
+    Vec3 fk = v3_neg(v3_add(v3_scale(dphi_drk, dE_dphi),
+                            v3_scale(dpsi_drk, dE_dpsi)));
+    Vec3 fl = v3_neg(v3_add(v3_scale(dphi_drl, dE_dphi),
+                            v3_scale(dpsi_drl, dE_dpsi)));
+    Vec3 fm = v3_neg(v3_add(v3_scale(dphi_drm, dE_dphi),
+                            v3_scale(dpsi_drm, dE_dpsi)));
+    aadd_v3(frc[atom_i], fi);
+    aadd_v3(frc[atom_j], fj);
+    aadd_v3(frc[atom_k], fk);
+    aadd_v3(frc[atom_l], fl);
+    aadd_v3(frc[atom_m], fm);
+    if (pc.need_potential != 0)
+    {
+        float energy =
+            c[0] + parm_psi * c[1] + parm_psi_2 * c[2] + parm_psi_3 * c[3] +
+            parm_phi *
+                (c[4] + parm_psi * c[5] + parm_psi_2 * c[6] +
+                 parm_psi_3 * c[7]) +
+            parm_phi_2 *
+                (c[8] + parm_psi * c[9] + parm_psi_2 * c[10] +
+                 parm_psi_3 * c[11]) +
+            parm_phi_3 *
+                (c[12] + parm_psi * c[13] + parm_psi_2 * c[14] +
+                 parm_psi_3 * c[15]);
+        afadd(ene[atom_i], energy);
+        cmap_ene[cmap_i] = energy;
+    }
+    if (pc.need_pressure != 0)
+        aadd_lt(virial[atom_i],
+                lt_add(lt_add(lt_add(lt_add(virial_from_force_dis(fi, ri),
+                                            virial_from_force_dis(fj, rj)),
+                                     virial_from_force_dis(fk, rk)),
+                              virial_from_force_dis(fl, rl)),
+                       virial_from_force_dis(fm, rm)));
+}

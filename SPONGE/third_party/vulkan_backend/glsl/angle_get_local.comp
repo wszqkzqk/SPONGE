@@ -1,0 +1,40 @@
+layout(set = 0, binding = 0, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 1, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 2, std430) buffer AtomC { int atom_c[]; };
+layout(set = 0, binding = 3, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 4, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 5, std430) buffer ALocal { int atom_a_local[]; };
+layout(set = 0, binding = 6, std430) buffer BLocal { int atom_b_local[]; };
+layout(set = 0, binding = 7, std430) buffer CLocal { int atom_c_local[]; };
+layout(set = 0, binding = 8, std430) buffer K { float angle_k[]; };
+layout(set = 0, binding = 9, std430) buffer Theta0 { float angle_theta0[]; };
+layout(set = 0, binding = 10, std430) buffer KLocal { float k_local[]; };
+layout(set = 0, binding = 11, std430) buffer Theta0Local
+{
+    float theta0_local[];
+};
+layout(set = 0, binding = 12, std430) buffer NumLocal { int num_angle_local[]; };
+layout(push_constant) uniform Params { int angle_numbers; } pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    num_angle_local[0] = 0;
+    for (int i = 0; i < pc.angle_numbers; i++)
+    {
+        if (label_at(atom_a[i]) == 1u || label_at(atom_b[i]) == 1u ||
+            label_at(atom_c[i]) == 1u)
+        {
+            int slot = num_angle_local[0];
+            atom_a_local[slot] = atom_local_id[atom_a[i]];
+            atom_b_local[slot] = atom_local_id[atom_b[i]];
+            atom_c_local[slot] = atom_local_id[atom_c[i]];
+            k_local[slot] = angle_k[i];
+            theta0_local[slot] = angle_theta0[i];
+            num_angle_local[0] = slot + 1;
+        }
+    }
+}

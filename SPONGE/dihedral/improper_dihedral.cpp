@@ -1,7 +1,26 @@
-﻿#include "improper_dihedral.h"
+#include "improper_dihedral.h"
 
 #include "../xponge/load/native/improper_dihedral.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct ImproperDihedralForceVkParams
+{
+    int dihedral_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(
+    sizeof(ImproperDihedralForceVkParams) == 68,
+    "ImproperDihedralForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Dihedral_Force_With_Atom_Energy_And_Virial_Device(
     const int dihedral_numbers, const VECTOR* crd, Boundary boundary,
@@ -291,11 +310,27 @@ void IMPROPER_DIHEDRAL::Get_Local(int* atom_local, int local_atom_numbers,
     if (!is_initialized) return;
     num_dihe_local = 0;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int dihedral_numbers;
+    } params{this->dihedral_numbers};
+    const void* buffers[] = {this->d_atom_a,      this->d_atom_b,
+                             this->d_atom_c,      this->d_atom_d,
+                             atom_local_label,    atom_local_id,
+                             this->d_atom_a_local, this->d_atom_b_local,
+                             this->d_atom_c_local, this->d_atom_d_local,
+                             this->d_pk,          this->d_phi0,
+                             this->d_pk_local,    this->d_phi0_local,
+                             this->d_num_dihe_local};
+    VK_LAUNCH(improper_dihedral_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL, dihedral_numbers,
                          d_atom_a, d_atom_b, d_atom_c, d_atom_d,
                          atom_local_label, atom_local_id, d_atom_a_local,
                          d_atom_b_local, d_atom_c_local, d_atom_d_local, d_pk,
                          d_phi0, d_pk_local, d_phi0_local, d_num_dihe_local);
+#endif
     deviceMemcpy(&num_dihe_local, d_num_dihe_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }
@@ -306,6 +341,29 @@ void IMPROPER_DIHEDRAL::Dihedral_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        ImproperDihedralForceVkParams params{this->num_dihe_local,
+                                             boundary,
+                                             this->local_atom_numbers,
+                                             need_atom_energy,
+                                             need_virial};
+        const void* buffers[] = {
+            crd,
+            this->d_atom_a_local,
+            this->d_atom_b_local,
+            this->d_atom_c_local,
+            this->d_atom_d_local,
+            this->d_pk_local,
+            this->d_phi0_local,
+            frc,
+            vk_or_dummy(atom_energy, frc),
+            this->d_dihedral_ene,
+            vk_or_dummy(atom_virial, frc)};
+        VK_LAUNCH(improper_dihedral_force,
+                  (dihedral_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Dihedral_Force_With_Atom_Energy_And_Virial_Device,
             (dihedral_numbers + CONTROLLER::device_max_thread - 1) /
@@ -315,6 +373,7 @@ void IMPROPER_DIHEDRAL::Dihedral_Force_With_Atom_Energy_And_Virial(
             this->d_atom_b_local, this->d_atom_c_local, this->d_atom_d_local,
             this->d_pk_local, this->d_phi0_local, frc, need_atom_energy,
             atom_energy, d_dihedral_ene, need_virial, atom_virial);
+#endif
     }
 }
 

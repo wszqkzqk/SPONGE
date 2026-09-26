@@ -1,0 +1,65 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 3, std430) buffer CfScale { float cf_scale_factor[]; };
+layout(set = 0, binding = 4, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 5, std430) buffer LjA { float lj_A[]; };
+layout(set = 0, binding = 6, std430) buffer LjB { float lj_B[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 8, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 10, std430) buffer Nb14CfEne { float nb14_cf_ene[]; };
+layout(set = 0, binding = 11, std430) buffer Nb14LjEne { float nb14_lj_ene[]; };
+layout(push_constant) uniform Params
+{
+    int nb14_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+}
+pc;
+void main()
+{
+    int nb14_i = int(gl_GlobalInvocationID.x);
+    if (nb14_i >= pc.nb14_numbers) return;
+    int atom_i = atom_a[nb14_i];
+    int atom_j = atom_b[nb14_i];
+    Vec3 r1 = crd[atom_i];
+    Vec3 r2 = crd[atom_j];
+    Vec3 dr = get_displacement(r2, r1, pc.boundary);
+    float dr2 = v3_dot(dr, dr);
+    float dr_2 = 1.0 / dr2;
+    float dr_4 = dr_2 * dr_2;
+    float dr_8 = dr_4 * dr_4;
+    float dr_14 = dr_8 * dr_4 * dr_2;
+    float dr_abs = v3_len(dr);
+    float dr_1 = 1.0 / dr_abs;
+    float charge_i = charge[atom_i];
+    if (abs(charge_i) < 1e-10) charge_i = 1e-10;
+    float charge_j = charge[atom_j];
+    if (abs(charge_j) < 1e-10) charge_j = 1e-10;
+    float frc_cf_abs = cf_scale_factor[nb14_i] * dr_2 * dr_1;
+    frc_cf_abs = -frc_cf_abs * charge_i * charge_j;
+    float frc_abs = -lj_A[nb14_i] * dr_14 + lj_B[nb14_i] * dr_8;
+    frc_abs += frc_cf_abs;
+    Vec3 temp_frc = v3_scale(dr, frc_abs);
+    if (atom_j < pc.local_atom_numbers) aadd_v3(frc[atom_j], v3_neg(temp_frc));
+    if (atom_i < pc.local_atom_numbers)
+    {
+        aadd_v3(frc[atom_i], temp_frc);
+        if (pc.need_atom_energy != 0)
+        {
+            float ene_lin =
+                cf_scale_factor[nb14_i] * dr_1 * charge_i * charge_j;
+            float ene_lin2 = 0.08333333 * lj_A[nb14_i] * dr_4 * dr_8 -
+                             0.1666666 * lj_B[nb14_i] * dr_4 * dr_2;
+            afadd(atom_energy[atom_i], ene_lin + ene_lin2);
+            nb14_cf_ene[nb14_i] = ene_lin;
+            nb14_lj_ene[nb14_i] = ene_lin2;
+        }
+        if (pc.need_virial != 0)
+            aadd_lt(atom_virial[atom_i],
+                    virial_from_force_dis(v3_neg(temp_frc), dr));
+    }
+}

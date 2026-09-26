@@ -1,0 +1,36 @@
+layout(set = 0, binding = 0, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 1, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 2, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 3, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 4, std430) buffer ALocal { int atom_a_local[]; };
+layout(set = 0, binding = 5, std430) buffer BLocal { int atom_b_local[]; };
+layout(set = 0, binding = 6, std430) buffer LjA { float lj_A[]; };
+layout(set = 0, binding = 7, std430) buffer LjB { float lj_B[]; };
+layout(set = 0, binding = 8, std430) buffer CfScale { float cf_scale_factor[]; };
+layout(set = 0, binding = 9, std430) buffer LjALocal { float lj_A_local[]; };
+layout(set = 0, binding = 10, std430) buffer LjBLocal { float lj_B_local[]; };
+layout(set = 0, binding = 11, std430) buffer CfScaleLocal { float cf_scale_factor_local[]; };
+layout(set = 0, binding = 12, std430) buffer NumLocal { int num_nb14_local[]; };
+layout(push_constant) uniform Params { int nb14_numbers; } pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    num_nb14_local[0] = 0;
+    for (int i = 0; i < pc.nb14_numbers; i++)
+    {
+        if (label_at(atom_a[i]) == 1u || label_at(atom_b[i]) == 1u)
+        {
+            int slot = num_nb14_local[0];
+            atom_a_local[slot] = atom_local_id[atom_a[i]];
+            atom_b_local[slot] = atom_local_id[atom_b[i]];
+            lj_A_local[slot] = lj_A[i];
+            lj_B_local[slot] = lj_B[i];
+            cf_scale_factor_local[slot] = cf_scale_factor[i];
+            num_nb14_local[0] = slot + 1;
+        }
+    }
+}

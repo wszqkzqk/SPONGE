@@ -1,7 +1,25 @@
-﻿#include "dihedral.h"
+#include "dihedral.h"
 
 #include "../xponge/load/native/dihedral.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct DihedralForceVkParams
+{
+    int dihedral_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(sizeof(DihedralForceVkParams) == 68,
+              "DihedralForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Dihedral_Force_With_Atom_Energy_And_Virial_Device(
     const int dihedral_numbers, const VECTOR* crd, Boundary boundary,
@@ -323,12 +341,31 @@ void DIHEDRAL::Get_Local(int* atom_local, int local_atom_numbers,
     if (!is_initialized) return;
     num_dihe_local = 0;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int dihedral_numbers;
+    } params{this->dihedral_numbers};
+    const void* buffers[] = {this->d_atom_a,      this->d_atom_b,
+                             this->d_atom_c,      this->d_atom_d,
+                             atom_local_label,    atom_local_id,
+                             this->d_atom_a_local, this->d_atom_b_local,
+                             this->d_atom_c_local, this->d_atom_d_local,
+                             this->d_ipn,         this->d_pk,
+                             this->d_gamc,        this->d_gams,
+                             this->d_pn,          this->d_ipn_local,
+                             this->d_pk_local,    this->d_gamc_local,
+                             this->d_gams_local,  this->d_pn_local,
+                             this->d_num_dihe_local};
+    VK_LAUNCH(dihedral_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         get_local_device, 1, 1, 0, NULL, dihedral_numbers, d_atom_a, d_atom_b,
         d_atom_c, d_atom_d, atom_local_label, atom_local_id, d_atom_a_local,
         d_atom_b_local, d_atom_c_local, d_atom_d_local, d_ipn, d_pk, d_gamc,
         d_gams, d_pn, d_ipn_local, d_pk_local, d_gamc_local, d_gams_local,
         d_pn_local, d_num_dihe_local);
+#endif
     deviceMemcpy(&num_dihe_local, d_num_dihe_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }
@@ -339,6 +376,32 @@ void DIHEDRAL::Dihedral_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)  // 修改：删除MPI_rank==0判断，求和变为局部求和，加入判断是否需要计算atom_energy和virial
     {
+#ifdef USE_VULKAN
+        DihedralForceVkParams params{this->num_dihe_local,
+                                     boundary,
+                                     this->local_atom_numbers,
+                                     need_atom_energy,
+                                     need_virial};
+        const void* buffers[] = {
+            crd,
+            this->d_atom_a_local,
+            this->d_atom_b_local,
+            this->d_atom_c_local,
+            this->d_atom_d_local,
+            this->d_ipn_local,
+            this->d_pk_local,
+            this->d_gamc_local,
+            this->d_gams_local,
+            this->d_pn_local,
+            frc,
+            vk_or_dummy(atom_energy, frc),
+            this->d_dihedral_ene,
+            vk_or_dummy(atom_virial, frc)};
+        VK_LAUNCH(dihedral_force,
+                  (dihedral_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Dihedral_Force_With_Atom_Energy_And_Virial_Device,
             (dihedral_numbers + CONTROLLER::device_max_thread - 1) /
@@ -349,6 +412,7 @@ void DIHEDRAL::Dihedral_Force_With_Atom_Energy_And_Virial(
             this->d_ipn_local, this->d_pk_local, this->d_gamc_local,
             this->d_gams_local, this->d_pn_local, frc, need_atom_energy,
             atom_energy, d_dihedral_ene, need_virial, atom_virial);
+#endif
     }
 }
 

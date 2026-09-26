@@ -1,0 +1,63 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 3, std430) buffer AtomC { int atom_c[]; };
+layout(set = 0, binding = 4, std430) buffer K { float angle_k[]; };
+layout(set = 0, binding = 5, std430) buffer Theta0 { float angle_theta0[]; };
+layout(set = 0, binding = 6, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 7, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 8, std430) buffer AngleEne { float angle_ene[]; };
+layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(push_constant) uniform Params
+{
+    int angle_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+}
+pc;
+void main()
+{
+    int angle_i = int(gl_GlobalInvocationID.x);
+    if (angle_i >= pc.angle_numbers) return;
+    int atom_i = atom_a[angle_i];
+    int atom_j = atom_b[angle_i];
+    int atom_k = atom_c[angle_i];
+    float theta0 = angle_theta0[angle_i];
+    float k = angle_k[angle_i];
+    float k2 = k;
+    Vec3 drij = get_displacement(crd[atom_i], crd[atom_j], pc.boundary);
+    Vec3 drkj = get_displacement(crd[atom_k], crd[atom_j], pc.boundary);
+    float rij_2 = 1.0 / v3_dot(drij, drij);
+    float rkj_2 = 1.0 / v3_dot(drkj, drkj);
+    float rij_1_rkj_1 = sqrt(rij_2 * rkj_2);
+    float costheta = v3_dot(drij, drkj) * rij_1_rkj_1;
+    costheta = max(-0.999999, min(costheta, 0.999999));
+    float theta = acos(costheta);
+    float dtheta = theta - theta0;
+    k = -2.0 * k * dtheta / sin(theta);
+    float common_factor_cross = k * rij_1_rkj_1;
+    float common_factor_self = k * costheta;
+    Vec3 fi = v3_sub(v3_scale(drij, common_factor_self * rij_2),
+                     v3_scale(drkj, common_factor_cross));
+    Vec3 fk = v3_sub(v3_scale(drkj, common_factor_self * rkj_2),
+                     v3_scale(drij, common_factor_cross));
+    if (atom_k < pc.local_atom_numbers) aadd_v3(frc[atom_k], fk);
+    if (atom_i < pc.local_atom_numbers)
+    {
+        aadd_v3(frc[atom_i], fi);
+        if (pc.need_virial != 0)
+        {
+            aadd_lt(atom_virial[atom_i], virial_from_force_dis(fi, drij));
+            aadd_lt(atom_virial[atom_i], virial_from_force_dis(fk, drkj));
+        }
+        if (pc.need_atom_energy != 0)
+        {
+            afadd(atom_energy[atom_i], k2 * dtheta * dtheta);
+            angle_ene[angle_i] = k2 * dtheta * dtheta;
+        }
+    }
+    Vec3 fj = v3_neg(v3_add(fi, fk));
+    if (atom_j < pc.local_atom_numbers) aadd_v3(frc[atom_j], fj);
+}

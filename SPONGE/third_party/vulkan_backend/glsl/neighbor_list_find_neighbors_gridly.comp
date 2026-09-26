@@ -1,0 +1,191 @@
+#define MAX_GRID_NEIGHBORS 192
+
+layout(set = 0, binding = 0, std430) buffer Need { int need[]; };
+layout(set = 0, binding = 1, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 2, std430) buffer GridNeighborNumbers { int grid_neighbor_numbers[]; };
+layout(set = 0, binding = 3, std430) buffer GridNeighbors { int grid_neighbors[]; };
+layout(set = 0, binding = 4, std430) buffer GridCrd { Vec3 grid_crd[]; };
+layout(set = 0, binding = 5, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 6, std430) buffer SerialPool { int serial_pool[]; };
+layout(set = 0, binding = 7, std430) buffer GridAtomNumbers { int grid_atom_numbers[]; };
+layout(set = 0, binding = 8, std430) buffer GridAtoms { int grid_atoms[]; };
+layout(set = 0, binding = 9, std430) buffer Overflow { int neighbor_list_overflow[]; };
+layout(set = 0, binding = 10, std430) buffer GridGhostCrd { Vec3 grid_ghost_crd[]; };
+layout(set = 0, binding = 11, std430) buffer GridGhostNumbers { int grid_ghost_numbers[]; };
+layout(set = 0, binding = 12, std430) buffer GridGhosts { int grid_ghosts[]; };
+layout(push_constant) uniform Params
+{
+    int grid_numbers;
+    Boundary boundary;
+    int max_atom_numbers_in_grid;
+    float cutoff_skin_square;
+    int max_neighbor_numbers;
+    int max_ghost_numbers_in_grid;
+}
+pc;
+
+uvec4 lower_lane_mask(uint lane)
+{
+    if (lane < 32u) return uvec4((1u << lane) - 1u, 0u, 0u, 0u);
+    return uvec4(0xFFFFFFFFu, (1u << (lane - 32u)) - 1u, 0u, 0u);
+}
+
+void main()
+{
+    if (need[0] == 0) return;
+    const uint lane = gl_SubgroupInvocationID;
+    const uint warp_size = gl_SubgroupSize;
+    const uint block_size = gl_WorkGroupSize.x;
+    uint warps_per_block = block_size / warp_size;
+    if (warps_per_block == 0u) warps_per_block = 1u;
+    const uint warp_id = gl_SubgroupID;
+    const uint lane_stride = block_size < warp_size ? block_size : warp_size;
+    const uint lane_index =
+        block_size < warp_size ? gl_LocalInvocationIndex : lane;
+    const uvec4 warp_mask = subgroupBallot(true);
+
+    for (int grid_i = int(gl_WorkGroupID.x); grid_i < pc.grid_numbers;
+         grid_i += int(gl_NumWorkGroups.x))
+    {
+        const int atom_numbers_in_grid_i = grid_atom_numbers[grid_i];
+        if (atom_numbers_in_grid_i == 0) continue;
+        const int base_i = grid_i * pc.max_atom_numbers_in_grid;
+
+        const int neighbor_count = grid_neighbor_numbers[grid_i];
+        if (neighbor_count == 0) continue;
+
+        for (uint jj = warp_id; jj < uint(neighbor_count);
+             jj += warps_per_block)
+        {
+            const int grid_j =
+                grid_neighbors[grid_i * MAX_GRID_NEIGHBORS + int(jj)];
+            const int atom_numbers_in_grid_j = grid_atom_numbers[grid_j];
+            if (atom_numbers_in_grid_j == 0) continue;
+            const int base_j = grid_j * pc.max_atom_numbers_in_grid;
+
+            for (int j_base = 0; j_base < atom_numbers_in_grid_j;
+                 j_base += int(lane_stride))
+            {
+                const int j = j_base + int(lane_index);
+                const bool lane_active = j < atom_numbers_in_grid_j;
+                int atom_j = 0;
+                int global_j = 0;
+                Vec3 crd_j = v3(0.0, 0.0, 0.0);
+                if (lane_active)
+                {
+                    atom_j = grid_atoms[base_j + j];
+                    global_j = atom_local[atom_j];
+                    crd_j = grid_crd[base_j + j];
+                }
+
+                for (int i = 0; i < atom_numbers_in_grid_i; ++i)
+                {
+                    const int atom_i = grid_atoms[base_i + i];
+                    const int global_i = atom_local[atom_i];
+                    bool is_neighbor = false;
+                    if (lane_active && global_j > global_i)
+                    {
+                        Vec3 dr = get_displacement_periodic(
+                            grid_crd[base_i + i], crd_j, pc.boundary);
+                        if (v3_dot(dr, dr) < pc.cutoff_skin_square)
+                            is_neighbor = true;
+                    }
+
+                    const uvec4 mask = subgroupBallot(is_neighbor) & warp_mask;
+                    if ((mask.x | mask.y) != 0u)
+                    {
+                        const int count = bitCount(mask.x) + bitCount(mask.y);
+                        int base_slot = 0;
+                        const int leader_lane =
+                            mask.x != 0u ? findLSB(mask.x)
+                                         : 32 + findLSB(mask.y);
+                        if (lane == uint(leader_lane))
+                        {
+                            base_slot =
+                                atomicAdd(nl[atom_i].atom_numbers, count);
+                            if (base_slot + count > pc.max_neighbor_numbers)
+                                atomicExchange(neighbor_list_overflow[0], 1);
+                        }
+                        base_slot = subgroupShuffle(base_slot, leader_lane);
+
+                        if (is_neighbor)
+                        {
+                            const uvec4 lower = mask & lower_lane_mask(lane);
+                            const int rank =
+                                bitCount(lower.x) + bitCount(lower.y);
+                            if (base_slot + rank < pc.max_neighbor_numbers)
+                                serial_pool[atom_i * pc.max_neighbor_numbers +
+                                            base_slot + rank] = atom_j;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (uint jj = warp_id; jj < uint(neighbor_count);
+             jj += warps_per_block)
+        {
+            const int grid_j =
+                grid_neighbors[grid_i * MAX_GRID_NEIGHBORS + int(jj)];
+            const int ghost_numbers_in_grid_j = grid_ghost_numbers[grid_j];
+            if (ghost_numbers_in_grid_j == 0) continue;
+            const int base_j = grid_j * pc.max_ghost_numbers_in_grid;
+
+            for (int j_base = 0; j_base < ghost_numbers_in_grid_j;
+                 j_base += int(lane_stride))
+            {
+                const int j = j_base + int(lane_index);
+                const bool lane_active = j < ghost_numbers_in_grid_j;
+                int atom_j = 0;
+                Vec3 crd_j = v3(0.0, 0.0, 0.0);
+                if (lane_active)
+                {
+                    atom_j = grid_ghosts[base_j + j];
+                    crd_j = grid_ghost_crd[base_j + j];
+                }
+
+                for (int i = 0; i < atom_numbers_in_grid_i; ++i)
+                {
+                    const int atom_i = grid_atoms[base_i + i];
+                    bool is_neighbor = false;
+                    if (lane_active)
+                    {
+                        Vec3 dr = get_displacement_periodic(
+                            grid_crd[base_i + i], crd_j, pc.boundary);
+                        if (v3_dot(dr, dr) < pc.cutoff_skin_square)
+                            is_neighbor = true;
+                    }
+
+                    const uvec4 mask = subgroupBallot(is_neighbor) & warp_mask;
+                    if ((mask.x | mask.y) != 0u)
+                    {
+                        const int count = bitCount(mask.x) + bitCount(mask.y);
+                        int base_slot = 0;
+                        const int leader_lane =
+                            mask.x != 0u ? findLSB(mask.x)
+                                         : 32 + findLSB(mask.y);
+                        if (lane == uint(leader_lane))
+                        {
+                            base_slot =
+                                atomicAdd(nl[atom_i].atom_numbers, count);
+                            atomicAdd(nl[atom_i].ghost_numbers, count);
+                            if (base_slot + count > pc.max_neighbor_numbers)
+                                atomicExchange(neighbor_list_overflow[0], 1);
+                        }
+                        base_slot = subgroupShuffle(base_slot, leader_lane);
+
+                        if (is_neighbor)
+                        {
+                            const uvec4 lower = mask & lower_lane_mask(lane);
+                            const int rank =
+                                bitCount(lower.x) + bitCount(lower.y);
+                            if (base_slot + rank < pc.max_neighbor_numbers)
+                                serial_pool[atom_i * pc.max_neighbor_numbers +
+                                            base_slot + rank] = atom_j;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

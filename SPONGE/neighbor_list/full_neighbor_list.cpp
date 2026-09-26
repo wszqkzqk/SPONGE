@@ -1,5 +1,26 @@
 ﻿#include "full_neighbor_list.h"
 
+#ifdef USE_VULKAN
+struct BuildFullVkParams
+{
+    int atom_numbers;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(BuildFullVkParams) == 8,
+              "BuildFullVkParams must match the GLSL push constant layout");
+
+struct BuildFullWithCutoffVkParams
+{
+    int atom_numbers;
+    int max_neighbor_numbers;
+    Boundary boundary;
+    float cutoff;
+};
+static_assert(sizeof(BuildFullWithCutoffVkParams) == 64,
+              "BuildFullWithCutoffVkParams must match the GLSL push constant "
+              "layout");
+#endif
+
 void FULL_NEIGHBOR_LIST::Initial(int atom_numbers, int max_neighbor_numbers)
 {
     if (is_initialized) return;
@@ -60,7 +81,8 @@ static __global__ void Build_Full_Neighbor_List_Kernel(
 }
 
 void FULL_NEIGHBOR_LIST::Build_From_Half(const ATOM_GROUP* half_nl,
-                                         int atom_numbers)
+                                         int atom_numbers,
+                                         const int* half_serial_pool)
 {
     if (!is_initialized) return;
     if (atom_numbers != this->atom_numbers) return;
@@ -71,11 +93,21 @@ void FULL_NEIGHBOR_LIST::Build_From_Half(const ATOM_GROUP* half_nl,
     }
     deviceMemcpy(d_nl, h_nl, sizeof(ATOM_GROUP) * atom_numbers,
                  deviceMemcpyHostToDevice);
+#ifdef USE_VULKAN
+    BuildFullVkParams params{atom_numbers, max_neighbor_numbers};
+    const void* buffers[] = {half_nl, d_nl, d_overflow, half_serial_pool,
+                             d_temp};
+    VK_LAUNCH(full_neighbor_list_build,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Build_Full_Neighbor_List_Kernel,
                          (atom_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, half_nl, d_nl,
                          atom_numbers, max_neighbor_numbers, d_overflow);
+#endif
 }
 
 static __global__ void Build_Full_Neighbor_List_With_Cutoff_Kernel(
@@ -124,11 +156,9 @@ static __global__ void Build_Full_Neighbor_List_With_Cutoff_Kernel(
     }
 }
 
-void FULL_NEIGHBOR_LIST::Build_From_Half_With_Cutoff(const ATOM_GROUP* half_nl,
-                                                     int atom_numbers,
-                                                     const VECTOR* crd,
-                                                     const Boundary boundary,
-                                                     float cutoff)
+void FULL_NEIGHBOR_LIST::Build_From_Half_With_Cutoff(
+    const ATOM_GROUP* half_nl, int atom_numbers, const VECTOR* crd,
+    const Boundary boundary, float cutoff, const int* half_serial_pool)
 {
     if (!is_initialized) return;
     if (atom_numbers != this->atom_numbers) return;
@@ -141,12 +171,23 @@ void FULL_NEIGHBOR_LIST::Build_From_Half_With_Cutoff(const ATOM_GROUP* half_nl,
     deviceMemcpy(d_nl, h_nl, sizeof(ATOM_GROUP) * atom_numbers,
                  deviceMemcpyHostToDevice);
 
+#ifdef USE_VULKAN
+    BuildFullWithCutoffVkParams params{atom_numbers, max_neighbor_numbers,
+                                       boundary, cutoff};
+    const void* buffers[] = {half_nl,          d_nl,   d_overflow,
+                             half_serial_pool, d_temp, crd};
+    VK_LAUNCH(full_neighbor_list_build_with_cutoff,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Build_Full_Neighbor_List_With_Cutoff_Kernel,
                          (atom_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, half_nl, d_nl,
                          atom_numbers, max_neighbor_numbers, d_overflow, crd,
                          boundary, cutoff);
+#endif
 }
 
 void FULL_NEIGHBOR_LIST::Clear()

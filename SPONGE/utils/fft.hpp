@@ -15,6 +15,9 @@ Agreement HCFFT for hpcc backend -  cooperated with 沐曦MetaX
 #include "../third_party/device_backend/cuda_api.h"
 #elif defined(USE_VULKAN)
 #include "../third_party/device_backend/vulkan_api.h"
+#ifdef USE_VULKAN
+#include <fftw3.h>
+#endif
 #else
 #include "../third_party/device_backend/cpu_api.h"
 #endif
@@ -52,14 +55,26 @@ struct SPONGE_FFT_WRAPPER
         return result;
     }
 
+    static bool Use_Host_FFT()
+    {
+#if defined(USE_VULKAN) && !defined(USE_GPU)
+        static const bool host_fft = getenv("SPONGE_VK_HOST_FFT") != nullptr;
+        return host_fft;
+#else
+        return false;
+#endif
+    }
+
     static FFT_RESULT Make_FFT_Plan(FFT_HANDLE* handle, int batch,
                                     int dimension, FFT_SIZE_t* length,
                                     FFT_TYPE type)
     {
 #if defined(USE_GPU) || defined(USE_VULKAN)
-        return deviceFFTPlanMany(handle, dimension, length, NULL, 0, 0, NULL, 0,
-                                 0, type, batch);
-#else
+        if (!Use_Host_FFT())
+            return deviceFFTPlanMany(handle, dimension, length, NULL, 0, 0,
+                                     NULL, 0, 0, type, batch);
+#endif
+#if !defined(USE_GPU) || defined(USE_VULKAN)
         int* c_length = (int*)malloc(sizeof(int) * dimension);
         memcpy(c_length, length, sizeof(int) * dimension);
         c_length[dimension - 1] = c_length[dimension - 1] / 2 + 1;
@@ -95,27 +110,36 @@ struct SPONGE_FFT_WRAPPER
     static void R2C(FFT_HANDLE handle, float* input, FFT_COMPLEX* output)
     {
 #if defined(USE_GPU) || defined(USE_VULKAN)
-        deviceFFTExecR2C(handle, input, output);
-#else
-        fftwf_execute_dft_r2c(handle, input, (fftwf_complex*)output);
+        if (!Use_Host_FFT())
+        {
+            deviceFFTExecR2C(handle, input, output);
+            return;
+        }
 #endif
+        fftwf_execute_dft_r2c((fftwf_plan)handle, input, (fftwf_complex*)output);
     }
 
     static void C2R(FFT_HANDLE handle, FFT_COMPLEX* input, float* output)
     {
 #if defined(USE_GPU) || defined(USE_VULKAN)
-        deviceFFTExecC2R(handle, input, output);
-#else
-        fftwf_execute_dft_c2r(handle, (fftwf_complex*)input, output);
+        if (!Use_Host_FFT())
+        {
+            deviceFFTExecC2R(handle, input, output);
+            return;
+        }
 #endif
+        fftwf_execute_dft_c2r((fftwf_plan)handle, (fftwf_complex*)input, output);
     }
 
     static void Destroy_FFT_Plan(FFT_HANDLE* handle)
     {
 #if defined(USE_GPU) || defined(USE_VULKAN)
-        deviceFFTDestroy(handle[0]);
-#else
-        fftwf_destroy_plan(handle[0]);
+        if (!Use_Host_FFT())
+        {
+            deviceFFTDestroy(handle[0]);
+            return;
+        }
 #endif
+        fftwf_destroy_plan((fftwf_plan)handle[0]);
     }
 };

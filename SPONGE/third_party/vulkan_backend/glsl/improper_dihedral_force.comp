@@ -1,0 +1,94 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 3, std430) buffer AtomC { int atom_c[]; };
+layout(set = 0, binding = 4, std430) buffer AtomD { int atom_d[]; };
+layout(set = 0, binding = 5, std430) buffer Pk { float pk[]; };
+layout(set = 0, binding = 6, std430) buffer Phi0 { float phi0[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 8, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 9, std430) buffer DiEne { float di_ene[]; };
+layout(set = 0, binding = 10, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(push_constant) uniform Params
+{
+    int dihedral_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+}
+pc;
+LTMat lt_add(LTMat a, LTMat b)
+{
+    return LTMat(a.a11 + b.a11, a.a21 + b.a21, a.a22 + b.a22, a.a31 + b.a31,
+                 a.a32 + b.a32, a.a33 + b.a33);
+}
+void main()
+{
+    int dihedral_i = int(gl_GlobalInvocationID.x);
+    if (dihedral_i >= pc.dihedral_numbers) return;
+    int atom_i = atom_a[dihedral_i];
+    int atom_j = atom_b[dihedral_i];
+    int atom_k = atom_c[dihedral_i];
+    int atom_l = atom_d[dihedral_i];
+    float temp_pk = pk[dihedral_i];
+    float temp_phi0 = phi0[dihedral_i];
+    Vec3 drij = get_displacement(crd[atom_i], crd[atom_j], pc.boundary);
+    Vec3 drkj = get_displacement(crd[atom_k], crd[atom_j], pc.boundary);
+    Vec3 drkl = get_displacement(crd[atom_k], crd[atom_l], pc.boundary);
+    Vec3 r1 = v3_cross(drij, drkj);
+    Vec3 r2 = v3_cross(drkl, drkj);
+    float r1_1 = inversesqrt(v3_dot(r1, r1));
+    float r2_1 = inversesqrt(v3_dot(r2, r2));
+    float r1_2 = r1_1 * r1_1;
+    float r2_2 = r2_1 * r2_1;
+    float r1_1_r2_1 = r1_1 * r2_1;
+    float phi = v3_dot(r1, r2) * r1_1_r2_1;
+    phi = max(-0.999999, min(phi, 0.999999));
+    phi = acos(phi);
+    float sgn = v3_dot(v3_cross(r2, r1), drkj);
+    phi = floatBitsToUint(sgn) >= 0x80000000u ? -phi : phi;
+    phi = 3.1415926535897932 - phi;
+    float delta_phi = phi - temp_phi0;
+    if (delta_phi > 3.1415926535897932)
+    {
+        delta_phi -= 2.0 * 3.1415926535897932;
+    }
+    else if (delta_phi < -3.1415926535897932)
+    {
+        delta_phi += 2.0 * 3.1415926535897932;
+    }
+    float sin_phi = sin(phi);
+    float cos_phi = cos(phi);
+    float dE_dphi = -2.0 * temp_pk * delta_phi / sin_phi;
+    Vec3 dphi_dr1 = v3_add(v3_scale(r2, r1_1_r2_1), v3_scale(r1, cos_phi * r1_2));
+    Vec3 dphi_dr2 = v3_add(v3_scale(r1, r1_1_r2_1), v3_scale(r2, cos_phi * r2_2));
+    Vec3 dE_dri = v3_cross(v3_scale(drkj, dE_dphi), dphi_dr1);
+    Vec3 dE_drl = v3_cross(v3_scale(dphi_dr2, dE_dphi), drkj);
+    Vec3 dE_drj_part = v3_scale(
+        v3_add(v3_cross(drij, dphi_dr1), v3_cross(drkl, dphi_dr2)), dE_dphi);
+    Vec3 fi = dE_dri;
+    Vec3 fj = v3_sub(dE_drj_part, dE_dri);
+    Vec3 fk = v3_sub(v3_neg(dE_drl), dE_drj_part);
+    Vec3 fl = dE_drl;
+    if (atom_i < pc.local_atom_numbers)
+    {
+        aadd_v3(frc[atom_i], fi);
+        if (pc.need_atom_energy != 0)
+        {
+            float ene_i = temp_pk * delta_phi * delta_phi;
+            afadd(atom_energy[atom_i], ene_i);
+            di_ene[dihedral_i] = ene_i;
+        }
+        if (pc.need_virial != 0)
+        {
+            aadd_lt(atom_virial[atom_i],
+                    lt_add(lt_add(virial_from_force_dis(dE_drl, drkl),
+                                  virial_from_force_dis(dE_dri, drij)),
+                           virial_from_force_dis(dE_drj_part, drkj)));
+        }
+    }
+    if (atom_j < pc.local_atom_numbers) aadd_v3(frc[atom_j], fj);
+    if (atom_k < pc.local_atom_numbers) aadd_v3(frc[atom_k], fk);
+    if (atom_l < pc.local_atom_numbers) aadd_v3(frc[atom_l], fl);
+}

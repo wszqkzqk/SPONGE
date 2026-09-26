@@ -2,6 +2,75 @@
 
 #include <cstdint>
 
+#ifdef USE_VULKAN
+struct FindNeighborGridsVkParams
+{
+    int grid_numbers;
+    int Nx;
+    int Ny;
+    int Nz;
+    float grid_length;
+    Boundary boundary;
+};
+static_assert(sizeof(FindNeighborGridsVkParams) == 72,
+              "FindNeighborGridsVkParams must match the GLSL push constant "
+              "layout");
+
+struct CheckRefreshVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float permit_square;
+};
+static_assert(sizeof(CheckRefreshVkParams) == 60,
+              "CheckRefreshVkParams must match the GLSL push constant layout");
+
+struct PutAtomInGridsVkParams
+{
+    int need_copy;
+    int atom_numbers;
+    int ghost_numbers;
+    int grid_numbers;
+    Boundary boundary;
+    float grid_length;
+    int Nx;
+    int Ny;
+    int Nz;
+    int max_grid_atoms;
+    int max_grid_ghosts;
+};
+static_assert(sizeof(PutAtomInGridsVkParams) == 92,
+              "PutAtomInGridsVkParams must match the GLSL push constant "
+              "layout");
+
+struct FindNeighborsGridlyVkParams
+{
+    int grid_numbers;
+    Boundary boundary;
+    int max_atom_numbers_in_grid;
+    float cutoff_skin_square;
+    int max_neighbor_numbers;
+    int max_ghost_numbers_in_grid;
+};
+static_assert(sizeof(FindNeighborsGridlyVkParams) == 72,
+              "FindNeighborsGridlyVkParams must match the GLSL push constant "
+              "layout");
+
+struct DeleteExcludedVkParams
+{
+    int local_atom_numbers;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(DeleteExcludedVkParams) == 8,
+              "DeleteExcludedVkParams must match the GLSL push constant "
+              "layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
+
 #define MAX_GRID_NEIGHBORS 192
 
 // 按 grid_j 升序逐个检查 27 种周期镜像位移，命中即记录，输出为升序邻居表。
@@ -243,12 +312,22 @@ void NEIGHBOR_LIST::GRIDS::Initial(CONTROLLER* controller,
                                   h_grid_atom_numbers,
                                   sizeof(int) * grid_numbers);
 
+#ifdef USE_VULKAN
+    FindNeighborGridsVkParams params{grid_numbers, Nx,          Ny,
+                                     Nz,           grid_length, boundary};
+    const void* buffers[] = {d_neighbor_grid_numbers, d_neighbor_grids};
+    VK_LAUNCH(neighbor_list_find_neighbor_grids,
+              (grid_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Find_Neighor_Grids_Device,
                          (grid_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, grid_numbers,
                          d_neighbor_grid_numbers, d_neighbor_grids, Nx, Ny, Nz,
                          grid_length, boundary);
+#endif
 }
 
 void NEIGHBOR_LIST::GRIDS::Clear()
@@ -324,12 +403,22 @@ void NEIGHBOR_LIST::UPDATOR::Check(int atom_numbers, float skin, VECTOR* crd,
                                    const Boundary boundary)
 {
     if (atom_numbers <= 0) return;
+#ifdef USE_VULKAN
+    CheckRefreshVkParams params{atom_numbers, boundary,
+                                skin * skin * skin_permit * skin_permit};
+    const void* buffers[] = {crd, old_crd, d_need_update};
+    VK_LAUNCH(neighbor_list_check_refresh,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Check_Refresh,
                          (atom_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, h_need_update,
                          atom_numbers, crd, old_crd, boundary, d_need_update,
                          skin * skin * skin_permit * skin_permit);
+#endif
 }
 
 static __global__ void Clear_Bucket(const int* need, int grid_numbers,
@@ -813,10 +902,90 @@ void NEIGHBOR_LIST::UPDATOR::Update(
     int max_neighbor_numbers, float grid_length, int* d_neighbor_grid_overflow,
     int* d_neighbor_grid_ghost_overflow, int* d_neighbor_list_overflow,
     ATOM_GROUP* d_nl, int* excluded_list_start, int* excluded_list,
-    int* excluded_numbers)
+    int* excluded_numbers, int* d_serial_pool)
 {
     int total_atom_numbers = local_atom_numbers + ghost_numbers;
     if (total_atom_numbers <= 0) return;
+#ifdef USE_VULKAN
+    {
+        struct
+        {
+            int grid_numbers;
+        } cb_params{grids->grid_numbers};
+        const void* cb_buffers[] = {d_need_update, grids->d_grid_atom_numbers,
+                                    grids->d_grid_ghost_numbers};
+        VK_LAUNCH(neighbor_list_clear_bucket,
+                  (grids->grid_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, cb_buffers, &cb_params,
+                  NULL);
+    }
+    {
+        PutAtomInGridsVkParams pa_params{need_copy,
+                                         local_atom_numbers,
+                                         ghost_numbers,
+                                         grids->grid_numbers,
+                                         boundary,
+                                         grid_length,
+                                         grids->Nx,
+                                         grids->Ny,
+                                         grids->Nz,
+                                         max_atom_in_grid_numbers,
+                                         max_ghost_in_grid_numbers};
+        const void* pa_buffers[] = {d_need_update,
+                                    crd,
+                                    vk_or_dummy(old_crd, crd),
+                                    grids->d_grid_atoms,
+                                    grids->d_grid_atom_numbers,
+                                    grids->d_grid_atom_crd,
+                                    d_nl,
+                                    d_neighbor_grid_overflow,
+                                    grids->d_grid_ghosts,
+                                    grids->d_grid_ghost_numbers,
+                                    grids->d_grid_ghost_crd,
+                                    d_neighbor_grid_ghost_overflow};
+        VK_LAUNCH(neighbor_list_put_atom_in_grids,
+                  (total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, pa_buffers, &pa_params,
+                  NULL);
+    }
+    {
+        FindNeighborsGridlyVkParams fn_params{
+            grids->grid_numbers,      boundary,
+            max_atom_in_grid_numbers, grid_length * grid_length * 4.0f,
+            max_neighbor_numbers,     max_ghost_in_grid_numbers};
+        const void* fn_buffers[] = {d_need_update,
+                                    atom_local,
+                                    grids->d_neighbor_grid_numbers,
+                                    grids->d_neighbor_grids,
+                                    grids->d_grid_atom_crd,
+                                    d_nl,
+                                    d_serial_pool,
+                                    grids->d_grid_atom_numbers,
+                                    grids->d_grid_atoms,
+                                    d_neighbor_list_overflow,
+                                    grids->d_grid_ghost_crd,
+                                    grids->d_grid_ghost_numbers,
+                                    grids->d_grid_ghosts};
+        VK_LAUNCH(neighbor_list_find_neighbors_gridly,
+                  grids->grid_numbers < 65535 ? grids->grid_numbers : 65535, 1,
+                  CONTROLLER::device_max_thread, 1, fn_buffers, &fn_params,
+                  NULL);
+    }
+    {
+        DeleteExcludedVkParams de_params{local_atom_numbers,
+                                         max_neighbor_numbers};
+        const void* de_buffers[] = {
+            d_need_update, atom_local,       d_nl,         excluded_list_start,
+            excluded_list, excluded_numbers, d_serial_pool};
+        VK_LAUNCH(neighbor_list_delete_excluded,
+                  (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, de_buffers, &de_params,
+                  NULL);
+    }
+#else
     Launch_Device_Kernel(
         Clear_Bucket,
         (grids->grid_numbers + CONTROLLER::device_max_thread - 1) /
@@ -857,6 +1026,7 @@ void NEIGHBOR_LIST::UPDATOR::Update(
         CONTROLLER::device_max_thread, 0, NULL, d_need_update,
         local_atom_numbers, atom_local, d_nl, excluded_list_start,
         excluded_list, excluded_numbers);
+#endif
 }
 
 void NEIGHBOR_LIST::UPDATOR::Clear()
@@ -1005,7 +1175,8 @@ void NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
                        max_neighbor_numbers, 0.5f * (cutoff + skin),
                        d_neighbor_grid_overflow, d_neighbor_grid_ghost_overflow,
                        d_neighbor_list_overflow, this->d_nl,
-                       excluded_list_start, excluded_list, excluded_numbers);
+                       excluded_list_start, excluded_list, excluded_numbers,
+                       this->d_temp);
     }
 
     if (this->is_needed_full && full_neighbor_list.is_initialized)
@@ -1014,11 +1185,12 @@ void NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
         {
             full_neighbor_list.Build_From_Half_With_Cutoff(
                 this->d_nl, local_atom_numbers, crd, boundary,
-                this->cutoff_full + skin);
+                this->cutoff_full + skin, this->d_temp);
         }
         else
         {
-            full_neighbor_list.Build_From_Half(this->d_nl, local_atom_numbers);
+            full_neighbor_list.Build_From_Half(this->d_nl, local_atom_numbers,
+                                               this->d_temp);
         }
     }
     updator.time_recorder->Stop();

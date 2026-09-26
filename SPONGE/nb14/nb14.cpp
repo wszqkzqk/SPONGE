@@ -1,8 +1,26 @@
-﻿#include "nb14.h"
+#include "nb14.h"
 
 #include "../xponge/load/native/nb14.hpp"
 #include "../xponge/xponge.h"
 #define TINY 1e-10
+
+#ifdef USE_VULKAN
+struct Nb14ForceVkParams
+{
+    int nb14_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(sizeof(Nb14ForceVkParams) == 68,
+              "Nb14ForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void
 Dihedral_14_LJ_CF_Force_With_Atom_Energy_And_Virial_Device(
@@ -272,11 +290,32 @@ void NON_BOND_14::Get_Local(int* atom_local, int local_atom_numbers,
     if (!is_initialized) return;
     num_nb14_local = 0;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int nb14_numbers;
+    } params{this->nb14_numbers};
+    const void* buffers[] = {d_atom_a,
+                             d_atom_b,
+                             atom_local_label,
+                             atom_local_id,
+                             d_atom_a_local,
+                             d_atom_b_local,
+                             d_A,
+                             d_B,
+                             d_cf_scale_factor,
+                             d_A_local,
+                             d_B_local,
+                             d_cf_scale_factor_local,
+                             d_num_nb14_local};
+    VK_LAUNCH(nb14_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL, nb14_numbers,
                          d_atom_a, d_atom_b, atom_local_label, atom_local_id,
                          d_atom_a_local, d_atom_b_local, d_A, d_B,
                          d_cf_scale_factor, d_A_local, d_B_local,
                          d_cf_scale_factor_local, d_num_nb14_local);
+#endif
     deviceMemcpy(&num_nb14_local, d_num_nb14_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }
@@ -288,6 +327,27 @@ void NON_BOND_14::Non_Bond_14_LJ_CF_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        Nb14ForceVkParams params{num_nb14_local, boundary,
+                                 this->local_atom_numbers, need_atom_energy,
+                                 need_virial};
+        const void* buffers[] = {crd,
+                                 d_atom_a_local,
+                                 d_atom_b_local,
+                                 d_cf_scale_factor_local,
+                                 charge,
+                                 d_A_local,
+                                 d_B_local,
+                                 frc,
+                                 vk_or_dummy(atom_energy, frc),
+                                 vk_or_dummy(atom_virial, frc),
+                                 d_nb14_cf_energy,
+                                 d_nb14_lj_energy};
+        VK_LAUNCH(nb14_force,
+                  (nb14_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Dihedral_14_LJ_CF_Force_With_Atom_Energy_And_Virial_Device,
             (nb14_numbers + CONTROLLER::device_max_thread - 1) /
@@ -297,6 +357,7 @@ void NON_BOND_14::Non_Bond_14_LJ_CF_Force_With_Atom_Energy_And_Virial(
             d_cf_scale_factor_local, charge, d_A_local, d_B_local, frc,
             need_atom_energy, atom_energy, need_virial, atom_virial,
             d_nb14_cf_energy, d_nb14_lj_energy);
+#endif
     }
 }
 

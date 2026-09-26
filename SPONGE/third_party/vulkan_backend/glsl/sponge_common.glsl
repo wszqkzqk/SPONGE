@@ -26,6 +26,17 @@ Vec3 v3_neg(Vec3 a) { return Vec3(-a.x, -a.y, -a.z); }
 float v3_dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 float v3_len(Vec3 a) { return sqrt(v3_dot(a, a)); }
 Vec3 v3_floor(Vec3 a) { return Vec3(floor(a.x), floor(a.y), floor(a.z)); }
+Vec3 v3_cross(Vec3 a, Vec3 b)
+{
+    return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
+                a.x * b.y - a.y * b.x);
+}
+
+float copysignf(float mag, float sgn)
+{
+    return uintBitsToFloat((floatBitsToUint(mag) & 0x7FFFFFFFu) |
+                           (floatBitsToUint(sgn) & 0x80000000u));
+}
 
 Vec3 v3_mul_lt(Vec3 v, float a11, float a21, float a22, float a31, float a32,
                float a33)
@@ -43,6 +54,23 @@ Vec3 get_displacement(Vec3 a, Vec3 b, Boundary bd)
     return v3_sub(dr, v3_mul_lt(s, bd.a11, bd.a21, bd.a22, bd.a31, bd.a32,
                                 bd.a33));
 }
+
+Vec3 get_displacement_periodic(Vec3 a, Vec3 b, Boundary bd)
+{
+    Vec3 dr = v3_sub(a, b);
+    Vec3 s = v3_mul_lt(dr, bd.r11, bd.r21, bd.r22, bd.r31, bd.r32, bd.r33);
+    s = v3_floor(v3_add(s, Vec3(0.5, 0.5, 0.5)));
+    return v3_sub(dr, v3_mul_lt(s, bd.a11, bd.a21, bd.a22, bd.a31, bd.a32,
+                                bd.a33));
+}
+
+struct AtomGroup
+{
+    int atom_numbers;
+    int ghost_numbers;
+    uint serial_lo;
+    uint serial_hi;
+};
 
 Vec3 wrap_coordinate(Vec3 c, Boundary bd)
 {
@@ -200,3 +228,69 @@ void kahan_add(inout Kahan k, float v)
     k.c = (t - k.sum) - y;
     k.sum = t;
 }
+
+LTMat lt_scale(LTMat m, float s)
+{
+    return LTMat(m.a11 * s, m.a21 * s, m.a22 * s, m.a31 * s, m.a32 * s,
+                 m.a33 * s);
+}
+
+LTMat lt_sub(LTMat a, LTMat b)
+{
+    return LTMat(a.a11 - b.a11, a.a21 - b.a21, a.a22 - b.a22, a.a31 - b.a31,
+                 a.a32 - b.a32, a.a33 - b.a33);
+}
+
+int get_lj_type(int a, int b)
+{
+    int hi = max(a, b);
+    int lo = min(a, b);
+    return (hi * (hi + 1) >> 1) + lo;
+}
+
+// Abramowitz-Stegun 7.1.26, |epsilon| <= 1.2e-7
+float erfcf(float x)
+{
+    float ax = abs(x);
+    float t = 1.0 / (1.0 + 0.5 * ax);
+    float tau =
+        t * exp(-ax * ax - 1.26551223 +
+                t * (1.00002368 +
+                     t * (0.37409196 +
+                          t * (0.09678418 +
+                               t * (-0.18628806 +
+                                    t * (0.27886807 +
+                                         t * (-1.13520398 +
+                                              t * (1.48851587 +
+                                                   t * (-0.82215223 +
+                                                        t * 0.17087277)))))))));
+    return x >= 0.0 ? tau : 2.0 - tau;
+}
+
+#define warp_afadd(slot, v)                                      \
+    do                                                           \
+    {                                                            \
+        float wsum_ = subgroupAdd(v);                            \
+        if (gl_SubgroupInvocationID == 0u) atomicAdd(slot, wsum_); \
+    } while (false)
+#define warp_aadd_v3(slot, v)                                \
+    do                                                       \
+    {                                                        \
+        Vec3 wsum_ = v;                                      \
+        wsum_.x = subgroupAdd(wsum_.x);                      \
+        wsum_.y = subgroupAdd(wsum_.y);                      \
+        wsum_.z = subgroupAdd(wsum_.z);                      \
+        if (gl_SubgroupInvocationID == 0u) aadd_v3(slot, wsum_); \
+    } while (false)
+#define warp_aadd_lt(slot, v)                                \
+    do                                                       \
+    {                                                        \
+        LTMat wsum_ = v;                                     \
+        wsum_.a11 = subgroupAdd(wsum_.a11);                  \
+        wsum_.a21 = subgroupAdd(wsum_.a21);                  \
+        wsum_.a22 = subgroupAdd(wsum_.a22);                  \
+        wsum_.a31 = subgroupAdd(wsum_.a31);                  \
+        wsum_.a32 = subgroupAdd(wsum_.a32);                  \
+        wsum_.a33 = subgroupAdd(wsum_.a33);                  \
+        if (gl_SubgroupInvocationID == 0u) aadd_lt(slot, wsum_); \
+    } while (false)

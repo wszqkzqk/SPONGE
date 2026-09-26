@@ -16,11 +16,13 @@ struct FULL_NEIGHBOR_LIST
 
     void Initial(int atom_numbers, int max_neighbor_numbers);
 
-    void Build_From_Half(const ATOM_GROUP* half_nl, int atom_numbers);
+    void Build_From_Half(const ATOM_GROUP* half_nl, int atom_numbers,
+                         const int* half_serial_pool = NULL);
 
     void Build_From_Half_With_Cutoff(const ATOM_GROUP* half_nl,
                                      int atom_numbers, const VECTOR* crd,
-                                     const Boundary boundary, float cutoff);
+                                     const Boundary boundary, float cutoff,
+                                     const int* half_serial_pool = NULL);
 
     void Clear();
 };

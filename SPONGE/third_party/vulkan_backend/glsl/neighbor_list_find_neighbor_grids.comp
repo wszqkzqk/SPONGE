@@ -1,0 +1,164 @@
+#define MAX_GRID_NEIGHBORS 192
+#define GRID_ENUM_CAPACITY 2048
+
+layout(set = 0, binding = 0, std430) buffer NeighborGridNumbers { int neighbor_grid_numbers[]; };
+layout(set = 0, binding = 1, std430) buffer NeighborGrids { int neighbor_grids[]; };
+layout(push_constant) uniform Params
+{
+    int grid_numbers;
+    int Nx;
+    int Ny;
+    int Nz;
+    float grid_length;
+    Boundary boundary;
+}
+pc;
+
+int find_neighbor_grids_scan(int grid_i, int dxy, int dxz, int dyz,
+                             int neighbor_base)
+{
+    const int NyNz = pc.Ny * pc.Nz;
+    int local = 0;
+    const int grid_i_x = grid_i / NyNz;
+    const int grid_i_y = (grid_i % NyNz) / pc.Nz;
+    const int grid_i_z = grid_i % pc.Nz;
+    int grid_j = 0;
+    for (int grid_j_x = 0; grid_j_x < pc.Nx; grid_j_x++)
+    {
+        const int base_x = grid_i_x - grid_j_x;
+        for (int grid_j_y = 0; grid_j_y < pc.Ny; grid_j_y++)
+        {
+            const int base_y = grid_i_y - grid_j_y;
+            for (int grid_j_z = 0; grid_j_z < pc.Nz; grid_j_z++, grid_j++)
+            {
+                const int base_z = grid_i_z - grid_j_z;
+                for (int k = 0; k < 27; k++)
+                {
+                    int dx = k / 9 - 1;
+                    int dy = (k % 9) / 3 - 1;
+                    int dz = k % 3 - 1;
+                    const int temp_x =
+                        base_x + dx * pc.Nx + dy * dxy + dz * dxz;
+                    const int temp_y = base_y + dy * pc.Ny + dz * dyz;
+                    const int temp_z = base_z + dz * pc.Nz;
+                    const int cx = float(dy) * pc.boundary.a21 +
+                                           float(dz) * pc.boundary.a31 ==
+                                       0.0
+                                   ? -2
+                                   : -3;
+                    const int cy =
+                        float(dz) * pc.boundary.a32 == 0.0 ? -2 : -3;
+                    if (temp_x <= 2 && temp_x >= cx && temp_y <= 2 &&
+                        temp_y >= cy && temp_z <= 2 && temp_z >= -2)
+                    {
+                        if (local >= MAX_GRID_NEIGHBORS)
+                        {
+                            local = -1;
+                        }
+                        else
+                        {
+                            neighbor_grids[neighbor_base + local] = grid_j;
+                            local++;
+                        }
+                        break;
+                    }
+                }
+                if (local < 0) break;
+            }
+            if (local < 0) break;
+        }
+        if (local < 0) break;
+    }
+    return local;
+}
+
+void main()
+{
+    int grid_i = int(gl_GlobalInvocationID.x);
+    if (grid_i >= pc.grid_numbers) return;
+    const int dxy = int(pc.boundary.a21 / pc.grid_length);
+    const int dxz = int(pc.boundary.a31 / pc.grid_length);
+    const int dyz = int(pc.boundary.a32 / pc.grid_length);
+    const int neighbor_base = grid_i * MAX_GRID_NEIGHBORS;
+    int local = 0;
+    const int NyNz = pc.Ny * pc.Nz;
+    const int grid_i_x = grid_i / NyNz;
+    const int grid_i_y = (grid_i % NyNz) / pc.Nz;
+    const int grid_i_z = grid_i % pc.Nz;
+    int candidates[GRID_ENUM_CAPACITY];
+    int candidate_numbers = 0;
+    bool enumeration_ok = true;
+    for (int k = 0; k < 27 && enumeration_ok; k++)
+    {
+        const int dx = k / 9 - 1;
+        const int dy = (k % 9) / 3 - 1;
+        const int dz = k % 3 - 1;
+        const int cx = float(dy) * pc.boundary.a21 +
+                               float(dz) * pc.boundary.a31 ==
+                           0.0
+                       ? -2
+                       : -3;
+        const int cy = float(dz) * pc.boundary.a32 == 0.0 ? -2 : -3;
+        const int shift_x = dx * pc.Nx + dy * dxy + dz * dxz;
+        const int shift_y = dy * pc.Ny + dz * dyz;
+        const int shift_z = dz * pc.Nz;
+        const int lo_x = max(grid_i_x + shift_x - 2, 0);
+        const int hi_x = min(grid_i_x + shift_x - cx, pc.Nx - 1);
+        const int lo_y = max(grid_i_y + shift_y - 2, 0);
+        const int hi_y = min(grid_i_y + shift_y - cy, pc.Ny - 1);
+        const int lo_z = max(grid_i_z + shift_z - 2, 0);
+        const int hi_z = min(grid_i_z + shift_z + 2, pc.Nz - 1);
+        if (lo_x > hi_x || lo_y > hi_y || lo_z > hi_z) continue;
+        const int box =
+            (hi_x - lo_x + 1) * (hi_y - lo_y + 1) * (hi_z - lo_z + 1);
+        if (candidate_numbers + box > GRID_ENUM_CAPACITY)
+        {
+            enumeration_ok = false;
+            break;
+        }
+        for (int jx = lo_x; jx <= hi_x; jx++)
+        {
+            for (int jy = lo_y; jy <= hi_y; jy++)
+            {
+                for (int jz = lo_z; jz <= hi_z; jz++)
+                {
+                    candidates[candidate_numbers] =
+                        (jx * pc.Ny + jy) * pc.Nz + jz;
+                    candidate_numbers++;
+                }
+            }
+        }
+    }
+    if (enumeration_ok)
+    {
+        for (int gap = candidate_numbers / 2; gap > 0; gap /= 2)
+        {
+            for (int i = gap; i < candidate_numbers; i++)
+            {
+                const int value = candidates[i];
+                int j = i;
+                for (; j >= gap && candidates[j - gap] > value; j -= gap)
+                {
+                    candidates[j] = candidates[j - gap];
+                }
+                candidates[j] = value;
+            }
+        }
+        for (int i = 0; i < candidate_numbers; i++)
+        {
+            if (i > 0 && candidates[i] == candidates[i - 1]) continue;
+            if (local >= MAX_GRID_NEIGHBORS)
+            {
+                local = -1;
+                break;
+            }
+            neighbor_grids[neighbor_base + local] = candidates[i];
+            local++;
+        }
+    }
+    else
+    {
+        local = find_neighbor_grids_scan(grid_i, dxy, dxz, dyz, neighbor_base);
+    }
+    neighbor_grid_numbers[grid_i] = local;
+}

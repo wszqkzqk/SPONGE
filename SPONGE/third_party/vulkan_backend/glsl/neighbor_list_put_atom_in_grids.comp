@@ -1,0 +1,85 @@
+layout(set = 0, binding = 0, std430) buffer Need { int need[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer OldCrd { Vec3 old_crd[]; };
+layout(set = 0, binding = 3, std430) buffer GridAtoms { int grid_atoms[]; };
+layout(set = 0, binding = 4, std430) buffer GridAtomNumbers { int grid_atom_numbers[]; };
+layout(set = 0, binding = 5, std430) buffer GridCrd { Vec3 grid_crd[]; };
+layout(set = 0, binding = 6, std430) buffer NL { AtomGroup nl[]; };
+layout(set = 0, binding = 7, std430) buffer GridOverflow { int neighbor_grid_overflow[]; };
+layout(set = 0, binding = 8, std430) buffer GridGhosts { int grid_ghosts[]; };
+layout(set = 0, binding = 9, std430) buffer GridGhostNumbers { int grid_ghost_numbers[]; };
+layout(set = 0, binding = 10, std430) buffer GridGhostCrd { Vec3 grid_ghost_crd[]; };
+layout(set = 0, binding = 11, std430) buffer GhostOverflow { int neighbor_grid_ghost_overflow[]; };
+layout(push_constant) uniform Params
+{
+    int need_copy;
+    int atom_numbers;
+    int ghost_numbers;
+    int grid_numbers;
+    Boundary boundary;
+    float grid_length;
+    int Nx;
+    int Ny;
+    int Nz;
+    int max_grid_atoms;
+    int max_grid_ghosts;
+}
+pc;
+void main()
+{
+    if (need[0] == 0) return;
+    int tid = int(gl_GlobalInvocationID.x);
+    if (tid >= pc.atom_numbers + pc.ghost_numbers) return;
+    Vec3 local_crd = crd[tid];
+    if (pc.need_copy != 0 && tid < pc.atom_numbers) old_crd[tid] = local_crd;
+
+    float k3 = floor(local_crd.z / pc.boundary.a33);
+    local_crd.z -= k3 * pc.boundary.a33;
+    local_crd.y -= k3 * pc.boundary.a32;
+    float k2 = floor(local_crd.y / pc.boundary.a22);
+    local_crd.y -= k2 * pc.boundary.a22;
+    local_crd.x -= k3 * pc.boundary.a31 + k2 * pc.boundary.a21;
+    local_crd.x -= floor(local_crd.x / pc.boundary.a11) * pc.boundary.a11;
+    int nx = int(local_crd.x / pc.grid_length);
+    int ny = int(local_crd.y / pc.grid_length);
+    int nz = int(local_crd.z / pc.grid_length);
+
+    nx = nx < 0 ? 0 : (nx < pc.Nx ? nx : pc.Nx - 1);
+    ny = ny < 0 ? 0 : (ny < pc.Ny ? ny : pc.Ny - 1);
+    nz = nz < 0 ? 0 : (nz < pc.Nz ? nz : pc.Nz - 1);
+    int grid_id = nx * pc.Ny * pc.Nz + ny * pc.Nz + nz;
+    if (grid_id < 0 || grid_id >= pc.grid_numbers)
+    {
+        neighbor_grid_overflow[0] = 1;
+    }
+    else if (tid < pc.atom_numbers)
+    {
+        int k1 = atomicAdd(grid_atom_numbers[grid_id], 1);
+        if (k1 >= pc.max_grid_atoms)
+        {
+            neighbor_grid_overflow[0] = 1;
+            atomicAdd(grid_atom_numbers[grid_id], -1);
+        }
+        else
+        {
+            grid_atoms[pc.max_grid_atoms * grid_id + k1] = tid;
+            grid_crd[pc.max_grid_atoms * grid_id + k1] = crd[tid];
+            nl[tid].atom_numbers = 0;
+            nl[tid].ghost_numbers = 0;
+        }
+    }
+    else
+    {
+        int k1 = atomicAdd(grid_ghost_numbers[grid_id], 1);
+        if (k1 >= pc.max_grid_ghosts)
+        {
+            neighbor_grid_ghost_overflow[0] = 1;
+            atomicAdd(grid_ghost_numbers[grid_id], -1);
+        }
+        else
+        {
+            grid_ghosts[pc.max_grid_ghosts * grid_id + k1] = tid;
+            grid_ghost_crd[pc.max_grid_ghosts * grid_id + k1] = crd[tid];
+        }
+    }
+}

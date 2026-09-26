@@ -1,0 +1,52 @@
+layout(set = 0, binding = 0, std430) buffer HalfNL { AtomGroup half_nl[]; };
+layout(set = 0, binding = 1, std430) buffer FullNL { AtomGroup full_nl[]; };
+layout(set = 0, binding = 2, std430) buffer Overflow { int overflow_flag[]; };
+layout(set = 0, binding = 3, std430) buffer HalfPool { int half_pool[]; };
+layout(set = 0, binding = 4, std430) buffer FullPool { int full_pool[]; };
+layout(set = 0, binding = 5, std430) buffer Crd { Vec3 crd[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int max_neighbor_numbers;
+    Boundary boundary;
+    float cutoff;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    const int half_count = half_nl[atom_i].atom_numbers;
+    const Vec3 ri = crd[atom_i];
+    for (int k = 0; k < half_count; k++)
+    {
+        const int atom_j = half_pool[atom_i * pc.max_neighbor_numbers + k];
+        const Vec3 rj = crd[atom_j];
+        const Vec3 dr = get_displacement_periodic(ri, rj, pc.boundary);
+        if (v3_dot(dr, dr) <= pc.cutoff * pc.cutoff)
+        {
+            const int slot_i = atomicAdd(full_nl[atom_i].atom_numbers, 1);
+            if (slot_i < pc.max_neighbor_numbers)
+            {
+                full_pool[atom_i * pc.max_neighbor_numbers + slot_i] = atom_j;
+            }
+            else
+            {
+                atomicExchange(overflow_flag[0], 1);
+            }
+            if (atom_j < pc.atom_numbers)
+            {
+                const int slot_j = atomicAdd(full_nl[atom_j].atom_numbers, 1);
+                if (slot_j < pc.max_neighbor_numbers)
+                {
+                    full_pool[atom_j * pc.max_neighbor_numbers + slot_j] =
+                        atom_i;
+                }
+                else
+                {
+                    atomicExchange(overflow_flag[0], 1);
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer Gfsum { float gfsum[]; };
+layout(set = 0, binding = 1, std430) buffer GF { float gf[]; };
+layout(push_constant) uniform Params { int kn; } pc;
+float log_add_log(float a, float b)
+{
+    return max(a, b) + log(1.0 + exp(-abs(a - b)));
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    float temp = -3.402823466e+38;
+    for (int i = 0; i < pc.kn; i++)
+    {
+        temp = log_add_log(temp, gf[i]);
+    }
+    gfsum[0] = temp;
+}

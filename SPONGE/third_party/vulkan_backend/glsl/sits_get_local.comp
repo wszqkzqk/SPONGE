@@ -1,0 +1,10 @@
+layout(set = 0, binding = 0, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 1, std430) buffer SysMark { int atom_sys_mark[]; };
+layout(set = 0, binding = 2, std430) buffer SysMarkLocal { int atom_sys_mark_local[]; };
+layout(push_constant) uniform Params { int total; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.total) return;
+    atom_sys_mark_local[i] = atom_sys_mark[atom_local[i]];
+}

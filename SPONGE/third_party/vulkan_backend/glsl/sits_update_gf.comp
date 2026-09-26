@@ -1,0 +1,11 @@
+layout(set = 0, binding = 0, std430) buffer GF { float gf[]; };
+layout(set = 0, binding = 1, std430) buffer EneRecord { float ene_record[]; };
+layout(set = 0, binding = 2, std430) buffer LogNk { float log_nk[]; };
+layout(set = 0, binding = 3, std430) buffer BetaK { float beta_k[]; };
+layout(push_constant) uniform Params { int kn; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.kn) return;
+    gf[i] = -beta_k[i] * ene_record[0] + log_nk[i];
+}

@@ -1,0 +1,36 @@
+layout(set = 0, binding = 0, std430) buffer NkExpBetakU { float nkexpbetaku[]; };
+layout(set = 0, binding = 1, std430) buffer BetaK { float beta_k[]; };
+layout(set = 0, binding = 2, std430) buffer DBias { float d_bias[]; };
+layout(set = 0, binding = 3, std430) buffer SumAbove { float sum_of_above[]; };
+layout(set = 0, binding = 4, std430) buffer SumBelow { float sum_of_below[]; };
+layout(set = 0, binding = 5, std430) buffer Factor { float factor[]; };
+layout(set = 0, binding = 6, std430) buffer EnhancingEnergy { float enhancing_energy[]; };
+layout(push_constant) uniform Params
+{
+    int k_numbers;
+    float pe_a;
+    float pe_b;
+    float beta0;
+    float fb_bias;
+}
+pc;
+float log_add_log(float a, float b)
+{
+    return max(a, b) + log(1.0 + exp(-abs(a - b)));
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    float above = -3.402823466e+38;
+    float below = -3.402823466e+38;
+    for (int i = 0; i < pc.k_numbers; i++)
+    {
+        above = log_add_log(above, log(beta_k[i]) + nkexpbetaku[i]);
+        below = log_add_log(below, nkexpbetaku[i]);
+    }
+    sum_of_above[0] = above;
+    sum_of_below[0] = below;
+    factor[0] = exp(above - below - log(pc.beta0)) + pc.fb_bias;
+    d_bias[0] = -below / pc.beta0 / pc.pe_a +
+                pc.fb_bias * (enhancing_energy[0] + pc.pe_b / pc.pe_a);
+}

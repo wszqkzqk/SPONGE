@@ -1,0 +1,19 @@
+layout(set = 0, binding = 0, std430) buffer BetaK { float beta_k[]; };
+layout(set = 0, binding = 1, std430) buffer LogNk { float log_nk[]; };
+layout(set = 0, binding = 2, std430) buffer NkExpBetakU { float nkexpbetaku[]; };
+layout(set = 0, binding = 3, std430) buffer Ene { float ene[]; };
+layout(push_constant) uniform Params
+{
+    int k_numbers;
+    float beta0;
+    float pe_a;
+    float pe_b;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.k_numbers) return;
+    nkexpbetaku[i] =
+        -(beta_k[i] - pc.beta0) * (pc.pe_a * ene[0] + pc.pe_b) + log_nk[i];
+}

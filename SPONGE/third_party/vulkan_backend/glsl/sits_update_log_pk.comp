@@ -1,0 +1,16 @@
+layout(set = 0, binding = 0, std430) buffer LogPk { float log_pk[]; };
+layout(set = 0, binding = 1, std430) buffer GF { float gf[]; };
+layout(set = 0, binding = 2, std430) buffer Gfsum { float gfsum[]; };
+layout(push_constant) uniform Params { int kn; int reset; } pc;
+float log_add_log(float a, float b)
+{
+    return max(a, b) + log(1.0 + exp(-abs(a - b)));
+}
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.kn) return;
+    float gfi = gf[i];
+    log_pk[i] = float(pc.reset) * gfi +
+                float(1 - pc.reset) * log_add_log(log_pk[i], gfi - gfsum[0]);
+}

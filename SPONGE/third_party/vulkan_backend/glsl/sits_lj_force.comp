@@ -1,0 +1,125 @@
+struct VecLJ
+{
+    float x, y, z;
+    int lj_type;
+    float charge;
+};
+layout(set = 0, binding = 0, std430) buffer NL { uvec4 nl_raw[]; };
+layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
+layout(set = 0, binding = 2, std430) buffer LJEne { float atom_lj_ene[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { VecLJ crd[]; };
+layout(set = 0, binding = 4, std430) buffer LJA { float lj_a[]; };
+layout(set = 0, binding = 5, std430) buffer LJB { float lj_b[]; };
+layout(set = 0, binding = 6, std430) buffer SysMark { int atom_sys_mark[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 8, std430) buffer FrcEnhancing { Vec3 frc_enhancing[]; };
+layout(set = 0, binding = 9, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 10, std430) buffer AtomEnergyEnhancing { float atom_energy_enhancing[]; };
+layout(set = 0, binding = 11, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 12, std430) buffer AtomVirialEnhancing { LTMat atom_virial_enhancing[]; };
+layout(set = 0, binding = 13, std430) buffer DirectCFEnergy { float atom_direct_cf_energy[]; };
+layout(push_constant) uniform Params
+{
+    int local_atom_numbers;
+    int solvent_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    float pwwp_factor;
+    int need_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+}
+pc;
+void main()
+{
+    int atom_i =
+        int(gl_WorkGroupSize.y * gl_WorkGroupID.x + gl_LocalInvocationID.y);
+    if (atom_i >= pc.local_atom_numbers - pc.solvent_numbers) return;
+    int count = int(nl_raw[atom_i].x);
+    int base = atom_i * pc.max_neighbor_numbers;
+    VecLJ r1 = crd[atom_i];
+    int atom_mark_i = atom_sys_mark[atom_i];
+    Vec3 frc_record = v3(0.0, 0.0, 0.0);
+    Vec3 frc_enhancing_record = v3(0.0, 0.0, 0.0);
+    LTMat virial_record = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    LTMat virial_enhancing = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    float energy_lj = 0.0;
+    float energy_enhancing = 0.0;
+    float energy_coulomb = 0.0;
+    for (int j = int(gl_LocalInvocationID.x); j < count;
+         j += int(gl_WorkGroupSize.x))
+    {
+        int atom_j = nl_serial[base + j];
+        float ij_factor = atom_j < pc.local_atom_numbers ? 1.0 : 0.5;
+        VecLJ r2 = crd[atom_j];
+        Vec3 dr = get_displacement(v3(r2.x, r2.y, r2.z), v3(r1.x, r1.y, r1.z),
+                                   pc.boundary);
+        float dr_abs = v3_len(dr);
+        if (dr_abs < pc.cutoff)
+        {
+            int atom_mark_j = atom_sys_mark[atom_j] + atom_mark_i;
+            int pair_type = get_lj_type(r1.lj_type, r2.lj_type);
+            float A = lj_a[pair_type];
+            float B = lj_b[pair_type];
+            float factor = 0.0;
+            if (atom_mark_j == 0)
+                factor = 1.0;
+            else if (atom_mark_j == 1)
+                factor = pc.pwwp_factor;
+            float dr_6 = pow(dr_abs, -6.0);
+            float frc_abs = (B - A * dr_6) * pow(dr_abs, -8.0);
+            float beta_dr = pc.pme_beta * dr_abs;
+            float q1q2 = r1.charge * r2.charge;
+            frc_abs = frc_abs - q1q2 * pow(dr_abs, -3.0) *
+                                    (beta_dr * 1.1283791670218446 *
+                                         exp(-beta_dr * beta_dr) +
+                                     erfcf(beta_dr));
+            Vec3 frc_lin = v3_scale(dr, frc_abs);
+            frc_record = v3_add(frc_record, frc_lin);
+            if (atom_j < pc.local_atom_numbers)
+                aadd_v3(frc[atom_j], v3_neg(frc_lin));
+            frc_lin = v3_scale(frc_lin, factor);
+            frc_enhancing_record = v3_add(frc_enhancing_record, frc_lin);
+            if (pc.need_virial != 0)
+            {
+                LTMat virial0 = virial_from_force_dis(frc_lin, dr);
+                virial_record =
+                    lt_add(virial_record, lt_scale(virial0, ij_factor));
+                virial_enhancing = lt_add(
+                    virial_enhancing, lt_scale(virial0, ij_factor * factor));
+            }
+            if (pc.need_energy != 0)
+            {
+                float energy_lin = q1q2 * erfcf(beta_dr) / dr_abs;
+                energy_coulomb += ij_factor * energy_lin;
+                energy_enhancing += ij_factor * factor * energy_lin;
+            }
+            if (pc.need_energy != 0)
+            {
+                float energy_lin =
+                    (0.083333333 * A * dr_6 - 0.166666667 * B) * dr_6;
+                energy_lj += ij_factor * energy_lin;
+                energy_enhancing += ij_factor * factor * energy_lin;
+            }
+        }
+    }
+    warp_aadd_v3(frc[atom_i], frc_record);
+    warp_aadd_v3(frc_enhancing[atom_i], frc_enhancing_record);
+    if (pc.need_energy != 0)
+    {
+        warp_afadd(atom_direct_cf_energy[atom_i], energy_coulomb);
+        float esum = subgroupAdd(energy_lj);
+        if (gl_SubgroupInvocationID == 0u)
+        {
+            atomicAdd(atom_energy[atom_i], esum);
+            atomicAdd(atom_lj_ene[atom_i], esum);
+        }
+        warp_afadd(atom_energy_enhancing[atom_i], energy_enhancing);
+    }
+    if (pc.need_virial != 0)
+    {
+        warp_aadd_lt(atom_virial[atom_i], virial_record);
+        warp_aadd_lt(atom_virial_enhancing[atom_i], virial_enhancing);
+    }
+}

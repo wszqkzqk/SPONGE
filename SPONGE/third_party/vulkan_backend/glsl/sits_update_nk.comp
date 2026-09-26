@@ -1,0 +1,11 @@
+layout(set = 0, binding = 0, std430) buffer LogNk { float log_nk[]; };
+layout(set = 0, binding = 1, std430) buffer Nk { float nk[]; };
+layout(set = 0, binding = 2, std430) buffer LogNkInverse { float log_nk_inverse[]; };
+layout(push_constant) uniform Params { int kn; } pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.kn) return;
+    log_nk[i] = -log_nk_inverse[i];
+    nk[i] = exp(log_nk[i]);
+}

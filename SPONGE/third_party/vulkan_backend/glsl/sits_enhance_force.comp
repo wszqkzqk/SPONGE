@@ -1,0 +1,29 @@
+layout(set = 0, binding = 0, std430) buffer MdFrc { Vec3 md_frc[]; };
+layout(set = 0, binding = 1, std430) buffer EnhancingFrc { Vec3 enhancing_frc[]; };
+layout(set = 0, binding = 2, std430) buffer MdEne { float md_ene[]; };
+layout(set = 0, binding = 3, std430) buffer Bias { float bias[]; };
+layout(set = 0, binding = 4, std430) buffer MdVirial { LTMat md_virial[]; };
+layout(set = 0, binding = 5, std430) buffer VirialEnhancing { LTMat virial_enhancing[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int need_pressure;
+    float factor_minus_one;
+}
+pc;
+void main()
+{
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid == 0u)
+    {
+        md_ene[0] = md_ene[0] + bias[0];
+        if (pc.need_pressure != 0)
+            md_virial[0] =
+                lt_add(md_virial[0],
+                       lt_scale(virial_enhancing[0], pc.factor_minus_one));
+    }
+    int i = int(gid);
+    if (i >= pc.atom_numbers) return;
+    md_frc[i] = v3_add(md_frc[i],
+                       v3_scale(enhancing_frc[i], pc.factor_minus_one));
+}

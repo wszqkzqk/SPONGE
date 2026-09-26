@@ -1,0 +1,8 @@
+layout(set = 0, binding = 0, std430) buffer EneRecord { float ene_record[]; };
+layout(set = 0, binding = 1, std430) buffer EnhancingEnergy { float enhancing_energy[]; };
+layout(push_constant) uniform Params { float pe_a; float pe_b; } pc;
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    ene_record[0] = pc.pe_a * enhancing_energy[0] + pc.pe_b;
+}

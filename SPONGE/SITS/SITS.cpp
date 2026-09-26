@@ -1,8 +1,57 @@
-﻿#include "SITS.h"
+#include "SITS.h"
 
 #include "../utils/float_classification.hpp"
 #include "../utils/h5md/input_assembler.hpp"
 #include "sits_h5_input.hpp"
+
+#ifdef USE_VULKAN
+struct SitsLjVkParams
+{
+    int local_atom_numbers;
+    int solvent_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    float pwwp_factor;
+    int need_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(SitsLjVkParams) == 84,
+              "SitsLjVkParams must match the GLSL push constant layout");
+
+struct SitsLjSoftVkParams
+{
+    int local_atom_numbers;
+    int solvent_numbers;
+    Boundary boundary;
+    float cutoff;
+    float pme_beta;
+    float lambda;
+    float alpha;
+    float p;
+    float sigma_6;
+    float sigma_6_min;
+    float pwwp_factor;
+    int need_energy;
+    int need_virial;
+    int max_neighbor_numbers;
+};
+static_assert(sizeof(SitsLjSoftVkParams) == 104,
+              "SitsLjSoftVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+
+static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
+{
+    return atom_numbers > 1
+               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
+               : 0;
+}
+#endif
 
 template <bool need_force, bool need_energy, bool need_virial,
           bool need_coulomb>
@@ -644,6 +693,31 @@ static void SITS_Get_Current_Fb(const int atom_numbers,
                                 const float pe_a, const float pe_b,
                                 const float pwwp_enhance_factor)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int k_numbers;
+        float beta0;
+        float pe_a;
+        float pe_b;
+    } nkexp_params{k_numbers, beta0, pe_a, pe_b};
+    const void* nkexp_buffers[] = {beta_k, log_nk, nkexpbetaku,
+                                   energy_enhancing};
+    VK_LAUNCH(sits_nkexpbetaku, (k_numbers + 63) / 64, 1, 64, 1, nkexp_buffers,
+              &nkexp_params, NULL);
+    struct
+    {
+        int k_numbers;
+        float pe_a;
+        float pe_b;
+        float beta0;
+        float fb_bias;
+    } sum_params{k_numbers, pe_a, pe_b, beta0, fb_bias};
+    const void* sum_buffers[] = {nkexpbetaku, beta_k, d_bias, sum_a,
+                                 sum_b,       factor, energy_enhancing};
+    VK_LAUNCH(sits_sum_above_below, 1, 1, 1, 1, sum_buffers, &sum_params,
+              NULL);
+#else
     Launch_Device_Kernel(SITS_For_Enhanced_Force_Calculate_NkExpBetakU_Device,
                          (k_numbers + 63) / 64, 64, 0, NULL, k_numbers, beta_k,
                          log_nk, nkexpbetaku, energy_enhancing, beta0, pe_a,
@@ -653,6 +727,7 @@ static void SITS_Get_Current_Fb(const int atom_numbers,
                          1, 1, 0, NULL, k_numbers, nkexpbetaku, beta_k, d_bias,
                          pe_a, pe_b, sum_a, sum_b, factor, beta0, fb_bias,
                          energy_enhancing);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::Initial(CONTROLLER* controller,
@@ -1132,47 +1207,118 @@ void CLASSIC_SITS_INFORMATION::Memory_Allocate()
 
 void CLASSIC_SITS_INFORMATION::SITS_Record_Ene()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        float pe_a;
+        float pe_b;
+    } params{pe_a, pe_b};
+    const void* buffers[] = {ene_recorded,
+                             sits_controller->pw_select.select_energy[0]};
+    VK_LAUNCH(sits_record_ene, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Record_Ene_Device, 1, 1, 0, NULL, ene_recorded,
                          sits_controller->pw_select.select_energy[0], pe_a,
                          pe_b);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_gf()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int kn;
+    } params{k_numbers};
+    const void* buffers[] = {gf, ene_recorded, log_nk, beta_k};
+    VK_LAUNCH(sits_update_gf, (k_numbers + 63) / 64, 1, 64, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Update_gf_Device, (k_numbers + 63) / 64, 64, 0,
                          NULL, k_numbers, gf, ene_recorded, log_nk, beta_k);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_gfsum()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int kn;
+    } params{k_numbers};
+    const void* buffers[] = {gfsum, gf};
+    VK_LAUNCH(sits_update_gfsum, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Update_gfsum_Device, 1, 1, 0, NULL, k_numbers,
                          gfsum, gf);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_log_pk()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int kn;
+        int reset;
+    } params{k_numbers, reset};
+    const void* buffers[] = {log_pk, gf, gfsum};
+    VK_LAUNCH(sits_update_log_pk, (k_numbers + 63) / 64, 1, 64, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Update_log_pk_Device, (k_numbers + 63) / 64, 64,
                          0, NULL, k_numbers, log_pk, gf, gfsum, reset);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_log_mk_inverse()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int kn;
+    } params{k_numbers};
+    const void* buffers[] = {log_weight, log_mk_inverse, log_norm_old,
+                             log_norm,   log_pk,         log_nk};
+    VK_LAUNCH(sits_update_log_mk_inverse, (k_numbers + 63) / 64, 1, 64, 1,
+              buffers, &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Update_log_mk_inverse_Device,
                          (k_numbers + 63) / 64, 64, 0, NULL, k_numbers,
                          log_weight, log_mk_inverse, log_norm_old, log_norm,
                          log_pk, log_nk);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_log_nk_inverse()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int kn;
+    } params{k_numbers};
+    const void* buffers[] = {log_nk_inverse, log_mk_inverse};
+    VK_LAUNCH(sits_update_log_nk_inverse, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Update_log_nk_inverse_Device, 1, 1, 0, NULL,
                          k_numbers, log_nk_inverse, log_mk_inverse);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_nk()
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int kn;
+    } params{k_numbers};
+    const void* buffers[] = {log_nk, Nk, log_nk_inverse};
+    VK_LAUNCH(sits_update_nk, (k_numbers + 63) / 64, 1, 64, 1, buffers,
+              &params, NULL);
+#else
     Launch_Device_Kernel(SITS_Update_nk_Device, (k_numbers + 63) / 64, 64, 0,
                          NULL, k_numbers, log_nk, Nk, log_nk_inverse);
+#endif
 }
 
 void CLASSIC_SITS_INFORMATION::SITS_Update_Fb(float beta_0, int step)
@@ -1195,27 +1341,63 @@ void CLASSIC_SITS_INFORMATION::SITS_Update_Fb(float beta_0, int step)
     }
     else if (sits_controller->sits_mode == SITS_MODE_EMPIRICAL)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            float pe_a;
+            float pe_b;
+            float beta_high;
+            float beta_low;
+        } params{pe_a, pe_b, 1.0f / (beta_0 * T_low * CONSTANT_kB),
+                 1.0f / (beta_0 * T_high * CONSTANT_kB)};
+        const void* buffers[] = {
+            sits_controller->pw_select.select_energy[0], factor, d_bias};
+        VK_LAUNCH(sits_esits_fb, 1, 1, 1, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(ESITS_Get_Current_Fb, 1, 1, 0, NULL,
                              sits_controller->pw_select.select_energy[0],
                              factor, pe_a, pe_b,
                              1.0f / (beta_0 * T_low * CONSTANT_kB),
                              1.0f / (beta_0 * T_high * CONSTANT_kB), d_bias);
+#endif
         deviceMemcpy(&sits_controller->h_factor, factor, sizeof(float),
                      deviceMemcpyDeviceToHost);
     }
     else if (sits_controller->sits_mode == SITS_MODE_AMD)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            float pe_a;
+            float pe_b;
+        } params{pe_a, pe_b};
+        const void* buffers[] = {
+            sits_controller->pw_select.select_energy[0], factor, d_bias};
+        VK_LAUNCH(sits_amd_fb, 1, 1, 1, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(AMD_Get_Current_Fb, 1, 1, 0, NULL,
                              sits_controller->pw_select.select_energy[0],
                              factor, pe_a, pe_b, d_bias);
+#endif
         deviceMemcpy(&sits_controller->h_factor, factor, sizeof(float),
                      deviceMemcpyDeviceToHost);
     }
     else if (sits_controller->sits_mode == SITS_MODE_GAMD)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            float pe_a;
+            float pe_b;
+        } params{pe_a, pe_b};
+        const void* buffers[] = {
+            sits_controller->pw_select.select_energy[0], factor, d_bias};
+        VK_LAUNCH(sits_gamd_fb, 1, 1, 1, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(GAMD_Get_Current_Fb, 1, 1, 0, NULL,
                              sits_controller->pw_select.select_energy[0],
                              factor, pe_a, pe_b, d_bias);
+#endif
         deviceMemcpy(&sits_controller->h_factor, factor, sizeof(float),
                      deviceMemcpyDeviceToHost);
     }
@@ -1705,6 +1887,26 @@ void SITS_INFORMATION::Update_And_Enhance(const int step,
     {
         classic_sits.SITS_Update_Fb(beta0, step);
     }
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+        int need_pressure;
+        float factor_minus_one;
+    } enhance_params{atom_numbers, need_pressure, h_factor - 1};
+    const void* enhance_buffers[] = {
+        frc,
+        pw_select.select_force[0],
+        d_total_potential,
+        classic_sits.d_bias,
+        vk_or_dummy(d_total_virial, frc),
+        pw_select.select_virial_tensor[0]};
+    VK_LAUNCH(sits_enhance_force,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, enhance_buffers,
+              &enhance_params, NULL);
+#else
     Launch_Device_Kernel(SITS_For_Enhanced_Force_Protein_Water_Device,
                          (atom_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
@@ -1712,6 +1914,7 @@ void SITS_INFORMATION::Update_And_Enhance(const int step,
                          frc, pw_select.select_force[0], d_total_potential,
                          classic_sits.d_bias, need_pressure, d_total_virial,
                          pw_select.select_virial_tensor[0], h_factor - 1);
+#endif
 }
 
 void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
@@ -1724,6 +1927,19 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized && lj_info->is_initialized)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } copy_params{local_atom_numbers + ghost_numbers};
+        const void* copy_buffers[] = {
+            crd, lj_info->crd_with_LJ_parameters_local, charge};
+        VK_LAUNCH(lj_copy_crd_charge,
+                  (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, copy_buffers,
+                  &copy_params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1731,6 +1947,7 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_max_thread, 0, NULL,
             local_atom_numbers + ghost_numbers, crd,
             lj_info->crd_with_LJ_parameters_local, charge);
+#endif
 
         if (need_potential)
         {
@@ -1742,12 +1959,41 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
         }
         if (!local_atom_numbers) return;
 
-        auto f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, false,
-                                                                   false, true>;
         dim3 blockSize = {
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = (local_atom_numbers + blockSize.y - 1) / blockSize.y;
+
+#ifdef USE_VULKAN
+        SitsLjVkParams params{local_atom_numbers,
+                              solvent_numbers,
+                              boundary,
+                              cutoff,
+                              pme_beta,
+                              pwwp_enhance_factor,
+                              need_potential,
+                              need_pressure,
+                              vk_nl_stride(nl, atom_numbers)};
+        const void* buffers[] = {
+            nl,
+            nl[0].atom_serial,
+            lj_info->d_LJ_energy_atom,
+            lj_info->crd_with_LJ_parameters_local,
+            lj_info->d_LJ_A,
+            lj_info->d_LJ_B,
+            atom_sys_mark_local,
+            md_frc,
+            pw_select.select_force[0],
+            vk_or_dummy(atom_energy, md_frc),
+            pw_select.select_atom_energy[0],
+            vk_or_dummy(atom_virial, md_frc),
+            pw_select.select_atom_virial_tensor[0],
+            vk_or_dummy(coulomb_atom_ene, md_frc)};
+        VK_LAUNCH(sits_lj_force, gridSize.x, 1, blockSize.x, blockSize.y,
+                  buffers, &params, NULL);
+#else
+        auto f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, false,
+                                                                   false, true>;
 
         if (need_potential && !need_pressure)
         {
@@ -1779,6 +2025,7 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
             pw_select.select_atom_energy[0], atom_virial,
             pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
             pwwp_enhance_factor);
+#endif
     }
 }
 
@@ -1794,6 +2041,19 @@ void SITS_INFORMATION::
 {
     if (is_initialized && lj_info->is_initialized)
     {
+#ifdef USE_VULKAN
+        struct
+        {
+            int atom_numbers;
+        } copy_params{local_atom_numbers + ghost_numbers};
+        const void* copy_buffers[] = {
+            crd, lj_info->crd_with_LJ_parameters_local, charge};
+        VK_LAUNCH(lj_soft_copy_crd_charge,
+                  (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, copy_buffers,
+                  &copy_params, NULL);
+#else
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1801,6 +2061,7 @@ void SITS_INFORMATION::
             CONTROLLER::device_max_thread, 0, NULL,
             local_atom_numbers + ghost_numbers, crd,
             lj_info->crd_with_LJ_parameters_local, charge);
+#endif
 
         if (need_potential)
         {
@@ -1812,12 +2073,48 @@ void SITS_INFORMATION::
         }
         if (!local_atom_numbers) return;
 
-        auto f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
-            true, false, false, true, false>;
         dim3 blockSize = {
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = (local_atom_numbers + blockSize.y - 1) / blockSize.y;
+
+#ifdef USE_VULKAN
+        SitsLjSoftVkParams params{local_atom_numbers,
+                                  solvent_numbers,
+                                  boundary,
+                                  cutoff,
+                                  pme_beta,
+                                  lj_info->lambda,
+                                  lj_info->alpha,
+                                  lj_info->p,
+                                  lj_info->sigma_6,
+                                  lj_info->sigma_6_min,
+                                  pwwp_enhance_factor,
+                                  need_potential,
+                                  need_pressure,
+                                  vk_nl_stride(nl, atom_numbers)};
+        const void* buffers[] = {
+            nl,
+            nl[0].atom_serial,
+            lj_info->d_LJ_energy_atom,
+            lj_info->crd_with_LJ_parameters_local,
+            atom_sys_mark_local,
+            lj_info->d_LJ_AA,
+            lj_info->d_LJ_AB,
+            lj_info->d_LJ_BA,
+            lj_info->d_LJ_BB,
+            md_frc,
+            pw_select.select_force[0],
+            vk_or_dummy(atom_energy, md_frc),
+            pw_select.select_atom_energy[0],
+            vk_or_dummy(atom_virial, md_frc),
+            pw_select.select_atom_virial_tensor[0],
+            vk_or_dummy(coulomb_atom_ene, md_frc)};
+        VK_LAUNCH(sits_lj_soft_core_force, gridSize.x, 1, blockSize.x,
+                  blockSize.y, buffers, &params, NULL);
+#else
+        auto f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
+            true, false, false, true, false>;
 
         if (need_potential && !need_pressure)
         {
@@ -1850,6 +2147,7 @@ void SITS_INFORMATION::
             pw_select.select_atom_virial_tensor[0], coulomb_atom_ene, NULL,
             NULL, NULL, lj_info->lambda, lj_info->alpha, lj_info->p,
             lj_info->sigma_6, lj_info->sigma_6_min, pwwp_enhance_factor);
+#endif
     }
 }
 
@@ -1890,11 +2188,24 @@ void SITS_INFORMATION::Check_Solvent(CONTROLLER* controller, int atom_numbers,
     int *errored, h_errored;
     Device_Malloc_Safely((void**)&errored, sizeof(int));
     deviceMemset(errored, 0, sizeof(int));
+#ifdef USE_VULKAN
+    struct
+    {
+        int atom_numbers;
+        int solvent_numbers;
+    } params{atom_numbers, solvent_numbers};
+    const void* buffers[] = {atom_sys_mark, errored};
+    VK_LAUNCH(sits_check_solvent,
+              (solvent_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Check_Solvent_Atom_Included,
                          (solvent_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
                          solvent_numbers, atom_sys_mark, errored);
+#endif
 
     deviceMemcpy(&h_errored, errored, sizeof(int), deviceMemcpyDeviceToHost);
     if (h_errored == 1)
@@ -1975,6 +2286,19 @@ void SITS_INFORMATION::Get_Local(int* atom_local, int local_atom_numbers_,
     {
         local_atom_numbers = local_atom_numbers_;
         ghost_numbers = ghost_numbers_;
+#ifdef USE_VULKAN
+        struct
+        {
+            int total;
+        } params{local_atom_numbers + ghost_numbers};
+        const void* buffers[] = {atom_local, atom_sys_mark,
+                                 atom_sys_mark_local};
+        VK_LAUNCH(sits_get_local,
+                  (local_atom_numbers + ghost_numbers +
+                   CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(get_local_device,
                              (local_atom_numbers + ghost_numbers +
                               CONTROLLER::device_max_thread - 1) /
@@ -1982,5 +2306,6 @@ void SITS_INFORMATION::Get_Local(int* atom_local, int local_atom_numbers_,
                              CONTROLLER::device_max_thread, 0, NULL, atom_local,
                              local_atom_numbers, ghost_numbers, atom_sys_mark,
                              atom_sys_mark_local);
+#endif
     }
 }

@@ -1,0 +1,27 @@
+layout(set = 0, binding = 0, std430) buffer EnhancingEnergy { float enhancing_energy[]; };
+layout(set = 0, binding = 1, std430) buffer Factor { float factor[]; };
+layout(set = 0, binding = 2, std430) buffer DBias { float d_bias[]; };
+layout(push_constant) uniform Params
+{
+    float pe_a;
+    float pe_b;
+    float beta_high;
+    float beta_low;
+}
+pc;
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    float ene = enhancing_energy[0];
+    if (ene > pc.pe_b)
+    {
+        factor[0] = pc.beta_high - (pc.beta_high - pc.beta_low) * pc.pe_a /
+                                       (ene - pc.pe_b + pc.pe_a);
+        d_bias[0] = -pc.pe_a * log(ene - pc.pe_b + pc.pe_a);
+    }
+    else
+    {
+        factor[0] = pc.beta_low;
+        d_bias[0] = -ene;
+    }
+}

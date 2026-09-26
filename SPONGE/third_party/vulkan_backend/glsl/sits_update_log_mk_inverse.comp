@@ -1,0 +1,24 @@
+layout(set = 0, binding = 0, std430) buffer LogWeight { float log_weight[]; };
+layout(set = 0, binding = 1, std430) buffer LogMkInverse { float log_mk_inverse[]; };
+layout(set = 0, binding = 2, std430) buffer LogNormOld { float log_norm_old[]; };
+layout(set = 0, binding = 3, std430) buffer LogNorm { float log_norm[]; };
+layout(set = 0, binding = 4, std430) buffer LogPk { float log_pk[]; };
+layout(set = 0, binding = 5, std430) buffer LogNk { float log_nk[]; };
+layout(push_constant) uniform Params { int kn; } pc;
+float log_add_log(float a, float b)
+{
+    return max(a, b) + log(1.0 + exp(-abs(a - b)));
+}
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.kn - 1) return;
+    log_weight[i] = (log_pk[i] + log_pk[i + 1]) * 0.5;
+    log_mk_inverse[i] = log_nk[i] - log_nk[i + 1];
+    log_norm_old[i] = log_norm[i];
+    log_norm[i] = log_add_log(log_norm[i], log_weight[i]);
+    log_mk_inverse[i] =
+        log_add_log(log_mk_inverse[i] + log_norm_old[i] - log_norm[i],
+                    log_pk[i + 1] - log_pk[i] + log_mk_inverse[i] +
+                        log_weight[i] - log_norm[i]);
+}

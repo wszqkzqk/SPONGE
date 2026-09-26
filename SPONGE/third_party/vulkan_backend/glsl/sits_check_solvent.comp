@@ -1,0 +1,15 @@
+layout(set = 0, binding = 0, std430) buffer SysMark { int atom_sys_mark[]; };
+layout(set = 0, binding = 1, std430) buffer Errored { int errored[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    int solvent_numbers;
+}
+pc;
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.solvent_numbers) return;
+    if (atom_sys_mark[pc.atom_numbers - pc.solvent_numbers + i] == 0)
+        atomicExchange(errored[0], 1);
+}

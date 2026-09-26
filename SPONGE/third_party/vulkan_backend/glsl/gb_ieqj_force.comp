@@ -1,0 +1,23 @@
+layout(set = 0, binding = 0, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 1, std430) buffer EffectiveRadius { float effective_radius[]; };
+layout(set = 0, binding = 2, std430) buffer AtomEne { float atom_ene[]; };
+layout(set = 0, binding = 3, std430) buffer DeDa { float de_da[]; };
+layout(set = 0, binding = 4, std430) buffer ThisEne { float this_ene[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float epsilon_1_minus_1_half;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    float f_1 = 1.0 / effective_radius[atom_i];
+    float temp_ene = charge[atom_i];
+    temp_ene *= temp_ene;
+    temp_ene *= f_1 * pc.epsilon_1_minus_1_half;
+    afadd(de_da[atom_i], -temp_ene * f_1);
+    afadd(atom_ene[atom_i], temp_ene);
+    afadd(this_ene[atom_i], temp_ene);
+}

@@ -21,11 +21,6 @@ layout(push_constant) uniform Params
 }
 pc;
 const float SPONGE_PI = 3.1415926535897932;
-LTMat lt_add(LTMat a, LTMat b)
-{
-    return LTMat(a.a11 + b.a11, a.a21 + b.a21, a.a22 + b.a22,
-                 a.a31 + b.a31, a.a32 + b.a32, a.a33 + b.a33);
-}
 int periodic_grid_index(int grid_cell, int reso)
 {
     int grid_index = (grid_cell + reso / 2) % reso;

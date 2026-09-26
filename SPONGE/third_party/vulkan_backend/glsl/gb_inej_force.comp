@@ -1,0 +1,39 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 2, std430) buffer EffectiveRadius { float effective_radius[]; };
+layout(set = 0, binding = 3, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 4, std430) buffer AtomEne { float atom_ene[]; };
+layout(set = 0, binding = 5, std430) buffer DeDa { float de_da[]; };
+layout(set = 0, binding = 6, std430) buffer ThisEne { float this_ene[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float epsilon_1_minus_1;
+    float cutoff_square;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    int atom_j = atom_i + 1 + int(gl_GlobalInvocationID.y);
+    if (atom_i >= pc.atom_numbers || atom_j >= pc.atom_numbers) return;
+    Vec3 dr = v3_sub(crd[atom_j], crd[atom_i]);
+    float dr2 = v3_dot(dr, dr);
+    if (dr2 >= pc.cutoff_square) return;
+    Sad3 R = sad3_var(sqrt(dr2), 0);
+    Sad3 a1 = sad3_var(effective_radius[atom_i], 1);
+    Sad3 a2 = sad3_var(effective_radius[atom_j], 2);
+    Sad3 born_radii_ij_square = sad3_mul(a1, a2);
+    Sad3 R2 = sad3_mul(R, R);
+    Sad3 D = sad3_exp(sad3_div(sad3_scale(R2, -0.25), born_radii_ij_square));
+    Sad3 s = sad3_add(R2, sad3_mul(born_radii_ij_square, D));
+    float c = charge[atom_i] * charge[atom_j] * pc.epsilon_1_minus_1;
+    Sad3 temp_ene = sad3_rdiv(c, sad3_sqrt(s));
+    Vec3 temp_frc = v3_scale(dr, -temp_ene.d0 / R.val);
+    aadd_v3(frc[atom_j], temp_frc);
+    aadd_v3(frc[atom_i], v3_neg(temp_frc));
+    afadd(de_da[atom_i], temp_ene.d1);
+    afadd(de_da[atom_j], temp_ene.d2);
+    afadd(atom_ene[atom_i], temp_ene.val);
+    afadd(this_ene[atom_i], temp_ene.val);
+}

@@ -1,7 +1,49 @@
-﻿#include "generalized_Born.h"
+#include "generalized_Born.h"
 
 #include "../xponge/load/native/gb.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct GbRadiiFactorVkParams
+{
+    int atom_numbers;
+    float cutoff_square;
+};
+static_assert(sizeof(GbRadiiFactorVkParams) == 8,
+              "GbRadiiFactorVkParams must match the GLSL push constant layout");
+
+struct GbRadiiVkParams
+{
+    int atom_numbers;
+};
+static_assert(sizeof(GbRadiiVkParams) == 4,
+              "GbRadiiVkParams must match the GLSL push constant layout");
+
+struct GbInejVkParams
+{
+    int atom_numbers;
+    float epsilon_1_minus_1;
+    float cutoff_square;
+};
+static_assert(sizeof(GbInejVkParams) == 12,
+              "GbInejVkParams must match the GLSL push constant layout");
+
+struct GbIeqjVkParams
+{
+    int atom_numbers;
+    float epsilon_1_minus_1_half;
+};
+static_assert(sizeof(GbIeqjVkParams) == 8,
+              "GbIeqjVkParams must match the GLSL push constant layout");
+
+struct GbAccumulateVkParams
+{
+    int atom_numbers;
+    float cutoff_square;
+};
+static_assert(sizeof(GbAccumulateVkParams) == 8,
+              "GbAccumulateVkParams must match the GLSL push constant layout");
+#endif
 
 static __global__ void Effective_Born_Radii_Factor_Device(
     const int atom_numbers, const VECTOR* crd, const float cutoff_square,
@@ -312,6 +354,23 @@ void GENERALIZED_BORN_INFORMATION::Get_Effective_Born_Radius(const VECTOR* crd)
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x,
                          (atom_numbers + blockSize.y - 1) / blockSize.y};
+#ifdef USE_VULKAN
+        GbRadiiFactorVkParams factor_params{atom_numbers,
+                                            radii_cutoff * radii_cutoff};
+        const void* factor_buffers[] = {crd, d_GB_self_radius,
+                                        d_GB_other_radius,
+                                        d_GB_effective_radius};
+        VK_LAUNCH(gb_effective_radius_factor, gridSize.x, gridSize.y,
+                  blockSize.x, blockSize.y, factor_buffers, &factor_params,
+                  NULL);
+        GbRadiiVkParams radii_params{atom_numbers};
+        const void* radii_buffers[] = {d_GB_self_radius, d_GB_effective_radius};
+        VK_LAUNCH(gb_effective_radius,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, radii_buffers,
+                  &radii_params, NULL);
+#else
         Launch_Device_Kernel(Effective_Born_Radii_Factor_Device, gridSize,
                              blockSize, 0, NULL, atom_numbers, crd,
                              radii_cutoff * radii_cutoff, d_GB_self_radius,
@@ -323,6 +382,7 @@ void GENERALIZED_BORN_INFORMATION::Get_Effective_Born_Radius(const VECTOR* crd)
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
             d_GB_self_radius, d_GB_effective_radius);
+#endif
     }
 }
 
@@ -341,6 +401,33 @@ void GENERALIZED_BORN_INFORMATION::GB_Force_With_Atom_Energy(
         dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x,
                          (atom_numbers + blockSize.y - 1) / blockSize.y};
 
+#ifdef USE_VULKAN
+        GbInejVkParams inej_params{
+            atom_numbers,
+            static_cast<float>(1.0 / relative_dielectric_constant - 1.0),
+            cutoff * cutoff};
+        const void* inej_buffers[] = {crd,      charge, d_GB_effective_radius,
+                                      frc,      atom_energy, d_dE_da,
+                                      d_GB_energy_atom};
+        VK_LAUNCH(gb_inej_force, gridSize.x, gridSize.y, blockSize.x,
+                  blockSize.y, inej_buffers, &inej_params, NULL);
+        GbIeqjVkParams ieqj_params{
+            atom_numbers,
+            static_cast<float>(0.5 / relative_dielectric_constant - 0.5)};
+        const void* ieqj_buffers[] = {charge, d_GB_effective_radius,
+                                      atom_energy, d_dE_da, d_GB_energy_atom};
+        VK_LAUNCH(gb_ieqj_force,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, ieqj_buffers,
+                  &ieqj_params, NULL);
+        GbAccumulateVkParams acc_params{atom_numbers,
+                                        radii_cutoff * radii_cutoff};
+        const void* acc_buffers[] = {crd, d_GB_self_radius, d_GB_other_radius,
+                                     d_GB_effective_radius, d_dE_da, frc};
+        VK_LAUNCH(gb_accumulate_force, gridSize.x, gridSize.y, blockSize.x,
+                  blockSize.y, acc_buffers, &acc_params, NULL);
+#else
         Launch_Device_Kernel(
             GB_inej_Force_Energy_Device, gridSize, blockSize, 0, NULL,
             atom_numbers, crd, charge, d_GB_effective_radius,
@@ -359,6 +446,7 @@ void GENERALIZED_BORN_INFORMATION::GB_Force_With_Atom_Energy(
             GB_accumulate_Force_Energy_Device, gridSize, blockSize, 0, NULL,
             atom_numbers, crd, radii_cutoff * radii_cutoff, d_GB_self_radius,
             d_GB_other_radius, d_GB_effective_radius, d_dE_da, frc);
+#endif
     }
 }
 

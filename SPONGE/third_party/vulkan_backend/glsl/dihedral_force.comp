@@ -21,11 +21,6 @@ layout(push_constant) uniform Params
     int need_virial;
 }
 pc;
-LTMat lt_add(LTMat a, LTMat b)
-{
-    return LTMat(a.a11 + b.a11, a.a21 + b.a21, a.a22 + b.a22, a.a31 + b.a31,
-                 a.a32 + b.a32, a.a33 + b.a33);
-}
 void main()
 {
     int dihedral_i = int(gl_GlobalInvocationID.x);

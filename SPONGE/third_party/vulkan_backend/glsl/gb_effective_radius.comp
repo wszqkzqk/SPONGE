@@ -1,0 +1,14 @@
+layout(set = 0, binding = 0, std430) buffer SelfRadius { float self_radius[]; };
+layout(set = 0, binding = 1, std430) buffer EffectiveRadius { float effective_radius[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    effective_radius[atom_i] =
+        1.0 / (1.0 / self_radius[atom_i] - effective_radius[atom_i]);
+}

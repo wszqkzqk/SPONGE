@@ -1,7 +1,23 @@
-﻿#include "Lennard_Jones_force_No_PBC.h"
+#include "Lennard_Jones_force_No_PBC.h"
 
 #include "../xponge/load/native/lj.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct LjNopbcVkParams
+{
+    int atom_numbers;
+    float cutoff_square;
+    int need_atom_energy;
+};
+static_assert(sizeof(LjNopbcVkParams) == 12,
+              "LjNopbcVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void LJ_Force_Device(const int atom_numbers,
                                        const VECTOR* crd, const int* LJ_types,
@@ -307,6 +323,26 @@ void LENNARD_JONES_NO_PBC_INFORMATION::LJ_Force_With_Atom_Energy(
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x,
                          (atom_numbers + blockSize.y - 1) / blockSize.y};
+#ifdef USE_VULKAN
+        if (need_atom_energy)
+        {
+            deviceMemset(d_LJ_energy_atom, 0, sizeof(float) * atom_numbers);
+        }
+        LjNopbcVkParams params{atom_numbers, cutoff * cutoff,
+                               need_atom_energy};
+        const void* buffers[] = {crd,
+                                 d_atom_LJ_type,
+                                 d_LJ_A,
+                                 d_LJ_B,
+                                 excluded_list_start,
+                                 excluded_list,
+                                 excluded_atom_numbers,
+                                 frc,
+                                 vk_or_dummy(atom_energy, frc),
+                                 d_LJ_energy_atom};
+        VK_LAUNCH(lj_force_nopbc, gridSize.x, gridSize.y, blockSize.x,
+                  blockSize.y, buffers, &params, NULL);
+#else
         if (!need_atom_energy)
         {
             Launch_Device_Kernel(LJ_Force_Device, gridSize, blockSize, 0, NULL,
@@ -323,6 +359,7 @@ void LENNARD_JONES_NO_PBC_INFORMATION::LJ_Force_With_Atom_Energy(
                 excluded_list_start, excluded_list, excluded_atom_numbers,
                 cutoff * cutoff, atom_energy, frc, d_LJ_energy_atom);
         }
+#endif
     }
 }
 

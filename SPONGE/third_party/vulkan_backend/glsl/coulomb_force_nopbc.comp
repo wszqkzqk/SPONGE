@@ -1,0 +1,46 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 2, std430) buffer ExcludedStart { int excluded_list_start[]; };
+layout(set = 0, binding = 3, std430) buffer ExcludedList { int excluded_list[]; };
+layout(set = 0, binding = 4, std430) buffer ExcludedNumbers { int excluded_atom_numbers[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomEne { float atom_ene[]; };
+layout(set = 0, binding = 7, std430) buffer ThisEne { float this_ene[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float cutoff_square;
+    int need_atom_energy;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.y);
+    int atom_j = atom_i + 1 + int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers || atom_j >= pc.atom_numbers) return;
+    int start = excluded_list_start[atom_i];
+    int number = excluded_atom_numbers[atom_i];
+    bool tocal = true;
+    for (int k = 0; tocal && k < number; k++)
+    {
+        if (excluded_list[start + k] == atom_j) tocal = false;
+    }
+    if (!tocal) return;
+    Vec3 dr = v3_sub(crd[atom_j], crd[atom_i]);
+    float dr2 = v3_dot(dr, dr);
+    if (dr2 >= pc.cutoff_square) return;
+    float dr_2 = 1.0 / dr2;
+    float dr_1 = sqrt(dr_2);
+    float dr_3 = dr_1 * dr_2;
+    float chargeij = charge[atom_i] * charge[atom_j];
+    float frc_abs = -chargeij * dr_3;
+    Vec3 temp_frc = v3_scale(dr, frc_abs);
+    aadd_v3(frc[atom_j], v3_neg(temp_frc));
+    aadd_v3(frc[atom_i], temp_frc);
+    if (pc.need_atom_energy != 0)
+    {
+        float temp_ene = chargeij * dr_1;
+        afadd(atom_ene[atom_i], temp_ene);
+        afadd(this_ene[atom_i], temp_ene);
+    }
+}

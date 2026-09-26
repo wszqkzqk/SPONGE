@@ -1,0 +1,43 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer SelfRadius { float self_radius[]; };
+layout(set = 0, binding = 2, std430) buffer OtherRadius { float other_radius[]; };
+layout(set = 0, binding = 3, std430) buffer EffectiveRadius { float effective_radius[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float cutoff_square;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    int atom_j = int(gl_GlobalInvocationID.y);
+    if (atom_i >= pc.atom_numbers || atom_j >= pc.atom_numbers ||
+        atom_i == atom_j)
+        return;
+    Vec3 dr = v3_sub(crd[atom_j], crd[atom_i]);
+    float dr2 = v3_dot(dr, dr);
+    if (dr2 >= pc.cutoff_square) return;
+    float R = sqrt(dr2);
+    float self_radii = self_radius[atom_i];
+    float other_radii = other_radius[atom_j];
+    float inner_distance = R - other_radii;
+    float outer_distance = R + other_radii;
+    float U = 1.0;
+    float L = 1.0;
+    if (self_radii <= inner_distance)
+    {
+        L = 1.0 / inner_distance;
+        U = 1.0 / outer_distance;
+    }
+    else if (self_radii < outer_distance)
+    {
+        L = 1.0 / self_radii;
+        U = 1.0 / outer_distance;
+    }
+    float temp = 0.125 / R *
+                 (4.0 * R * (L - U) + dr2 * (U * U - L * L) +
+                  2.0 * log(U / L) +
+                  other_radii * other_radii * (L * L - U * U));
+    afadd(effective_radius[atom_i], temp);
+}

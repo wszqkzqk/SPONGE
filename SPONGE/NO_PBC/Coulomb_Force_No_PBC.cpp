@@ -1,4 +1,20 @@
-﻿#include "Coulomb_Force_No_PBC.h"
+#include "Coulomb_Force_No_PBC.h"
+
+#ifdef USE_VULKAN
+struct CoulombNopbcVkParams
+{
+    int atom_numbers;
+    float cutoff_square;
+    int need_atom_energy;
+};
+static_assert(sizeof(CoulombNopbcVkParams) == 12,
+              "CoulombNopbcVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 static __global__ void Coulomb_Force_Device(
     const int atom_numbers, const VECTOR* crd, const float* charge,
@@ -144,6 +160,25 @@ void COULOMB_FORCE_NO_PBC_INFORMATION::Coulomb_Force_With_Atom_Energy(
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
         dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x,
                          (atom_numbers + blockSize.y - 1) / blockSize.y};
+#ifdef USE_VULKAN
+        if (need_atom_energy != 0)
+        {
+            deviceMemset(d_Coulomb_energy_atom, 0,
+                         sizeof(float) * atom_numbers);
+        }
+        CoulombNopbcVkParams params{atom_numbers, cutoff * cutoff,
+                                    need_atom_energy};
+        const void* buffers[] = {crd,
+                                 charge,
+                                 excluded_list_start,
+                                 excluded_list,
+                                 excluded_atom_numbers,
+                                 frc,
+                                 vk_or_dummy(atom_energy, frc),
+                                 d_Coulomb_energy_atom};
+        VK_LAUNCH(coulomb_force_nopbc, gridSize.x, gridSize.y, blockSize.x,
+                  blockSize.y, buffers, &params, NULL);
+#else
         if (need_atom_energy == 0)
         {
             Launch_Device_Kernel(Coulomb_Force_Device, gridSize, blockSize, 0,
@@ -161,6 +196,7 @@ void COULOMB_FORCE_NO_PBC_INFORMATION::Coulomb_Force_With_Atom_Energy(
                                  excluded_atom_numbers, cutoff * cutoff,
                                  atom_energy, frc, d_Coulomb_energy_atom);
         }
+#endif
     }
 }
 

@@ -102,6 +102,10 @@ void Launch(int kernel_id, unsigned int grid_x, unsigned int grid_y,
             const void* const* buffers, int buffer_count, const void* params,
             size_t params_size, deviceStream_t stream);
 int KernelId(const char* name);
+void* GraphCreate();
+void GraphBeginRecord(void* graph, deviceStream_t stream);
+void GraphEndRecord(void* graph);
+void GraphExecute(void* graph, deviceStream_t stream);
 }  // namespace sponge_vk
 
 #define Launch_Device_Kernel(kernel, grid, block, sm_memory, stream, ...) \

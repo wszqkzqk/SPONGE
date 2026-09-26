@@ -84,6 +84,14 @@ struct StreamState
 StreamState g_default_stream;
 std::unordered_map<void*, StreamState*> g_streams;
 
+struct GraphState
+{
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+};
+
+GraphState* g_recording = nullptr;
+
 StreamState* StreamOf(void* stream)
 {
     if (stream == nullptr) return &g_default_stream;
@@ -192,15 +200,15 @@ void SubmitAndWaitImpl(StreamState* stream)
     S().staging_offset = 0;
 }
 
-void PipelineBarrierCompute(StreamState* stream)
+void PipelineBarrierCompute(VkCommandBuffer cb)
 {
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask =
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(stream->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0,
-                         nullptr, 0, nullptr);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
 }
 
 void PipelineBarrierTransferToCompute(StreamState* stream)
@@ -518,7 +526,17 @@ void Launch(int kernel_id, unsigned int grid_x, unsigned int grid_y,
         Fail(std::string("push constant size exceeded for ") +
              KernelName(kernel_id));
     StreamState* stream = StreamOf(stream_handle);
-    EnsureRecordingImpl(stream);
+    VkCommandBuffer cb = stream->cb;
+    VkDescriptorPool pool = stream->pool;
+    if (g_recording != nullptr)
+    {
+        cb = g_recording->cb;
+        pool = g_recording->pool;
+    }
+    else
+    {
+        EnsureRecordingImpl(stream);
+    }
 
     const uint32_t push_size = (uint32_t)params_size;
     VkPipeline pipeline = PipelineOf(kernel_id, block_x, block_y, push_size);
@@ -527,7 +545,7 @@ void Launch(int kernel_id, unsigned int grid_x, unsigned int grid_y,
 
     VkDescriptorSetAllocateInfo set_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    set_info.descriptorPool = stream->pool;
+    set_info.descriptorPool = pool;
     set_info.descriptorSetCount = 1;
     set_info.pSetLayouts = &ds_layout;
     VkDescriptorSet descriptor_set;
@@ -550,15 +568,70 @@ void Launch(int kernel_id, unsigned int grid_x, unsigned int grid_y,
     }
     vkUpdateDescriptorSets(S().device, buffer_count, writes.data(), 0, nullptr);
 
-    vkCmdBindPipeline(stream->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(stream->cb, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout,
+                            0, 1, &descriptor_set, 0, nullptr);
     if (params_size > 0)
-        vkCmdPushConstants(stream->cb, pipeline_layout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0, (uint32_t)params_size,
-                           params);
-    vkCmdDispatch(stream->cb, grid_x, grid_y, 1);
-    PipelineBarrierCompute(stream);
+        vkCmdPushConstants(cb, pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           (uint32_t)params_size, params);
+    vkCmdDispatch(cb, grid_x, grid_y, 1);
+    PipelineBarrierCompute(cb);
+    if (g_recording == nullptr && SyncEach()) SubmitAndWaitImpl(stream);
+}
+
+void* GraphCreate()
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    if (SyncEach() || getenv("SPONGE_VK_NO_GRAPH") != nullptr) return nullptr;
+    auto* graph = new GraphState();
+    VkCommandBufferAllocateInfo cb_info{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cb_info.commandPool = S().command_pool;
+    cb_info.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    cb_info.commandBufferCount = 1;
+    VK_CHECK(vkAllocateCommandBuffers(S().device, &cb_info, &graph->cb));
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096};
+    VkDescriptorPoolCreateInfo pool_info{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.maxSets = 1024;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    VK_CHECK(vkCreateDescriptorPool(S().device, &pool_info, nullptr,
+                                    &graph->pool));
+    return graph;
+}
+
+void GraphBeginRecord(void* graph_ptr, deviceStream_t stream_handle)
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    auto* graph = static_cast<GraphState*>(graph_ptr);
+    SubmitAndWaitImpl(StreamOf(stream_handle));
+    VK_CHECK(vkResetCommandBuffer(graph->cb, 0));
+    VK_CHECK(vkResetDescriptorPool(S().device, graph->pool, 0));
+    VkCommandBufferInheritanceInfo inheritance{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+    begin.pInheritanceInfo = &inheritance;
+    VK_CHECK(vkBeginCommandBuffer(graph->cb, &begin));
+    g_recording = graph;
+}
+
+void GraphEndRecord(void* graph_ptr)
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    VK_CHECK(vkEndCommandBuffer(static_cast<GraphState*>(graph_ptr)->cb));
+    g_recording = nullptr;
+}
+
+void GraphExecute(void* graph_ptr, deviceStream_t stream_handle)
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    auto* graph = static_cast<GraphState*>(graph_ptr);
+    StreamState* stream = StreamOf(stream_handle);
+    EnsureRecordingImpl(stream);
+    vkCmdExecuteCommands(stream->cb, 1, &graph->cb);
+    PipelineBarrierCompute(stream->cb);
     if (SyncEach()) SubmitAndWaitImpl(stream);
 }
 

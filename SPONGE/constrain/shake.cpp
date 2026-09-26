@@ -3,6 +3,7 @@
 #include "velocity_projection.h"
 
 #ifdef USE_VULKAN
+#include <cstring>
 struct ShakeForceCycleVkParams
 {
     int constrain_pair_numbers;
@@ -66,6 +67,63 @@ static_assert(sizeof(SumVirialToStressVkParams) == 12,
 static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
 {
     return ptr != NULL ? ptr : dummy;
+}
+
+struct ShakeVkGraphSignature
+{
+    ShakeRefreshCoordinateVkParams refresh_params;
+    ShakeForceCycleVkParams cycle_params;
+    int iteration_numbers;
+    int need_pressure;
+    const void* buffers[7];
+};
+
+static void* shake_vk_graph = NULL;
+static bool shake_vk_graph_ready = false;
+static bool shake_vk_graph_disabled = false;
+static int shake_vk_graph_records = 0;
+static ShakeVkGraphSignature shake_vk_signature;
+
+static void ShakeVkIterations(const ShakeVkGraphSignature& signature)
+{
+    for (int i = 0; i < signature.iteration_numbers; i = i + 1)
+    {
+        const void* refresh_buffers[] = {signature.buffers[0],
+                                         signature.buffers[1],
+                                         signature.buffers[2],
+                                         signature.buffers[3]};
+        VK_LAUNCH(shake_refresh_coordinate,
+                  (signature.refresh_params.atom_numbers +
+                   CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, refresh_buffers,
+                  &signature.refresh_params, NULL);
+        const int pair_grid =
+            (signature.cycle_params.constrain_pair_numbers +
+             CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread;
+        if (signature.need_pressure > 0)
+        {
+            const void* cycle_buffers[] = {signature.buffers[1],
+                                           signature.buffers[4],
+                                           signature.buffers[5],
+                                           signature.buffers[2],
+                                           signature.buffers[6]};
+            VK_LAUNCH(shake_constrain_force_cycle_with_virial, pair_grid, 1,
+                      CONTROLLER::device_max_thread, 1, cycle_buffers,
+                      &signature.cycle_params, NULL);
+        }
+        else
+        {
+            const void* cycle_buffers[] = {signature.buffers[1],
+                                           signature.buffers[4],
+                                           signature.buffers[5],
+                                           signature.buffers[2]};
+            VK_LAUNCH(shake_constrain_force_cycle, pair_grid, 1,
+                      CONTROLLER::device_max_thread, 1, cycle_buffers,
+                      &signature.cycle_params, NULL);
+        }
+    }
 }
 #endif
 
@@ -539,45 +597,54 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
                          sizeof(LTMatrix3) * constrain->num_pair_local);
             deviceMemset(d_virial, 0, sizeof(LTMatrix3));
         }
-        for (int i = 0; i < iteration_numbers; i = i + 1)
-        {
 #ifdef USE_VULKAN
-            ShakeRefreshCoordinateVkParams refresh_params{atom_numbers,
-                                                          constrain->x_factor};
-            const void* refresh_buffers[] = {crd, test_crd, constrain_frc,
-                                             mass_inverse};
-            VK_LAUNCH(shake_refresh_coordinate,
-                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
-                          CONTROLLER::device_max_thread,
-                      1, CONTROLLER::device_max_thread, 1, refresh_buffers,
-                      &refresh_params, NULL);
-            ShakeForceCycleVkParams cycle_params{constrain->num_pair_local,
-                                                 boundary};
-            if (need_pressure > 0)
+        if (shake_vk_graph == NULL && !shake_vk_graph_disabled)
+            shake_vk_graph = sponge_vk::GraphCreate();
+        ShakeVkGraphSignature signature = {};
+        signature.refresh_params =
+            ShakeRefreshCoordinateVkParams{atom_numbers, constrain->x_factor};
+        signature.cycle_params =
+            ShakeForceCycleVkParams{constrain->num_pair_local, boundary};
+        signature.iteration_numbers = iteration_numbers;
+        signature.need_pressure = need_pressure;
+        const void* graph_buffers[7] = {crd,
+                                        test_crd,
+                                        constrain_frc,
+                                        mass_inverse,
+                                        constrain->constrain_pair_local,
+                                        last_pair_dr,
+                                        d_pair_virial};
+        memcpy(signature.buffers, graph_buffers, sizeof(graph_buffers));
+        if (!shake_vk_graph_disabled && shake_vk_graph != NULL &&
+            shake_vk_graph_ready &&
+            memcmp(&signature, &shake_vk_signature, sizeof(signature)) == 0)
+        {
+            sponge_vk::GraphExecute(shake_vk_graph, NULL);
+        }
+        else if (!shake_vk_graph_disabled && shake_vk_graph != NULL)
+        {
+            if (++shake_vk_graph_records > 8)
             {
-                const void* cycle_buffers[] = {
-                    test_crd, constrain->constrain_pair_local, last_pair_dr,
-                    constrain_frc, d_pair_virial};
-                VK_LAUNCH(shake_constrain_force_cycle_with_virial,
-                          (constrain->num_pair_local +
-                           CONTROLLER::device_max_thread - 1) /
-                              CONTROLLER::device_max_thread,
-                          1, CONTROLLER::device_max_thread, 1, cycle_buffers,
-                          &cycle_params, NULL);
+                shake_vk_graph_disabled = true;
+                ShakeVkIterations(signature);
             }
             else
             {
-                const void* cycle_buffers[] = {test_crd,
-                                               constrain->constrain_pair_local,
-                                               last_pair_dr, constrain_frc};
-                VK_LAUNCH(shake_constrain_force_cycle,
-                          (constrain->num_pair_local +
-                           CONTROLLER::device_max_thread - 1) /
-                              CONTROLLER::device_max_thread,
-                          1, CONTROLLER::device_max_thread, 1, cycle_buffers,
-                          &cycle_params, NULL);
+                sponge_vk::GraphBeginRecord(shake_vk_graph, NULL);
+                ShakeVkIterations(signature);
+                sponge_vk::GraphEndRecord(shake_vk_graph);
+                shake_vk_signature = signature;
+                shake_vk_graph_ready = true;
+                sponge_vk::GraphExecute(shake_vk_graph, NULL);
             }
+        }
+        else
+        {
+            ShakeVkIterations(signature);
+        }
 #else
+        for (int i = 0; i < iteration_numbers; i = i + 1)
+        {
             Launch_Device_Kernel(
                 Refresh_Coordinate,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -608,8 +675,8 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
                                      boundary, constrain->constrain_pair_local,
                                      last_pair_dr, constrain_frc);
             }
-#endif
         }
+#endif
 
         if (need_pressure > 0)
         {

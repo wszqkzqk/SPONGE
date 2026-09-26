@@ -5,7 +5,7 @@ const float PME_Md[4] = float[4](0.0, 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0);
 layout(set = 0, binding = 0, std430) buffer AtomNear { int atom_near[]; };
 layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
 layout(set = 0, binding = 2, std430) buffer Frxyz { Vec3 frxyz[]; };
-layout(set = 0, binding = 3, std430) buffer Q { float pme_q[]; };
+layout(set = 0, binding = 3, std430) buffer Q { floatA pme_q[]; };
 layout(push_constant) uniform Params { int atom_numbers; int PME_Nall; } pc;
 void main()
 {

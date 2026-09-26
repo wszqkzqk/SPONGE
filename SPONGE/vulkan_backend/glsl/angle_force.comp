@@ -4,10 +4,10 @@ layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
 layout(set = 0, binding = 3, std430) buffer AtomC { int atom_c[]; };
 layout(set = 0, binding = 4, std430) buffer K { float angle_k[]; };
 layout(set = 0, binding = 5, std430) buffer Theta0 { float angle_theta0[]; };
-layout(set = 0, binding = 6, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 7, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 6, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 7, std430) buffer AtomEnergy { floatA atom_energy[]; };
 layout(set = 0, binding = 8, std430) buffer AngleEne { float angle_ene[]; };
-layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(push_constant) uniform Params
 {
     int angle_numbers;

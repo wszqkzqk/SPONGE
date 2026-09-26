@@ -4,8 +4,8 @@ layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
 layout(set = 0, binding = 3, std430) buffer Parameters { float parameters[]; };
 layout(set = 0, binding = 4, std430) buffer AtomTypes { int atom_types[]; };
 layout(set = 0, binding = 5, std430) buffer Z { float z_dedz[]; };
-layout(set = 0, binding = 6, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 6, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

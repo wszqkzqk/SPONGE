@@ -2,10 +2,10 @@ layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
 layout(set = 0, binding = 1, std430) buffer AtomTypes { int atom_types[]; };
 layout(set = 0, binding = 2, std430) buffer Shield { float shield[]; };
 layout(set = 0, binding = 3, std430) buffer Charge { float charge[]; };
-layout(set = 0, binding = 4, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 4, std430) buffer Frc { Vec3A frc[]; };
 layout(set = 0, binding = 5, std430) buffer NL { uvec4 nl_raw[]; };
 layout(set = 0, binding = 6, std430) buffer NLSerial { int nl_serial[]; };
-layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

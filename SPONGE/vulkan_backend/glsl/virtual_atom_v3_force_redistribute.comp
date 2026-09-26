@@ -9,7 +9,7 @@ struct VType3
 };
 layout(set = 0, binding = 0, std430) buffer VInfo { VType3 v_info[]; };
 layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
-layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3A frc[]; };
 layout(set = 0, binding = 3, std430) buffer GeometryError { int geometry_error[]; };
 layout(push_constant) uniform Params
 {
@@ -23,7 +23,7 @@ void main()
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.virtual_numbers) return;
     VType3 v_temp = v_info[i];
-    Vec3 force_v = frc[v_temp.virtual_atom];
+    Vec3 force_v = to_v3(frc[v_temp.virtual_atom]);
     Vec3 force_1 = force_v;
     Vec3 force_2 = Vec3(0.0, 0.0, 0.0);
     Vec3 force_3 = Vec3(0.0, 0.0, 0.0);
@@ -58,5 +58,5 @@ void main()
     aadd_v3(frc[v_temp.from_1], force_1);
     aadd_v3(frc[v_temp.from_2], force_2);
     aadd_v3(frc[v_temp.from_3], force_3);
-    frc[v_temp.virtual_atom] = Vec3(0.0, 0.0, 0.0);
+    frc[v_temp.virtual_atom] = from_v3(Vec3(0.0, 0.0, 0.0));
 }

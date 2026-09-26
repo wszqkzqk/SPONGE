@@ -3,12 +3,12 @@ layout(set = 0, binding = 1, std430) buffer RotRef { Vec3 rotated_reference[]; }
 layout(set = 0, binding = 2, std430) buffer Value { float d_value[]; };
 layout(set = 0, binding = 3, std430) buffer Atom { int atom[]; };
 layout(set = 0, binding = 4, std430) buffer CrdGrads { Vec3 crd_grads[]; };
-layout(set = 0, binding = 5, std430) buffer Virial { LTMat virial[]; };
+layout(set = 0, binding = 5, std430) buffer Virial { LTMatA virial[]; };
 layout(push_constant) uniform Params { int atom_numbers; } pc;
 void main()
 {
     uint tid = gl_LocalInvocationID.x;
-    if (tid == 0u) virial[0] = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    if (tid == 0u) virial[0] = from_lt(LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
     barrier();
     float rmsd = 0.0;
     for (int i = int(tid); i < pc.atom_numbers; i += int(gl_WorkGroupSize.x))

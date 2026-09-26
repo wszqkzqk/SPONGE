@@ -8,7 +8,7 @@ struct ConstrainPair
 layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
 layout(set = 0, binding = 1, std430) buffer Pairs { ConstrainPair constrain_pair[]; };
 layout(set = 0, binding = 2, std430) buffer PairDr { Vec3 pair_dr[]; };
-layout(set = 0, binding = 3, std430) buffer TestFrc { Vec3 test_frc[]; };
+layout(set = 0, binding = 3, std430) buffer TestFrc { Vec3A test_frc[]; };
 layout(push_constant) uniform Params
 {
     int constrain_pair_numbers;

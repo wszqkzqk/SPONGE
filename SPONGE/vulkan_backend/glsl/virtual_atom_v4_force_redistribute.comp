@@ -1,6 +1,6 @@
 layout(set = 0, binding = 0, std430) buffer FromAtoms { int from_atoms[]; };
 layout(set = 0, binding = 1, std430) buffer Weight { float weight[]; };
-layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3A frc[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;
@@ -9,7 +9,7 @@ layout(push_constant) uniform Params
 pc;
 void main()
 {
-    Vec3 new_force = frc[pc.virtual_atom];
+    Vec3 new_force = to_v3(frc[pc.virtual_atom]);
     for (int i = int(gl_LocalInvocationID.x); i < pc.atom_numbers;
          i += int(gl_WorkGroupSize.x))
     {
@@ -17,5 +17,5 @@ void main()
     }
     barrier();
     if (gl_LocalInvocationID.x == 0u)
-        frc[pc.virtual_atom] = Vec3(0.0, 0.0, 0.0);
+        frc[pc.virtual_atom] = from_v3(Vec3(0.0, 0.0, 0.0));
 }

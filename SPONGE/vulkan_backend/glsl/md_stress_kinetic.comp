@@ -1,6 +1,6 @@
 layout(set = 0, binding = 0, std430) buffer Vel { Vec3 vel[]; };
 layout(set = 0, binding = 1, std430) buffer Mass { float mass[]; };
-layout(set = 0, binding = 2, std430) buffer Stress { LTMat stress[]; };
+layout(set = 0, binding = 2, std430) buffer Stress { LTMatA stress[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

@@ -3,9 +3,9 @@ layout(set = 0, binding = 1, std430) buffer AtomA { int atom_a[]; };
 layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
 layout(set = 0, binding = 3, std430) buffer K { float bond_k[]; };
 layout(set = 0, binding = 4, std430) buffer R0 { float bond_r0[]; };
-layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 6, std430) buffer AtomEnergy { float atom_energy[]; };
-layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomEnergy { floatA atom_energy[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(set = 0, binding = 8, std430) buffer BondEne { float bond_ene[]; };
 layout(push_constant) uniform Params
 {

@@ -1,6 +1,6 @@
 layout(set = 0, binding = 0, std430) buffer A_ { Vec3 A[]; };
 layout(set = 0, binding = 1, std430) buffer B_ { Vec3 B[]; };
-layout(set = 0, binding = 2, std430) buffer Cov { float covariance[]; };
+layout(set = 0, binding = 2, std430) buffer Cov { floatA covariance[]; };
 layout(push_constant) uniform Params { int atom_numbers; } pc;
 void main()
 {

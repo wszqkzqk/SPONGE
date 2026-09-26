@@ -11,8 +11,8 @@ layout(set = 0, binding = 9, std430) buffer DboPiDr { float dbo_pi_dr[]; };
 layout(set = 0, binding = 10, std430) buffer DboPi2Dr { float dbo_pi2_dr[]; };
 layout(set = 0, binding = 11, std430) buffer DboRawTotalDr { float dbo_raw_total_dr[]; };
 layout(set = 0, binding = 12, std430) buffer CdDeltaPrime { float CdDelta_prime[]; };
-layout(set = 0, binding = 13, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 14, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 13, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 14, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(push_constant) uniform Params
 {
     int num_pairs;

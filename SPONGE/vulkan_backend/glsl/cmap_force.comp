@@ -8,10 +8,10 @@ layout(set = 0, binding = 6, std430) buffer CmapType { int cmap_type[]; };
 layout(set = 0, binding = 7, std430) buffer Resolution { int resolution[]; };
 layout(set = 0, binding = 8, std430) buffer TypeOffset { int type_offset[]; };
 layout(set = 0, binding = 9, std430) buffer InterCoeff { float inter_coeff[]; };
-layout(set = 0, binding = 10, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 11, std430) buffer AtomEnergy { float ene[]; };
+layout(set = 0, binding = 10, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 11, std430) buffer AtomEnergy { floatA ene[]; };
 layout(set = 0, binding = 12, std430) buffer CmapEne { float cmap_ene[]; };
-layout(set = 0, binding = 13, std430) buffer AtomVirial { LTMat virial[]; };
+layout(set = 0, binding = 13, std430) buffer AtomVirial { LTMatA virial[]; };
 layout(push_constant) uniform Params
 {
     int cmap_numbers;

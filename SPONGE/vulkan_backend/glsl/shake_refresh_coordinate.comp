@@ -1,6 +1,6 @@
 layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
 layout(set = 0, binding = 1, std430) buffer TestCrd { Vec3 test_crd[]; };
-layout(set = 0, binding = 2, std430) buffer TestFrc { Vec3 test_frc[]; };
+layout(set = 0, binding = 2, std430) buffer TestFrc { Vec3A test_frc[]; };
 layout(set = 0, binding = 3, std430) buffer MassInverse { float mass_inverse[]; };
 layout(push_constant) uniform Params
 {
@@ -13,7 +13,7 @@ void main()
     int atom_i = int(gl_GlobalInvocationID.x);
     if (atom_i >= pc.atom_numbers) return;
     Vec3 crd_lin = crd[atom_i];
-    Vec3 frc_lin = test_frc[atom_i];
+    Vec3 frc_lin = to_v3(test_frc[atom_i]);
     float mass_lin = mass_inverse[atom_i];
     test_crd[atom_i] = v3_add(crd_lin, v3_scale(frc_lin, pc.x_factor * mass_lin));
 }

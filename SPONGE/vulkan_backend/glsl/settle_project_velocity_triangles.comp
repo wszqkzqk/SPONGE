@@ -13,7 +13,7 @@ layout(set = 0, binding = 0, std430) buffer Triangles { ConstrainTriangle triang
 layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
 layout(set = 0, binding = 2, std430) buffer MassInverse { float mass_inverse[]; };
 layout(set = 0, binding = 3, std430) buffer Vel { Vec3 vel[]; };
-layout(set = 0, binding = 4, std430) buffer DeltaVel { Vec3 delta_vel[]; };
+layout(set = 0, binding = 4, std430) buffer DeltaVel { Vec3A delta_vel[]; };
 layout(set = 0, binding = 5, std430) buffer Violation { int violation[]; };
 layout(push_constant) uniform Params
 {

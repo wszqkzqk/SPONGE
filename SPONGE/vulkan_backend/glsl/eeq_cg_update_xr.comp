@@ -6,7 +6,7 @@ layout(set = 0, binding = 4, std430) buffer Z { float z[]; };
 layout(set = 0, binding = 5, std430) buffer Eta { float eta[]; };
 layout(set = 0, binding = 6, std430) buffer AtomTypes { int atom_types[]; };
 layout(set = 0, binding = 7, std430) buffer DAlpha { float d_alpha[]; };
-layout(set = 0, binding = 8, std430) buffer RzOut { float rz_out[]; };
+layout(set = 0, binding = 8, std430) buffer RzOut { floatA rz_out[]; };
 layout(push_constant) uniform Params { int n; } pc;
 void main()
 {

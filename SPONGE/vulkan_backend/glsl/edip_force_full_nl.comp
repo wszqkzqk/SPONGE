@@ -1,13 +1,13 @@
 layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
 layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
 layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
-layout(set = 0, binding = 3, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 4, std430) buffer Z { float z_dedz[]; };
-layout(set = 0, binding = 5, std430) buffer AtomEnergy { float atom_energy[]; };
-layout(set = 0, binding = 6, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 3, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 4, std430) buffer Z { floatA z_dedz[]; };
+layout(set = 0, binding = 5, std430) buffer AtomEnergy { floatA atom_energy[]; };
+layout(set = 0, binding = 6, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(set = 0, binding = 7, std430) buffer AtomTypes { int atom_types[]; };
 layout(set = 0, binding = 8, std430) buffer Parameters { float parameters[]; };
-layout(set = 0, binding = 9, std430) buffer ThisEnergy { float this_energy[]; };
+layout(set = 0, binding = 9, std430) buffer ThisEnergy { floatA this_energy[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;
@@ -29,7 +29,7 @@ void main()
     int base = atom_i * pc.max_neighbor_numbers;
     Vec3 ri = crd[atom_i];
     float local_energy = 0.0;
-    float zi = z_dedz[atom_i];
+    float zi = to_float(z_dedz[atom_i]);
     float dE_dzi = 0.0;
     Vec3 i_force = v3(0.0, 0.0, 0.0);
     LTMat local_virial = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -39,7 +39,7 @@ void main()
         Vec3 j_force = v3(0.0, 0.0, 0.0);
         float dE_dzj = 0.0;
         int atom_j = nl_serial[base + j];
-        float zj = z_dedz[atom_j];
+        float zj = to_float(z_dedz[atom_j]);
         int type_j = atom_types[atom_j];
         Vec3 rj = crd[atom_j];
         Vec3 drij = get_displacement_periodic(ri, rj, pc.boundary);

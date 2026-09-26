@@ -1,8 +1,8 @@
 layout(set = 0, binding = 0, std430) buffer Charge { float charge[]; };
 layout(set = 0, binding = 1, std430) buffer EffectiveRadius { float effective_radius[]; };
-layout(set = 0, binding = 2, std430) buffer AtomEne { float atom_ene[]; };
-layout(set = 0, binding = 3, std430) buffer DeDa { float de_da[]; };
-layout(set = 0, binding = 4, std430) buffer ThisEne { float this_ene[]; };
+layout(set = 0, binding = 2, std430) buffer AtomEne { floatA atom_ene[]; };
+layout(set = 0, binding = 3, std430) buffer DeDa { floatA de_da[]; };
+layout(set = 0, binding = 4, std430) buffer ThisEne { floatA this_ene[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

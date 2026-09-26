@@ -1,7 +1,7 @@
 layout(set = 0, binding = 0, std430) buffer CvValue { float cv_value[]; };
 layout(set = 0, binding = 1, std430) buffer CrdGrads { Vec3 crd_grads[]; };
-layout(set = 0, binding = 2, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 3, std430) buffer Energy { float energy[]; };
+layout(set = 0, binding = 2, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 3, std430) buffer Energy { floatA energy[]; };
 layout(set = 0, binding = 4, std430) buffer SelfEne { float self_ene[]; };
 layout(push_constant) uniform Params
 {
@@ -17,7 +17,7 @@ void main()
     {
         if (pc.need_potential != 0)
         {
-            atomicAdd(energy[0], pc.weight * cv_value[0]);
+            afadd(energy[0], pc.weight * cv_value[0]);
             self_ene[pc.ene_index] = pc.weight * cv_value[0];
         }
     }

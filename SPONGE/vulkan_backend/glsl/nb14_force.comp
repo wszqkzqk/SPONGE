@@ -5,9 +5,9 @@ layout(set = 0, binding = 3, std430) buffer CfScale { float cf_scale_factor[]; }
 layout(set = 0, binding = 4, std430) buffer Charge { float charge[]; };
 layout(set = 0, binding = 5, std430) buffer LjA { float lj_A[]; };
 layout(set = 0, binding = 6, std430) buffer LjB { float lj_B[]; };
-layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 8, std430) buffer AtomEnergy { float atom_energy[]; };
-layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 8, std430) buffer AtomEnergy { floatA atom_energy[]; };
+layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(set = 0, binding = 10, std430) buffer Nb14CfEne { float nb14_cf_ene[]; };
 layout(set = 0, binding = 11, std430) buffer Nb14LjEne { float nb14_lj_ene[]; };
 layout(push_constant) uniform Params

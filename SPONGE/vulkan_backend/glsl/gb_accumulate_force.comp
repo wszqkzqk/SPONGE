@@ -3,7 +3,7 @@ layout(set = 0, binding = 1, std430) buffer SelfRadius { float self_radius[]; };
 layout(set = 0, binding = 2, std430) buffer OtherRadius { float other_radius[]; };
 layout(set = 0, binding = 3, std430) buffer EffectiveRadius { float effective_radius[]; };
 layout(set = 0, binding = 4, std430) buffer DeDa { float de_da[]; };
-layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3A frc[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

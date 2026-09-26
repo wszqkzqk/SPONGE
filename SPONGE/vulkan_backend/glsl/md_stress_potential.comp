@@ -2,7 +2,7 @@ layout(set = 0, binding = 0, std430) buffer AtomVirial
 {
     LTMat atom_virial[];
 };
-layout(set = 0, binding = 1, std430) buffer Virial { LTMat virial[]; };
+layout(set = 0, binding = 1, std430) buffer Virial { LTMatA virial[]; };
 layout(push_constant) uniform Params { int atom_numbers; } pc;
 void main()
 {

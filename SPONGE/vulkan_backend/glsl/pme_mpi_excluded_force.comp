@@ -3,10 +3,10 @@ layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
 layout(set = 0, binding = 2, std430) buffer ExclStart { int excluded_list_start[]; };
 layout(set = 0, binding = 3, std430) buffer ExclList { int excluded_list[]; };
 layout(set = 0, binding = 4, std430) buffer ExclNum { int excluded_atom_numbers[]; };
-layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 6, std430) buffer AtomEne { float atom_ene[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomEne { floatA atom_ene[]; };
 layout(set = 0, binding = 7, std430) buffer ThisEne { float this_ene[]; };
-layout(set = 0, binding = 8, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 8, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

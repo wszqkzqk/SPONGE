@@ -1,6 +1,6 @@
 layout(set = 0, binding = 0, std430) buffer VirialBC { LTMat virial_bc[]; };
 layout(set = 0, binding = 1, std430) buffer FQ { vec2 fq[]; };
-layout(set = 0, binding = 2, std430) buffer Virial { LTMat virial[]; };
+layout(set = 0, binding = 2, std430) buffer Virial { LTMatA virial[]; };
 layout(push_constant) uniform Params { int nfft; int fftz; } pc;
 void main()
 {

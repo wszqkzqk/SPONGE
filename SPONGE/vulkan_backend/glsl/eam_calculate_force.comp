@@ -9,7 +9,7 @@ layout(set = 0, binding = 7, std430) buffer Rho { float d_rho[]; };
 layout(set = 0, binding = 8, std430) buffer DfDrho { float d_df_drho[]; };
 layout(set = 0, binding = 9, std430) buffer AtomEnergy { float atom_energy[]; };
 layout(set = 0, binding = 10, std430) buffer AtomVirial { LTMat atom_virial[]; };
-layout(set = 0, binding = 11, std430) buffer EnergySum { float d_energy_sum[]; };
+layout(set = 0, binding = 11, std430) buffer EnergySum { floatA d_energy_sum[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

@@ -773,14 +773,13 @@ int setWorkingDevice(int device_index)
     vkGetPhysicalDeviceFeatures2(S().physical_device, &features2);
     if (S().atomic_float && !atomic_features.shaderBufferFloat32AtomicAdd)
         S().atomic_float = false;
+    if (getenv("SPONGE_VK_NO_ATOMIC_FLOAT") != nullptr) S().atomic_float = false;
     if (!(subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
         !(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) ||
         !(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) ||
         !(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) ||
         !(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT))
         Fail("device lacks required subgroup operations");
-    if (!S().atomic_float)
-        Fail("device lacks VK_EXT_shader_atomic_float (float32 atomic add)");
 
     S().float64 = features2.features.shaderFloat64 == VK_TRUE;
     S().subgroup_size = subgroup.subgroupSize;

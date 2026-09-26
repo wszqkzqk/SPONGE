@@ -13,7 +13,7 @@ layout(set = 0, binding = 11, std430) buffer Bo5 { float bo_5[]; };
 layout(set = 0, binding = 12, std430) buffer Bo6 { float bo_6[]; };
 layout(set = 0, binding = 13, std430) buffer RoPi { float ro_pi[]; };
 layout(set = 0, binding = 14, std430) buffer RoPi2 { float ro_pi2[]; };
-layout(set = 0, binding = 15, std430) buffer TotalBO { float total_bond_order[]; };
+layout(set = 0, binding = 15, std430) buffer TotalBO { floatA total_bond_order[]; };
 layout(set = 0, binding = 16, std430) buffer PairI { int pair_i[]; };
 layout(set = 0, binding = 17, std430) buffer PairJ { int pair_j[]; };
 layout(set = 0, binding = 18, std430) buffer Distances { float distances[]; };

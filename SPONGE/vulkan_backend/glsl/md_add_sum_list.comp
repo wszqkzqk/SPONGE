@@ -1,5 +1,5 @@
 layout(set = 0, binding = 0, std430) buffer List { float atom_virial[]; };
-layout(set = 0, binding = 1, std430) buffer Sum { float sum_virial[]; };
+layout(set = 0, binding = 1, std430) buffer Sum { floatA sum_virial[]; };
 layout(push_constant) uniform Params { int n; } pc;
 void main()
 {

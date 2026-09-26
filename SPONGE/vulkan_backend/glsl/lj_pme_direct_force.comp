@@ -9,11 +9,11 @@ layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
 layout(set = 0, binding = 2, std430) buffer Crd { VecLJ crd[]; };
 layout(set = 0, binding = 3, std430) buffer LJA { float lj_a[]; };
 layout(set = 0, binding = 4, std430) buffer LJB { float lj_b[]; };
-layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 6, std430) buffer AtomEnergy { float atom_energy[]; };
-layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
-layout(set = 0, binding = 8, std430) buffer DirectCFEnergy { float atom_direct_cf_energy[]; };
-layout(set = 0, binding = 9, std430) buffer LJEne { float atom_lj_ene[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomEnergy { floatA atom_energy[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMatA atom_virial[]; };
+layout(set = 0, binding = 8, std430) buffer DirectCFEnergy { floatA atom_direct_cf_energy[]; };
+layout(set = 0, binding = 9, std430) buffer LJEne { floatA atom_lj_ene[]; };
 layout(push_constant) uniform Params
 {
     int local_atom_numbers;

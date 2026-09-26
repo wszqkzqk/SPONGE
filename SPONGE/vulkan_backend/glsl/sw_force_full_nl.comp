@@ -1,12 +1,12 @@
 layout(set = 0, binding = 0, std430) buffer NL { AtomGroup nl[]; };
 layout(set = 0, binding = 1, std430) buffer NLSerial { int nl_serial[]; };
 layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
-layout(set = 0, binding = 3, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 4, std430) buffer AtomEnergy { float atom_energy[]; };
-layout(set = 0, binding = 5, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 3, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 4, std430) buffer AtomEnergy { floatA atom_energy[]; };
+layout(set = 0, binding = 5, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(set = 0, binding = 6, std430) buffer AtomTypes { int atom_types[]; };
 layout(set = 0, binding = 7, std430) buffer Parameters { float parameters[]; };
-layout(set = 0, binding = 8, std430) buffer ThisEnergy { float this_energy[]; };
+layout(set = 0, binding = 8, std430) buffer ThisEnergy { floatA this_energy[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;
@@ -136,8 +136,8 @@ void main()
         float esum = subgroupAdd(local_energy);
         if (gl_SubgroupInvocationID == 0u)
         {
-            atomicAdd(atom_energy[atom_i], esum);
-            atomicAdd(this_energy[atom_i + 1], esum);
+            afadd(atom_energy[atom_i], esum);
+            afadd(this_energy[atom_i + 1], esum);
         }
     }
     if (pc.need_virial != 0) warp_aadd_lt(atom_virial[atom_i], local_virial);

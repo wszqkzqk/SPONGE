@@ -5,10 +5,10 @@ layout(set = 0, binding = 3, std430) buffer AtomC { int atom_c[]; };
 layout(set = 0, binding = 4, std430) buffer AtomD { int atom_d[]; };
 layout(set = 0, binding = 5, std430) buffer Pk { float pk[]; };
 layout(set = 0, binding = 6, std430) buffer Phi0 { float phi0[]; };
-layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 8, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 8, std430) buffer AtomEnergy { floatA atom_energy[]; };
 layout(set = 0, binding = 9, std430) buffer DiEne { float di_ene[]; };
-layout(set = 0, binding = 10, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 10, std430) buffer AtomVirial { LTMatA atom_virial[]; };
 layout(push_constant) uniform Params
 {
     int dihedral_numbers;

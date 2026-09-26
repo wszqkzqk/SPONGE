@@ -97,6 +97,16 @@ LTMat virial_from_force_dis(Vec3 f, Vec3 dr)
     return m;
 }
 
+#if SPONGE_VK_ATOMIC_FLOAT
+#define Vec3A Vec3
+#define LTMatA LTMat
+#define floatA float
+Vec3 to_v3(Vec3 v) { return v; }
+LTMat to_lt(LTMat m) { return m; }
+Vec3A from_v3(Vec3 v) { return v; }
+LTMatA from_lt(LTMat m) { return m; }
+float to_float(floatA v) { return v; }
+floatA from_float(float v) { return v; }
 #define afadd(slot, v) atomicAdd(slot, v)
 #define aadd_v3(slot, v)                       \
     do                                         \
@@ -115,6 +125,83 @@ LTMat virial_from_force_dis(Vec3 f, Vec3 dr)
         atomicAdd((slot).a32, (m).a32); \
         atomicAdd((slot).a33, (m).a33); \
     } while (false)
+#else
+struct Vec3U
+{
+    uint x, y, z;
+};
+struct LTMatU
+{
+    uint a11, a21, a22, a31, a32, a33;
+};
+#define Vec3A Vec3U
+#define LTMatA LTMatU
+#define floatA uint
+Vec3 to_v3(Vec3U v)
+{
+    return Vec3(uintBitsToFloat(v.x), uintBitsToFloat(v.y),
+                uintBitsToFloat(v.z));
+}
+LTMat to_lt(LTMatU m)
+{
+    LTMat r;
+    r.a11 = uintBitsToFloat(m.a11);
+    r.a21 = uintBitsToFloat(m.a21);
+    r.a22 = uintBitsToFloat(m.a22);
+    r.a31 = uintBitsToFloat(m.a31);
+    r.a32 = uintBitsToFloat(m.a32);
+    r.a33 = uintBitsToFloat(m.a33);
+    return r;
+}
+Vec3A from_v3(Vec3 v)
+{
+    return Vec3U(floatBitsToUint(v.x), floatBitsToUint(v.y),
+                 floatBitsToUint(v.z));
+}
+LTMatA from_lt(LTMat m)
+{
+    LTMatU r;
+    r.a11 = floatBitsToUint(m.a11);
+    r.a21 = floatBitsToUint(m.a21);
+    r.a22 = floatBitsToUint(m.a22);
+    r.a31 = floatBitsToUint(m.a31);
+    r.a32 = floatBitsToUint(m.a32);
+    r.a33 = floatBitsToUint(m.a33);
+    return r;
+}
+float to_float(uint v) { return uintBitsToFloat(v); }
+uint from_float(float v) { return floatBitsToUint(v); }
+#define cas_afadd(mem, d)                                              \
+    do                                                                 \
+    {                                                                  \
+        uint old_ = mem;                                                \
+        while (true)                                                   \
+        {                                                              \
+            uint want_ = floatBitsToUint(uintBitsToFloat(old_) + (d)); \
+            uint prev_ = atomicCompSwap(mem, old_, want_);             \
+            if (prev_ == old_) break;                                  \
+            old_ = prev_;                                              \
+        }                                                              \
+    } while (false)
+#define afadd(slot, v) cas_afadd(slot, v)
+#define aadd_v3(slot, v)           \
+    do                             \
+    {                              \
+        cas_afadd((slot).x, (v).x); \
+        cas_afadd((slot).y, (v).y); \
+        cas_afadd((slot).z, (v).z); \
+    } while (false)
+#define aadd_lt(slot, m)               \
+    do                                 \
+    {                                  \
+        cas_afadd((slot).a11, (m).a11); \
+        cas_afadd((slot).a21, (m).a21); \
+        cas_afadd((slot).a22, (m).a22); \
+        cas_afadd((slot).a31, (m).a31); \
+        cas_afadd((slot).a32, (m).a32); \
+        cas_afadd((slot).a33, (m).a33); \
+    } while (false)
+#endif
 
 uvec2 u64_add(uvec2 a, uvec2 b)
 {
@@ -621,7 +708,7 @@ Vec3 v3_mul_transpose_lt(Vec3 v, float a11, float a21, float a22, float a31,
     do                                                           \
     {                                                            \
         float wsum_ = subgroupAdd(v);                            \
-        if (gl_SubgroupInvocationID == 0u) atomicAdd(slot, wsum_); \
+        if (gl_SubgroupInvocationID == 0u) afadd(slot, wsum_); \
     } while (false)
 #define warp_aadd_v3(slot, v)                                \
     do                                                       \

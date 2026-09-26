@@ -14,15 +14,15 @@ layout(set = 0, binding = 3, std430) buffer LJAA { float lj_aa[]; };
 layout(set = 0, binding = 4, std430) buffer LJAB { float lj_ab[]; };
 layout(set = 0, binding = 5, std430) buffer LJBA { float lj_ba[]; };
 layout(set = 0, binding = 6, std430) buffer LJBB { float lj_bb[]; };
-layout(set = 0, binding = 7, std430) buffer Frc { Vec3 frc[]; };
-layout(set = 0, binding = 8, std430) buffer AtomEnergy { float atom_energy[]; };
-layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMat atom_virial[]; };
-layout(set = 0, binding = 10, std430) buffer DirectCFEnergy { float atom_direct_cf_energy[]; };
-layout(set = 0, binding = 11, std430) buffer DuDlLJ { float du_dl_lj[]; };
-layout(set = 0, binding = 12, std430) buffer DuDlDirect { float du_dl_direct[]; };
-layout(set = 0, binding = 13, std430) buffer ThisEnergy { float this_energy[]; };
-layout(set = 0, binding = 14, std430) buffer Intersys { float atom_energy_intersys[]; };
-layout(set = 0, binding = 15, std430) buffer Intrasys { float atom_energy_intrasys[]; };
+layout(set = 0, binding = 7, std430) buffer Frc { Vec3A frc[]; };
+layout(set = 0, binding = 8, std430) buffer AtomEnergy { floatA atom_energy[]; };
+layout(set = 0, binding = 9, std430) buffer AtomVirial { LTMatA atom_virial[]; };
+layout(set = 0, binding = 10, std430) buffer DirectCFEnergy { floatA atom_direct_cf_energy[]; };
+layout(set = 0, binding = 11, std430) buffer DuDlLJ { floatA du_dl_lj[]; };
+layout(set = 0, binding = 12, std430) buffer DuDlDirect { floatA du_dl_direct[]; };
+layout(set = 0, binding = 13, std430) buffer ThisEnergy { floatA this_energy[]; };
+layout(set = 0, binding = 14, std430) buffer Intersys { floatA atom_energy_intersys[]; };
+layout(set = 0, binding = 15, std430) buffer Intrasys { floatA atom_energy_intrasys[]; };
 layout(push_constant) uniform Params
 {
     int atom_numbers;

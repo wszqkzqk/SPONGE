@@ -40,6 +40,7 @@ struct VulkanState
 
     bool atomic_float = false;
     bool float64 = false;
+    bool discrete = false;
     uint32_t subgroup_size = 32;
     uint32_t max_workgroup_invocations = 1024;
     uint32_t max_push_constants_size = 128;
@@ -154,7 +155,8 @@ void EnsureStaging(VkDeviceSize size)
     while (new_size < size) new_size *= 2;
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = new_size;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VK_CHECK(vkCreateBuffer(S().device, &buffer_info, nullptr, &S().staging));
     VkMemoryRequirements reqs;
@@ -445,15 +447,41 @@ void CopyDeviceToHost(void* dst, const void* src, size_t size,
     SubmitAndWaitImpl(&g_default_stream);
     for (auto& [_, other] : g_streams) SubmitAndWaitImpl(other);
     const auto* alloc = sponge_vk::AllocationOf(src);
-    memcpy(dst, alloc->mapped, size);
+    if (alloc->mapped != nullptr)
+    {
+        memcpy(dst, alloc->mapped, size);
+        return;
+    }
+    EnsureStaging(size);
+    EnsureRecordingImpl(&g_default_stream);
+    PipelineBarrierComputeToTransfer(&g_default_stream);
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(g_default_stream.cb, alloc->buffer, S().staging, 1,
+                    &region);
+    PipelineBarrierTransferToCompute(&g_default_stream);
+    SubmitAndWaitImpl(&g_default_stream);
+    memcpy(dst, S().staging_mapped, size);
 }
 
 void CopyDeviceToHostAsync(void* dst, const void* src, size_t size,
                            StreamState* stream)
 {
-    SubmitAndWaitImpl(stream);
+    SubmitAndWaitImpl(&g_default_stream);
+    for (auto& [_, other] : g_streams) SubmitAndWaitImpl(other);
     const auto* alloc = sponge_vk::AllocationOf(src);
-    memcpy(dst, alloc->mapped, size);
+    if (alloc->mapped != nullptr)
+    {
+        memcpy(dst, alloc->mapped, size);
+        return;
+    }
+    EnsureStaging(size);
+    EnsureRecordingImpl(stream);
+    PipelineBarrierComputeToTransfer(stream);
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(stream->cb, alloc->buffer, S().staging, 1, &region);
+    PipelineBarrierTransferToCompute(stream);
+    SubmitAndWaitImpl(stream);
+    memcpy(dst, S().staging_mapped, size);
 }
 
 void CopyDeviceToDevice(void* dst, const void* src, size_t size,
@@ -781,6 +809,27 @@ int setWorkingDevice(int device_index)
         !(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT))
         Fail("device lacks required subgroup operations");
 
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(S().physical_device, &mem_props);
+    VkDeviceSize device_local = 0, host_visible = 0;
+    for (uint32_t i = 0; i < mem_props.memoryHeapCount; i++)
+        if (mem_props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            device_local += mem_props.memoryHeaps[i].size;
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++)
+    {
+        const VkMemoryPropertyFlags flags = mem_props.memoryTypes[i].propertyFlags;
+        if ((flags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+            (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+            host_visible += mem_props.memoryHeaps[mem_props.memoryTypes[i]
+                                                       .heapIndex]
+                                .size;
+    }
+    S().discrete = host_visible * 4 < device_local;
+
     S().float64 = features2.features.shaderFloat64 == VK_TRUE;
     S().subgroup_size = subgroup.subgroupSize;
     S().max_workgroup_invocations =
@@ -841,13 +890,17 @@ deviceError_t deviceMalloc(void** ptr, size_t size)
         return 1;
     VkMemoryRequirements reqs;
     vkGetBufferMemoryRequirements(S().device, buffer, &reqs);
+    const bool host_visible =
+        !S().discrete || size <= (VkDeviceSize(64) << 20);
     VkMemoryAllocateInfo alloc_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     alloc_info.allocationSize = reqs.size;
     alloc_info.memoryTypeIndex =
-        FindMemoryType(reqs.memoryTypeBits,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        host_visible ? FindMemoryType(reqs.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                     : FindMemoryType(reqs.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
     VkDeviceMemory memory;
     if (vkAllocateMemory(S().device, &alloc_info, nullptr, &memory) !=
         VK_SUCCESS)
@@ -857,10 +910,13 @@ deviceError_t deviceMalloc(void** ptr, size_t size)
     }
     VK_CHECK(vkBindBufferMemory(S().device, buffer, memory, 0));
     void* mapped = nullptr;
-    VK_CHECK(vkMapMemory(S().device, memory, 0, size, 0, &mapped));
-    S().allocations.emplace(mapped, sponge_vk::Allocation{buffer, memory,
-                                                          reqs.size, mapped});
-    *ptr = mapped;
+    if (host_visible)
+        VK_CHECK(vkMapMemory(S().device, memory, 0, size, 0, &mapped));
+    void* token = host_visible ? mapped : (void*)buffer;
+    S().allocations.emplace(token,
+                            sponge_vk::Allocation{buffer, memory, reqs.size,
+                                                  mapped});
+    *ptr = token;
     return 0;
 }
 

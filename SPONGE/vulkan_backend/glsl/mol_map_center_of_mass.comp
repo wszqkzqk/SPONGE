@@ -1,0 +1,48 @@
+layout(set = 0, binding = 0, std430) buffer Start { int start[]; };
+layout(set = 0, binding = 1, std430) buffer End { int end[]; };
+layout(set = 0, binding = 2, std430) buffer CenterOfMass { Vec3 center_of_mass[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 4, std430) buffer Periodicity { int periodicity[]; };
+layout(push_constant) uniform Params
+{
+    int residue_numbers;
+    float scaler;
+    int use_periodicity;
+    Boundary boundary;
+}
+pc;
+Vec3 map_point(Vec3 com)
+{
+    Vec3 frac = v3_mul_transpose_lt(com, pc.boundary.r11, pc.boundary.r21,
+                                    pc.boundary.r22, pc.boundary.r31,
+                                    pc.boundary.r32, pc.boundary.r33);
+    frac.x = frac.x - floor(frac.x);
+    frac.y = frac.y - floor(frac.y);
+    frac.z = frac.z - floor(frac.z);
+    return v3_mul_transpose_lt(frac, pc.boundary.a11, pc.boundary.a21,
+                               pc.boundary.a22, pc.boundary.a31,
+                               pc.boundary.a32, pc.boundary.a33);
+}
+void main()
+{
+    int residue_i = int(gl_GlobalInvocationID.x);
+    if (residue_i >= pc.residue_numbers) return;
+    if (pc.use_periodicity == 0 || periodicity[residue_i] == 0)
+    {
+        Vec3 com = center_of_mass[residue_i];
+        Vec3 trans = v3_sub(v3_scale(map_point(com), pc.scaler), com);
+        for (int atom_i = start[residue_i]; atom_i < end[residue_i];
+             ++atom_i)
+        {
+            crd[atom_i] = v3_add(crd[atom_i], trans);
+        }
+    }
+    else
+    {
+        for (int atom_i = start[residue_i]; atom_i < end[residue_i];
+             ++atom_i)
+        {
+            crd[atom_i] = v3_scale(map_point(crd[atom_i]), pc.scaler);
+        }
+    }
+}

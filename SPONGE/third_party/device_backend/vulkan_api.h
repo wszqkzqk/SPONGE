@@ -106,6 +106,14 @@ void* GraphCreate();
 void GraphBeginRecord(void* graph, deviceStream_t stream);
 void GraphEndRecord(void* graph);
 void GraphExecute(void* graph, deviceStream_t stream);
+struct SerialPoolInfo
+{
+    const void* pool;
+    int stride;
+};
+void RegisterSerialPool(const void* nl, const void* pool, int stride);
+SerialPoolInfo SerialPoolOf(const void* nl);
+size_t AllocationSize(const void* ptr);
 }  // namespace sponge_vk
 
 #define Launch_Device_Kernel(kernel, grid, block, sm_memory, stream, ...) \

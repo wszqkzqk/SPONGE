@@ -46,9 +46,7 @@ static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
 
 static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
 {
-    return atom_numbers > 1
-               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
-               : 0;
+    return sponge_vk::SerialPoolOf(nl).stride;
 }
 #endif
 
@@ -731,7 +729,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                                     atom_type_numbers,
                                     vk_nl_stride(fnl_d_nl, atom_numbers)};
     const void* count_buffers[] = {d_crd,         d_atom_type, d_shield,
-                                   fnl_d_nl,      fnl_d_nl[0].atom_serial,
+                                   fnl_d_nl,      sponge_vk::SerialPoolOf(fnl_d_nl).pool,
                                    d_h_numnbrs};
     VK_LAUNCH(eeq_count_h_matrix, gridSize.x, 1, blockSize.x, 1, count_buffers,
               &count_params, NULL);
@@ -784,7 +782,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                                        atom_type_numbers,
                                        vk_nl_stride(fnl_d_nl, atom_numbers)};
         const void* fill_buffers[] = {d_crd,      d_atom_type, d_shield,
-                                      fnl_d_nl,   fnl_d_nl[0].atom_serial,
+                                      fnl_d_nl,   sponge_vk::SerialPoolOf(fnl_d_nl).pool,
                                       d_h_firstnbrs, d_h_jlist, d_h_val};
         VK_LAUNCH(eeq_fill_h_matrix, gridSize.x, 1, blockSize.x, 1,
                   fill_buffers, &fill_params, NULL);
@@ -1219,7 +1217,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                                        d_q,
                                        frc,
                                        fnl_d_nl,
-                                       fnl_d_nl[0].atom_serial,
+                                       sponge_vk::SerialPoolOf(fnl_d_nl).pool,
                                        vk_or_dummy(atom_virial, frc)};
         VK_LAUNCH(eeq_force, gridSize.x, 1, blockSize.x, 1, force_buffers,
                   &force_params, NULL);

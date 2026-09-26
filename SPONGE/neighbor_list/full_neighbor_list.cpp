@@ -39,6 +39,9 @@ void FULL_NEIGHBOR_LIST::Initial(int atom_numbers, int max_neighbor_numbers)
     }
     Device_Malloc_And_Copy_Safely((void**)&d_nl, h_nl,
                                   sizeof(ATOM_GROUP) * atom_numbers);
+#ifdef USE_VULKAN
+    sponge_vk::RegisterSerialPool(d_nl, d_temp, max_neighbor_numbers);
+#endif
     int h_overflow = 0;
     Device_Malloc_And_Copy_Safely((void**)&d_overflow, &h_overflow,
                                   sizeof(int));

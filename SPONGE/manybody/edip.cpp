@@ -44,9 +44,7 @@ static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
 
 static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
 {
-    return atom_numbers > 1
-               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
-               : 0;
+    return sponge_vk::SerialPoolOf(nl).stride;
 }
 #endif
 
@@ -581,7 +579,7 @@ void EDIP_INFORMATION::EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
 #ifdef USE_VULKAN
     EdipGetZVkParams gz_params{atom_numbers, boundary, atom_type_numbers,
                                vk_nl_stride(fnl_d_nl, atom_numbers)};
-    const void* gz_buffers[] = {fnl_d_nl, fnl_d_nl[0].atom_serial, crd,
+    const void* gz_buffers[] = {fnl_d_nl, sponge_vk::SerialPoolOf(fnl_d_nl).pool, crd,
                                 this->d_parameters, this->d_atom_type,
                                 this->z};
     VK_LAUNCH(edip_get_z, gridSize.x, 1, blockSize.x, blockSize.y, gz_buffers,
@@ -592,7 +590,7 @@ void EDIP_INFORMATION::EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
                                pair_type_numbers,
                                vk_nl_stride(fnl_d_nl, atom_numbers)};
     const void* f_buffers[] = {fnl_d_nl,
-                               fnl_d_nl[0].atom_serial,
+                               sponge_vk::SerialPoolOf(fnl_d_nl).pool,
                                crd,
                                frc,
                                this->z,
@@ -608,7 +606,7 @@ void EDIP_INFORMATION::EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
                                       atom_type_numbers, need_virial,
                                       vk_nl_stride(fnl_d_nl, atom_numbers)};
     const void* r_buffers[] = {fnl_d_nl,
-                               fnl_d_nl[0].atom_serial,
+                               sponge_vk::SerialPoolOf(fnl_d_nl).pool,
                                crd,
                                this->d_parameters,
                                this->d_atom_type,

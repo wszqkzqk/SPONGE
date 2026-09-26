@@ -20,9 +20,7 @@ static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
 
 static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
 {
-    return atom_numbers > 1
-               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
-               : 0;
+    return sponge_vk::SerialPoolOf(nl).stride;
 }
 #endif
 
@@ -352,7 +350,7 @@ void REAXFF_BOND::REAXFF_Bond_Force_With_Atom_Energy_And_Virial(
                               atom_energy != NULL ? 1 : 0,
                               vk_nl_stride(nl, atom_numbers)};
     const void* buffers[] = {nl,
-                             nl[0].atom_serial,
+                             sponge_vk::SerialPoolOf(nl).pool,
                              d_atom_type,
                              d_twobody_params,
                              d_bo_s,

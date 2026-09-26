@@ -7,6 +7,42 @@
 #include "../utils/float_classification.hpp"
 #include "../utils/h5md/topology_custom_force_h5_materializer.hpp"
 
+#ifdef USE_VULKAN
+namespace
+{
+struct VkJitShadow
+{
+    std::vector<char> storage;
+    void* pull(const void* device_ptr, size_t size)
+    {
+        storage.resize(size);
+        deviceMemcpy(storage.data(), device_ptr, size,
+                     deviceMemcpyDeviceToHost);
+        return storage.data();
+    }
+    void push(const void* device_ptr, size_t size)
+    {
+        deviceMemcpy(const_cast<void*>(device_ptr), storage.data(), size,
+                     deviceMemcpyHostToDevice);
+    }
+};
+
+ATOM_GROUP* pull_neighbor_list(VkJitShadow& nl_shadow,
+                               VkJitShadow& pool_shadow, const ATOM_GROUP* nl)
+{
+    sponge_vk::SerialPoolInfo info = sponge_vk::SerialPoolOf(nl);
+    size_t nl_bytes = sponge_vk::AllocationSize(nl);
+    size_t pool_bytes = sponge_vk::AllocationSize(info.pool);
+    ATOM_GROUP* nl_host = (ATOM_GROUP*)nl_shadow.pull(nl, nl_bytes);
+    int* pool_host = (int*)pool_shadow.pull(info.pool, pool_bytes);
+    int nl_atoms = (int)(nl_bytes / sizeof(ATOM_GROUP));
+    for (int i = 0; i < nl_atoms; i++)
+        nl_host[i].atom_serial = pool_host + info.stride * i;
+    return nl_host;
+}
+}  // namespace
+#endif
+
 static __global__ void pairwise_force_scatter_types(
     const int total_numbers, const int* atom_local,
     const int* global_pairwise_types, int* local_pairwise_types)
@@ -501,7 +537,11 @@ void PAIRWISE_FORCE::Real_Initial(CONTROLLER* controller)
             Malloc_Safely((void**)cpu_parameters + j,
                           sizeof(float) * total_type_pairwise_numbers);
         }
+#ifdef USE_VULKAN
+        launch_args[j] = cpu_parameters + j;
+#else
         launch_args[j] = gpu_parameters + j;
+#endif
     }
     for (int j = 0; j < n_ij_parameter; j++)
     {
@@ -656,10 +696,55 @@ void PAIRWISE_FORCE::Compute_Force(ATOM_GROUP* nl, const VECTOR* crd,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     dim3 gridSize = (total_local_numbers + blockSize.y - 1) / blockSize.y;
 #ifdef USE_VULKAN
-    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
     sponge_vk::HostBarrier();
-#endif
+    VkJitShadow charge_shadow, types_shadow, crd_shadow, frc_shadow,
+        atom_energy_shadow, atom_virial_shadow, pme_shadow, item_energy_shadow,
+        nl_shadow, pool_shadow;
+    const size_t atom_bytes = sizeof(VECTOR) * local_atom_numbers;
+    float* charge_device = charge;
+    const VECTOR* crd_device = crd;
+    VECTOR* frc_device = frc;
+    float* atom_energy_device = atom_energy;
+    LTMatrix3* atom_virial_device = atom_virial;
+    float* pme_device = pme_ptr;
+    float* item_energy_device = listed_item_energy;
+    charge = (float*)charge_shadow.pull(charge_device,
+                                        sizeof(float) * local_atom_numbers);
+    int* types_device = gpu_pairwise_types_local;
+    int* types_host = (int*)types_shadow.pull(
+        types_device, sizeof(int) * local_atom_numbers);
+    launch_args[parameter_name.size() + 3] = &types_host;
+    crd = (VECTOR*)crd_shadow.pull(crd_device, atom_bytes);
+    frc = (VECTOR*)frc_shadow.pull(frc_device, atom_bytes);
+    if (atom_energy_device != NULL)
+        atom_energy = (float*)atom_energy_shadow.pull(
+            atom_energy_device, sizeof(float) * local_atom_numbers);
+    if (atom_virial_device != NULL)
+        atom_virial = (LTMatrix3*)atom_virial_shadow.pull(
+            atom_virial_device, sizeof(LTMatrix3) * local_atom_numbers);
+    if (pme_device != NULL)
+        pme_ptr = (float*)pme_shadow.pull(pme_device,
+                                          sizeof(float) * local_atom_numbers);
+    if (item_energy_device != NULL)
+        listed_item_energy = (float*)item_energy_shadow.pull(
+            item_energy_device, sizeof(float) * local_atom_numbers);
+    nl = pull_neighbor_list(nl_shadow, pool_shadow, nl);
     force_function(gridSize, blockSize, 0, 0, launch_args);
+    frc_shadow.push(frc_device, atom_bytes);
+    if (atom_energy_device != NULL)
+        atom_energy_shadow.push(atom_energy_device,
+                                sizeof(float) * local_atom_numbers);
+    if (atom_virial_device != NULL)
+        atom_virial_shadow.push(atom_virial_device,
+                                sizeof(LTMatrix3) * local_atom_numbers);
+    if (pme_device != NULL)
+        pme_shadow.push(pme_device, sizeof(float) * local_atom_numbers);
+    if (item_energy_device != NULL)
+        item_energy_shadow.push(item_energy_device,
+                                sizeof(float) * local_atom_numbers);
+#else
+    force_function(gridSize, blockSize, 0, 0, launch_args);
+#endif
 
     if (need_energy)
     {
@@ -713,10 +798,37 @@ float PAIRWISE_FORCE::Get_Energy(ATOM_GROUP* nl, const VECTOR* crd,
                       CONTROLLER::device_max_thread / CONTROLLER::device_warp};
     dim3 gridSize = (total_local_numbers + blockSize.y - 1) / blockSize.y;
 #ifdef USE_VULKAN
-    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
     sponge_vk::HostBarrier();
-#endif
+    VkJitShadow charge_shadow, types_shadow, crd_shadow, pme_shadow,
+        item_energy_shadow, nl_shadow, pool_shadow;
+    const size_t atom_bytes = sizeof(VECTOR) * local_atom_numbers;
+    float* charge_device = charge;
+    const VECTOR* crd_device = crd;
+    float* pme_device = pme_ptr;
+    charge = (float*)charge_shadow.pull(charge_device,
+                                        sizeof(float) * local_atom_numbers);
+    int* types_device = gpu_pairwise_types_local;
+    int* types_host = (int*)types_shadow.pull(
+        types_device, sizeof(int) * local_atom_numbers);
+    launch_args[parameter_name.size() + 3] = &types_host;
+    crd = (VECTOR*)crd_shadow.pull(crd_device, atom_bytes);
+    if (pme_device != NULL)
+        pme_ptr = (float*)pme_shadow.pull(pme_device,
+                                          sizeof(float) * local_atom_numbers);
+    float* item_energy_device = item_energy;
+    float* item_energy_host = (float*)item_energy_shadow.pull(
+        item_energy_device, sizeof(float) * local_atom_numbers);
+    launch_args[parameter_name.size() + 8] = &item_energy_host;
+    launch_args[parameter_name.size() + 11] = &item_energy_host;
+    nl = pull_neighbor_list(nl_shadow, pool_shadow, nl);
     force_function(gridSize, blockSize, 0, 0, launch_args);
+    if (pme_device != NULL)
+        pme_shadow.push(pme_device, sizeof(float) * local_atom_numbers);
+    item_energy_shadow.push(item_energy_device,
+                            sizeof(float) * local_atom_numbers);
+#else
+    force_function(gridSize, blockSize, 0, 0, launch_args);
+#endif
     Sum_Of_List(item_energy, sum_energy, local_atom_numbers);
     float h_energy = NAN;
     deviceMemcpy(&h_energy, sum_energy, sizeof(float),

@@ -84,6 +84,7 @@ struct StreamState
 
 StreamState g_default_stream;
 std::unordered_map<void*, StreamState*> g_streams;
+std::unordered_map<const void*, sponge_vk::SerialPoolInfo> g_serial_pools;
 
 struct GraphState
 {
@@ -518,6 +519,27 @@ Allocation* AllocationOf(const void* ptr)
     return &it->second;
 }
 
+void RegisterSerialPool(const void* nl, const void* pool, int stride)
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    g_serial_pools[nl] = SerialPoolInfo{pool, stride};
+}
+
+SerialPoolInfo SerialPoolOf(const void* nl)
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    auto it = g_serial_pools.find(nl);
+    if (it == g_serial_pools.end())
+        Fail("neighbor list has no registered serial pool");
+    return it->second;
+}
+
+size_t AllocationSize(const void* ptr)
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    return AllocationOf(ptr)->size;
+}
+
 void EnsureRecording(void* stream) { EnsureRecordingImpl(StreamOf(stream)); }
 void SubmitAndWait(void* stream) { SubmitAndWaitImpl(StreamOf(stream)); }
 VkCommandBuffer CurrentCommandBuffer() { return g_default_stream.cb; }
@@ -925,6 +947,7 @@ void deviceFree(void* ptr)
     if (ptr == nullptr) return;
     std::lock_guard<std::recursive_mutex> lock(S().mutex);
     sponge_vk::HostBarrier();
+    g_serial_pools.erase(ptr);
     auto it = S().allocations.find(ptr);
     if (it == S().allocations.end()) return;
     vkDestroyBuffer(S().device, it->second.buffer, nullptr);

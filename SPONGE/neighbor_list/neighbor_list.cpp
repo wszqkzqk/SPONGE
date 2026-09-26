@@ -1114,6 +1114,9 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
     }
     Device_Malloc_And_Copy_Safely((void**)&d_nl, h_nl,
                                   sizeof(ATOM_GROUP) * atom_numbers);
+#ifdef USE_VULKAN
+    sponge_vk::RegisterSerialPool(d_nl, d_temp, max_neighbor_numbers);
+#endif
 
     check_overflow_interval = 150;
     if (controller->Command_Exist("neighbor_list", "check_overflow_interval"))

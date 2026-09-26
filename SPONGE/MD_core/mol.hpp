@@ -1,5 +1,80 @@
 ﻿#pragma once
 
+#ifdef USE_VULKAN
+struct MolGetOriginVkParams
+{
+    int numbers;
+};
+static_assert(sizeof(MolGetOriginVkParams) == 4,
+              "MolGetOriginVkParams must match the GLSL push constant layout");
+
+struct MolMapComVkParams
+{
+    int numbers;
+    float scaler;
+    int use_periodicity;
+    Boundary boundary;
+};
+static_assert(sizeof(MolMapComVkParams) == 64,
+              "MolMapComVkParams must match the GLSL push constant layout");
+
+struct MolMapComVecVkParams
+{
+    int numbers;
+    float scaler[3];
+    int use_periodicity;
+    Boundary boundary;
+};
+static_assert(sizeof(MolMapComVecVkParams) == 72,
+              "MolMapComVecVkParams must match the GLSL push constant layout");
+
+static inline void MolGetOriginVk(int numbers, const int* start,
+                                  const int* end, const VECTOR* crd,
+                                  VECTOR* com)
+{
+    MolGetOriginVkParams params{numbers};
+    const void* buffers[] = {start, end, crd, com};
+    VK_LAUNCH(mol_get_origin,
+              (numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+}
+
+static inline void MolMapComVk(int numbers, const int* start, const int* end,
+                               float scaler, const VECTOR* com,
+                               Boundary boundary, VECTOR* crd,
+                               const int* periodicity)
+{
+    MolMapComVkParams params{numbers, scaler, periodicity != NULL ? 1 : 0,
+                             boundary};
+    const void* buffers[] = {start, end, com, crd,
+                             periodicity != NULL ? (const void*)periodicity
+                                                 : (const void*)start};
+    VK_LAUNCH(mol_map_center_of_mass,
+              (numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+}
+
+static inline void MolMapComVk(int numbers, const int* start, const int* end,
+                               VECTOR scaler, const VECTOR* com,
+                               Boundary boundary, VECTOR* crd,
+                               const int* periodicity)
+{
+    MolMapComVecVkParams params{numbers,
+                                {scaler.x, scaler.y, scaler.z},
+                                periodicity != NULL ? 1 : 0,
+                                boundary};
+    const void* buffers[] = {start, end, com, crd,
+                             periodicity != NULL ? (const void*)periodicity
+                                                 : (const void*)start};
+    VK_LAUNCH(mol_map_center_of_mass_vec,
+              (numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+}
+#endif
+
 static __global__ void Get_Origin(const int residue_numbers, const int* start,
                                   const int* end, const VECTOR* crd,
                                   const float* atom_mass,
@@ -155,6 +230,12 @@ static __global__ void Map_Center_Of_Mass(const int residue_numbers,
 //--------------------residue functions-------------------------
 void MD_INFORMATION::residue_information::Residue_Crd_Map(VECTOR scaler)
 {
+#ifdef USE_VULKAN
+    MolGetOriginVk(residue_numbers, d_res_start, d_res_end, md_info->crd,
+                   d_center_of_mass);
+    MolMapComVk(residue_numbers, d_res_start, d_res_end, scaler,
+                d_center_of_mass, md_info->pbc.boundary, md_info->crd, NULL);
+#else
     Launch_Device_Kernel(Get_Origin, (residue_numbers + 1023) / 1024, 1024, 0,
                          NULL, residue_numbers, d_res_start, d_res_end,
                          md_info->crd, md_info->d_mass, d_mass_inverse,
@@ -164,6 +245,7 @@ void MD_INFORMATION::residue_information::Residue_Crd_Map(VECTOR scaler)
                          block_res, 0, NULL, residue_numbers, d_res_start,
                          d_res_end, scaler, d_center_of_mass,
                          md_info->pbc.boundary, md_info->crd, (int*)NULL);
+#endif
 }
 
 void MD_INFORMATION::residue_information::Read_AMBER_Parm7(
@@ -1015,6 +1097,16 @@ void MD_INFORMATION::molecule_information::Initial(CONTROLLER* controller)
 
 void MD_INFORMATION::molecule_information::Molecule_Crd_Map(float scaler)
 {
+#ifdef USE_VULKAN
+    MolGetOriginVk(md_info->res.residue_numbers, md_info->res.d_res_start,
+                   md_info->res.d_res_end, md_info->crd,
+                   md_info->res.d_center_of_mass);
+    MolGetOriginVk(molecule_numbers, d_residue_start, d_residue_end,
+                   md_info->res.d_center_of_mass, d_center_of_mass);
+    MolMapComVk(molecule_numbers, d_atom_start, d_atom_end, scaler,
+                d_center_of_mass, md_info->pbc.boundary, md_info->crd,
+                force_whole_output ? NULL : d_periodicity);
+#else
     // 为了有一个分子有很多残基，而其他分子都很小这种情况的并行，先求残基的质心
     Launch_Device_Kernel(
         Get_Origin, (md_info->res.residue_numbers + 1023) / 1024, 1024, 0, NULL,
@@ -1033,10 +1125,21 @@ void MD_INFORMATION::molecule_information::Molecule_Crd_Map(float scaler)
                          block_mol, 0, NULL, molecule_numbers, d_atom_start,
                          d_atom_end, scaler, d_center_of_mass,
                          md_info->pbc.boundary, md_info->crd, periodicity);
+#endif
 }
 
 void MD_INFORMATION::molecule_information::Molecule_Crd_Map(VECTOR scaler)
 {
+#ifdef USE_VULKAN
+    MolGetOriginVk(md_info->res.residue_numbers, md_info->res.d_res_start,
+                   md_info->res.d_res_end, md_info->crd,
+                   md_info->res.d_center_of_mass);
+    MolGetOriginVk(molecule_numbers, d_residue_start, d_residue_end,
+                   md_info->res.d_center_of_mass, d_center_of_mass);
+    MolMapComVk(molecule_numbers, d_atom_start, d_atom_end, scaler,
+                d_center_of_mass, md_info->pbc.boundary, md_info->crd,
+                force_whole_output ? NULL : d_periodicity);
+#else
     // 为了有一个分子有很多残基，而其他分子都很小这种情况的并行，先求残基的质心
     Launch_Device_Kernel(
         Get_Origin, (md_info->res.residue_numbers + 1023) / 1024, 1024, 0, NULL,
@@ -1054,4 +1157,5 @@ void MD_INFORMATION::molecule_information::Molecule_Crd_Map(VECTOR scaler)
                          block_mol, 0, NULL, molecule_numbers, d_atom_start,
                          d_atom_end, scaler, d_center_of_mass,
                          md_info->pbc.boundary, md_info->crd, periodicity);
+#endif
 }

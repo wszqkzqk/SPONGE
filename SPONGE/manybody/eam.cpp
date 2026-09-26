@@ -52,9 +52,7 @@ static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
 
 static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
 {
-    return atom_numbers > 1
-               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
-               : 0;
+    return sponge_vk::SerialPoolOf(nl).stride;
 }
 #endif
 
@@ -381,7 +379,7 @@ void EAM_INFORMATION::EAM_Force_With_Atom_Energy_And_Virial(
     EamRhoVkParams rho_params{atom_numbers, boundary, ntypes, nr_local,
                               dr_local, cut_local,
                               vk_nl_stride(nl, atom_numbers)};
-    const void* rho_buffers[] = {nl, nl[0].atom_serial, crd, atom_type_local,
+    const void* rho_buffers[] = {nl, sponge_vk::SerialPoolOf(nl).pool, crd, atom_type_local,
                                  rho_table, d_rho_local};
     VK_LAUNCH(eam_calculate_rho, blocks, 1, threads, 1, rho_buffers,
               &rho_params, NULL);
@@ -418,7 +416,7 @@ void EAM_INFORMATION::EAM_Force_With_Atom_Energy_And_Virial(
                                   need_virial,
                                   vk_nl_stride(nl, atom_numbers)};
     const void* force_buffers[] = {nl,
-                                   nl[0].atom_serial,
+                                   sponge_vk::SerialPoolOf(nl).pool,
                                    crd,
                                    frc,
                                    atom_type_local,

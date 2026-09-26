@@ -45,7 +45,10 @@ static const void* dd_ug_serial_pool(MD_INFORMATION* md_info)
 {
     if (md_info->ug.ug_numbers <= 0 || md_info->ug.d_ug == NULL) return NULL;
     sponge_vk::HostBarrier();
-    return reinterpret_cast<const ATOM_GROUP*>(md_info->ug.d_ug)[0].atom_serial;
+    ATOM_GROUP first;
+    deviceMemcpy(&first, md_info->ug.d_ug, sizeof(ATOM_GROUP),
+                 deviceMemcpyDeviceToHost);
+    return first.atom_serial;
 }
 #endif
 

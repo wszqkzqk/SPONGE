@@ -1,0 +1,24 @@
+layout(set = 0, binding = 0, std430) buffer Start { int start[]; };
+layout(set = 0, binding = 1, std430) buffer End { int end[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer CenterOfMass { Vec3 center_of_mass[]; };
+layout(push_constant) uniform Params
+{
+    int residue_numbers;
+}
+pc;
+void main()
+{
+    int residue_i = int(gl_GlobalInvocationID.x);
+    if (residue_i >= pc.residue_numbers) return;
+    Vec3 origin = v3(3.402823466e+38, 3.402823466e+38, 3.402823466e+38);
+    for (int atom_i = start[residue_i]; atom_i < end[residue_i];
+         atom_i += 1)
+    {
+        Vec3 crd_i = crd[atom_i];
+        origin.x = min(origin.x, crd_i.x);
+        origin.y = min(origin.y, crd_i.y);
+        origin.z = min(origin.z, crd_i.z);
+    }
+    center_of_mass[residue_i] = origin;
+}

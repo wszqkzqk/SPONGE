@@ -9,6 +9,28 @@
 
 static constexpr int LISTED_FORCE_MAX_ATOMS = 6;
 
+#ifdef USE_VULKAN
+namespace
+{
+struct VkJitShadow
+{
+    std::vector<char> storage;
+    void* pull(const void* device_ptr, size_t size)
+    {
+        storage.resize(size);
+        deviceMemcpy(storage.data(), device_ptr, size,
+                     deviceMemcpyDeviceToHost);
+        return storage.data();
+    }
+    void push(const void* device_ptr, size_t size)
+    {
+        deviceMemcpy(const_cast<void*>(device_ptr), storage.data(), size,
+                     deviceMemcpyHostToDevice);
+    }
+};
+}  // namespace
+#endif
+
 static __global__ void listed_force_get_local_device(
     int item_numbers, int parameter_numbers, const int* parameter_is_int,
     const int* parameter_is_atom, void** parameter_ptrs,
@@ -745,15 +767,25 @@ void LISTED_FORCE::Initial(CONTROLLER* controller, CONECT* connectivity,
         {
             Malloc_Safely((void**)cpu_parameters + j,
                           sizeof(int) * item_numbers);
+#ifdef USE_VULKAN
+            Malloc_Safely((void**)&gpu_parameters_local[j],
+                          sizeof(int) * item_numbers);
+#else
             Device_Malloc_Safely((void**)&gpu_parameters_local[j],
                                  sizeof(int) * item_numbers);
+#endif
         }
         else
         {
             Malloc_Safely((void**)cpu_parameters + j,
                           sizeof(float) * item_numbers);
+#ifdef USE_VULKAN
+            Malloc_Safely((void**)&gpu_parameters_local[j],
+                          sizeof(float) * item_numbers);
+#else
             Device_Malloc_Safely((void**)&gpu_parameters_local[j],
                                  sizeof(float) * item_numbers);
+#endif
         }
         launch_args[j] = gpu_parameters + j;
     }
@@ -909,6 +941,29 @@ void LISTED_FORCE::Get_Local(int* atom_local, int local_atom_numbers,
     (void)ghost_numbers;
     use_domain_decomposition = 1;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    int max_atom_id = 0;
+    for (int j = 0; j < parameter_name.size(); j++)
+    {
+        if (!parameter_is_atom[j]) continue;
+        for (int i = 0; i < item_numbers; i++)
+        {
+            max_atom_id =
+                std::max(max_atom_id, ((int*)cpu_parameters[j])[i]);
+        }
+    }
+    std::vector<char> h_label(max_atom_id + 1);
+    std::vector<int> h_id(max_atom_id + 1);
+    deviceMemcpy(h_label.data(), atom_local_label, max_atom_id + 1,
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(h_id.data(), atom_local_id, (max_atom_id + 1) * sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    listed_force_get_local_device(item_numbers, parameter_name.size(),
+                                  parameter_is_int.data(),
+                                  parameter_is_atom.data(), cpu_parameters,
+                                  gpu_parameters_local, h_label.data(),
+                                  h_id.data(), &local_item_numbers);
+#else
     Launch_Device_Kernel(listed_force_get_local_device, 1, 1, 0, NULL,
                          item_numbers, parameter_name.size(),
                          d_parameter_is_int, d_parameter_is_atom,
@@ -916,6 +971,7 @@ void LISTED_FORCE::Get_Local(int* atom_local, int local_atom_numbers,
                          atom_local_label, atom_local_id, d_local_item_numbers);
     deviceMemcpy(&local_item_numbers, d_local_item_numbers, sizeof(int),
                  deviceMemcpyDeviceToHost);
+#endif
 }
 
 void LISTED_FORCE::Step_Print(CONTROLLER* controller)
@@ -944,7 +1000,11 @@ void LISTED_FORCE::Compute_Force(int atom_numbers, VECTOR* crd,
         return;
     }
     void** parameter_ptr_array =
+#ifdef USE_VULKAN
+        use_domain_decomposition ? gpu_parameters_local : cpu_parameters;
+#else
         use_domain_decomposition ? gpu_parameters_local : gpu_parameters;
+#endif
     for (int j = 0; j < parameter_name.size(); j++)
     {
         launch_args[j] = parameter_ptr_array + j;
@@ -972,11 +1032,42 @@ void LISTED_FORCE::Compute_Force(int atom_numbers, VECTOR* crd,
     launch_args[parameter_name.size() + 9] = &ONLY_ENERGY;
     launch_args[parameter_name.size() + 10] = &interaction_numbers;
 #ifdef USE_VULKAN
-    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
     sponge_vk::HostBarrier();
-#endif
+    VkJitShadow crd_shadow, frc_shadow, atom_energy_shadow, atom_virial_shadow,
+        item_energy_shadow;
+    const size_t atom_bytes = sizeof(VECTOR) * atom_numbers;
+    VECTOR* crd_device = crd;
+    VECTOR* frc_device = frc;
+    float* atom_energy_device = atom_energy;
+    LTMatrix3* atom_virial_device = atom_virial;
+    float* item_energy_device = listed_item_energy;
+    crd = (VECTOR*)crd_shadow.pull(crd_device, atom_bytes);
+    frc = (VECTOR*)frc_shadow.pull(frc_device, atom_bytes);
+    if (atom_energy_device != NULL)
+        atom_energy = (float*)atom_energy_shadow.pull(
+            atom_energy_device, sizeof(float) * atom_numbers);
+    if (atom_virial_device != NULL)
+        atom_virial = (LTMatrix3*)atom_virial_shadow.pull(
+            atom_virial_device, sizeof(LTMatrix3) * atom_numbers);
+    if (item_energy_device != NULL)
+        listed_item_energy = (float*)item_energy_shadow.pull(
+            item_energy_device, sizeof(float) * interaction_numbers);
     force_function({(interaction_numbers + 1023u) / 1024u, 1u, 1u},
                    {1024u, 1u, 1u}, NULL, 0, launch_args);
+    frc_shadow.push(frc_device, atom_bytes);
+    if (atom_energy_device != NULL)
+        atom_energy_shadow.push(atom_energy_device,
+                                sizeof(float) * atom_numbers);
+    if (atom_virial_device != NULL)
+        atom_virial_shadow.push(atom_virial_device,
+                                sizeof(LTMatrix3) * atom_numbers);
+    if (item_energy_device != NULL)
+        item_energy_shadow.push(item_energy_device,
+                                sizeof(float) * interaction_numbers);
+#else
+    force_function({(interaction_numbers + 1023u) / 1024u, 1u, 1u},
+                   {1024u, 1u, 1u}, NULL, 0, launch_args);
+#endif
     if (need_energy)
     {
         Sum_Of_List(item_energy, sum_energy, interaction_numbers);
@@ -1001,7 +1092,11 @@ float LISTED_FORCE::Get_Energy(VECTOR* crd, Boundary boundary)
     float* NULL_FLOAT = NULL;
     int ZERO = 0;
     void** parameter_ptr_array =
+#ifdef USE_VULKAN
+        use_domain_decomposition ? gpu_parameters_local : cpu_parameters;
+#else
         use_domain_decomposition ? gpu_parameters_local : gpu_parameters;
+#endif
     for (int j = 0; j < parameter_name.size(); j++)
     {
         launch_args[j] = parameter_ptr_array + j;
@@ -1020,11 +1115,23 @@ float LISTED_FORCE::Get_Energy(VECTOR* crd, Boundary boundary)
     launch_args[parameter_name.size() + 9] = &TRUE_;
     launch_args[parameter_name.size() + 10] = &interaction_numbers;
 #ifdef USE_VULKAN
-    // CPU JIT直接读写host一致的device buffer，需先让已记录的GPU命令落盘
     sponge_vk::HostBarrier();
-#endif
+    VkJitShadow crd_shadow, item_energy_shadow;
+    const size_t atom_bytes = sizeof(VECTOR) * last_atom_numbers;
+    VECTOR* crd_device = crd;
+    crd = (VECTOR*)crd_shadow.pull(crd_device, atom_bytes);
+    float* item_energy_device = item_energy;
+    float* item_energy_host = (float*)item_energy_shadow.pull(
+        item_energy_device, sizeof(float) * interaction_numbers);
+    launch_args[parameter_name.size() + 3] = &item_energy_host;
     force_function({(interaction_numbers + 1023u) / 1024u, 1u, 1u},
                    {1024u, 1u, 1u}, NULL, 0, launch_args);
+    item_energy_shadow.push(item_energy_device,
+                            sizeof(float) * interaction_numbers);
+#else
+    force_function({(interaction_numbers + 1023u) / 1024u, 1u, 1u},
+                   {1024u, 1u, 1u}, NULL, 0, launch_args);
+#endif
     Sum_Of_List(item_energy, sum_energy, interaction_numbers);
     float h_energy = NAN;
     deviceMemcpy(&h_energy, sum_energy, sizeof(float),

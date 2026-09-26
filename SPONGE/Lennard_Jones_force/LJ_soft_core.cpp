@@ -29,9 +29,7 @@ static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
 
 static inline int vk_nl_stride(const ATOM_GROUP* nl, int atom_numbers)
 {
-    return atom_numbers > 1
-               ? static_cast<int>(nl[1].atom_serial - nl[0].atom_serial)
-               : 0;
+    return sponge_vk::SerialPoolOf(nl).stride;
 }
 
 enum LjSoftCoreVkFlags
@@ -867,7 +865,7 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 (need_atom_energy ? LJSC_NEED_ENERGY : 0) |
                 (need_virial ? LJSC_NEED_VIRIAL : 0)};
         const void* buffers[] = {nl,
-                                 nl[0].atom_serial,
+                                 sponge_vk::SerialPoolOf(nl).pool,
                                  crd_with_LJ_parameters_local,
                                  d_LJ_AA,
                                  d_LJ_AB,
@@ -968,7 +966,7 @@ float LJ_SOFT_CORE::Get_Partial_H_Partial_Lambda_With_Columb_Direct(
             LJSC_NEED_DU_DLAMBDA |
                 (charge_perturbated > 0 ? LJSC_NEED_COULOMB : 0)};
         const void* buffers[] = {nl,
-                                 nl[0].atom_serial,
+                                 sponge_vk::SerialPoolOf(nl).pool,
                                  crd_with_LJ_parameters_local,
                                  d_LJ_AA,
                                  d_LJ_AB,

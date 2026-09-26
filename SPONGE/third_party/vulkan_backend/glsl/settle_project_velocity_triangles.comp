@@ -1,0 +1,97 @@
+struct ConstrainTriangle
+{
+    int atom_A;
+    int atom_B;
+    int atom_C;
+    float ra;
+    float rb;
+    float rc;
+    float rd;
+    float re;
+};
+layout(set = 0, binding = 0, std430) buffer Triangles { ConstrainTriangle triangles[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer MassInverse { float mass_inverse[]; };
+layout(set = 0, binding = 3, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 4, std430) buffer DeltaVel { Vec3 delta_vel[]; };
+layout(set = 0, binding = 5, std430) buffer Violation { int violation[]; };
+layout(push_constant) uniform Params
+{
+    int triangle_numbers;
+    Boundary boundary;
+    float relative_tolerance;
+    int use_violation;
+}
+pc;
+bool compute_velocity_constraint_correction(int atom_i, int atom_j,
+                                            out Vec3 correction_i,
+                                            out Vec3 correction_j,
+                                            inout bool constraint_violated)
+{
+    constraint_violated = false;
+    float mass_i_inverse = mass_inverse[atom_i];
+    float mass_j_inverse = mass_inverse[atom_j];
+    if (mass_i_inverse == 0.0 && mass_j_inverse == 0.0) return false;
+    Vec3 dr = get_displacement(crd[atom_i], crd[atom_j], pc.boundary);
+    float dr2 = v3_dot(dr, dr);
+    if (dr2 < 1e-12)
+    {
+        constraint_violated = true;
+        return false;
+    }
+    Vec3 velocity_i = vel[atom_i];
+    Vec3 velocity_j = vel[atom_j];
+    Vec3 v_diff = v3_sub(velocity_i, velocity_j);
+    float denom = (mass_i_inverse + mass_j_inverse) * dr2;
+    if (denom < 1e-20)
+    {
+        constraint_violated = true;
+        return false;
+    }
+    float projection = v3_dot(dr, v_diff);
+    if (pc.use_violation != 0)
+    {
+        float tolerance = velocity_constraint_residual_tolerance(
+            dr2, velocity_i, velocity_j, v_diff, pc.relative_tolerance);
+        constraint_violated = abs(projection) > tolerance;
+    }
+    float lambda = projection / denom;
+    correction_i = v3_scale(dr, -mass_i_inverse * lambda);
+    correction_j = v3_scale(dr, mass_j_inverse * lambda);
+    return true;
+}
+void main()
+{
+    int tri_i = int(gl_GlobalInvocationID.x);
+    if (tri_i >= pc.triangle_numbers) return;
+    ConstrainTriangle tri = triangles[tri_i];
+    Vec3 correction_i, correction_j;
+    bool constraint_violated = false;
+    if (compute_velocity_constraint_correction(tri.atom_A, tri.atom_B,
+                                               correction_i, correction_j,
+                                               constraint_violated))
+    {
+        aadd_v3(delta_vel[tri.atom_A], correction_i);
+        aadd_v3(delta_vel[tri.atom_B], correction_j);
+    }
+    if (constraint_violated && pc.use_violation != 0)
+        atomicExchange(violation[0], 1);
+    if (compute_velocity_constraint_correction(tri.atom_A, tri.atom_C,
+                                               correction_i, correction_j,
+                                               constraint_violated))
+    {
+        aadd_v3(delta_vel[tri.atom_A], correction_i);
+        aadd_v3(delta_vel[tri.atom_C], correction_j);
+    }
+    if (constraint_violated && pc.use_violation != 0)
+        atomicExchange(violation[0], 1);
+    if (compute_velocity_constraint_correction(tri.atom_B, tri.atom_C,
+                                               correction_i, correction_j,
+                                               constraint_violated))
+    {
+        aadd_v3(delta_vel[tri.atom_B], correction_i);
+        aadd_v3(delta_vel[tri.atom_C], correction_j);
+    }
+    if (constraint_violated && pc.use_violation != 0)
+        atomicExchange(violation[0], 1);
+}

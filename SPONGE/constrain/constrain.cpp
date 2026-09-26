@@ -208,10 +208,20 @@ void CONSTRAIN::Get_Local(const int* atom_local_id,
 {
     if (!is_initialized) return;
     num_pair_local = 0;
+#ifdef USE_VULKAN
+    struct
+    {
+        int constrain_pair_numbers;
+    } params{constrain_pair_numbers};
+    const void* buffers[] = {d_constrain_pair, atom_local_id, atom_local_label,
+                             constrain_pair_local, d_num_pair_local};
+    VK_LAUNCH(constrain_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL,
                          constrain_pair_numbers, d_constrain_pair,
                          atom_local_id, atom_local_label, constrain_pair_local,
                          d_num_pair_local);
+#endif
     deviceMemcpy(&num_pair_local, d_num_pair_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }

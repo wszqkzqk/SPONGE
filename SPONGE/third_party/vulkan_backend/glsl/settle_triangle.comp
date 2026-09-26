@@ -1,0 +1,139 @@
+struct ConstrainTriangle
+{
+    int atom_A;
+    int atom_B;
+    int atom_C;
+    float ra;
+    float rb;
+    float rc;
+    float rd;
+    float re;
+};
+layout(set = 0, binding = 0, std430) buffer Triangles { ConstrainTriangle triangles[]; };
+layout(set = 0, binding = 1, std430) buffer Mass { float d_mass[]; };
+layout(set = 0, binding = 2, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 3, std430) buffer LastBA { Vec3 last_triangle_BA[]; };
+layout(set = 0, binding = 4, std430) buffer LastCA { Vec3 last_triangle_CA[]; };
+layout(set = 0, binding = 5, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 6, std430) buffer Virial { LTMat virial_tensor[]; };
+layout(push_constant) uniform Params
+{
+    int num_task_local;
+    Boundary boundary;
+    float dt;
+    float exp_gamma;
+    float half_exp_gamma_plus_half;
+}
+pc;
+Vec3 v3_rnorm(Vec3 v) { return v3_scale(v, 1.0 / v3_len(v)); }
+Vec3 v3_back_project(Vec3 rd, Vec3 bx, Vec3 by, Vec3 bz)
+{
+    return v3(rd.x * bx.x + rd.y * by.x + rd.z * bz.x,
+              rd.x * bx.y + rd.y * by.y + rd.z * bz.y,
+              rd.x * bx.z + rd.y * by.z + rd.z * bz.z);
+}
+void settle_do_triangle(Vec3 rB0, Vec3 rC0, Vec3 rA1, Vec3 rB1, Vec3 rC1,
+                        float ra, float rb, float rc, float rd, float re,
+                        float mA, float mB, float mC, float dt,
+                        float half_exp_gamma_plus_half, float exp_gamma,
+                        out Vec3 rA3, out Vec3 rB3, out Vec3 rC3,
+                        inout Vec3 vA, inout Vec3 vB, inout Vec3 vC,
+                        out LTMat virial)
+{
+    Vec3 base_vector_z = v3_cross(rB0, rC0);
+    Vec3 base_vector_x = v3_cross(rA1, base_vector_z);
+    Vec3 base_vector_y = v3_cross(base_vector_z, base_vector_x);
+    base_vector_x = v3_rnorm(base_vector_x);
+    base_vector_y = v3_rnorm(base_vector_y);
+    base_vector_z = v3_rnorm(base_vector_z);
+
+    Vec3 rB0d = v3(v3_dot(base_vector_x, rB0), v3_dot(base_vector_y, rB0), 0.0);
+    Vec3 rC0d = v3(v3_dot(base_vector_x, rC0), v3_dot(base_vector_y, rC0), 0.0);
+    Vec3 rA1d = v3(0.0, 0.0, v3_dot(base_vector_z, rA1));
+    Vec3 rB1d = v3(v3_dot(base_vector_x, rB1), v3_dot(base_vector_y, rB1),
+                   v3_dot(base_vector_z, rB1));
+    Vec3 rC1d = v3(v3_dot(base_vector_x, rC1), v3_dot(base_vector_y, rC1),
+                   v3_dot(base_vector_z, rC1));
+
+    float sinphi = rA1d.z / ra;
+    float cosphi = sqrt(1.0 - sinphi * sinphi);
+    float sinpsi =
+        (rB1d.z - rC1d.z - (rb - re) * sinphi) / ((rd - rc) * cosphi);
+    float cospsi = sqrt(1.0 - sinpsi * sinpsi);
+
+    Vec3 rA2d = v3(0.0, ra * cosphi, rA1d.z);
+    Vec3 rB2d =
+        v3(rc * cospsi, rb * cosphi + rc * sinpsi * sinphi, rB1d.z);
+    Vec3 rC2d =
+        v3(rd * cospsi, re * cosphi + rd * sinpsi * sinphi, rC1d.z);
+
+    float alpha = rB2d.x * rB0d.x + rC2d.x * rC0d.x + rB2d.y * rB0d.y +
+                  rC2d.y * rC0d.y;
+    float beta = -rB2d.x * rB0d.y - rC2d.x * rC0d.y + rB2d.y * rB0d.x +
+                 rC2d.y * rC0d.x;
+    float gamma = rB1d.y * rB0d.x - rB1d.x * rB0d.y + rC1d.y * rC0d.x -
+                  rC1d.x * rC0d.y;
+
+    float temp = alpha * alpha + beta * beta;
+    float sintheta =
+        (alpha * gamma - beta * sqrt(temp - gamma * gamma)) / temp;
+    float costheta = sqrt(1.0 - sintheta * sintheta);
+    Vec3 rA3d = v3(-rA2d.y * sintheta, rA2d.y * costheta, rA2d.z);
+    Vec3 rB3d = v3(rB2d.x * costheta - rB2d.y * sintheta,
+                   rB2d.x * sintheta + rB2d.y * costheta, rB2d.z);
+    Vec3 rC3d = v3(rC2d.x * costheta - rC2d.y * sintheta,
+                   rC2d.x * sintheta + rC2d.y * costheta, rC2d.z);
+
+    rA3 = v3_back_project(rA3d, base_vector_x, base_vector_y, base_vector_z);
+    rB3 = v3_back_project(rB3d, base_vector_x, base_vector_y, base_vector_z);
+    rC3 = v3_back_project(rC3d, base_vector_x, base_vector_y, base_vector_z);
+
+    temp = exp_gamma / dt / half_exp_gamma_plus_half;
+    rA1d = v3_scale(v3_sub(rA3, rA1), temp);
+    rB1d = v3_scale(v3_sub(rB3, rB1), temp);
+    rC1d = v3_scale(v3_sub(rC3, rC1), temp);
+    vA = v3_add(vA, rA1d);
+    vB = v3_add(vB, rB1d);
+    vC = v3_add(vC, rC1d);
+
+    temp = 1.0 / dt / dt / half_exp_gamma_plus_half;
+    rB0d = v3_scale(v3_sub(rB3, rB1), temp * mB);
+    rC0d = v3_scale(v3_sub(rC3, rC1), temp * mC);
+    virial = lt_add(virial_from_force_dis(rB0d, rB0),
+                    virial_from_force_dis(rC0d, rC0));
+}
+void main()
+{
+    int triangle_i = int(gl_GlobalInvocationID.x);
+    if (triangle_i >= pc.num_task_local) return;
+    ConstrainTriangle triangle = triangles[triangle_i];
+    Vec3 rA = crd[triangle.atom_A];
+    Vec3 rB = get_displacement(crd[triangle.atom_B], rA, pc.boundary);
+    Vec3 rC = get_displacement(crd[triangle.atom_C], rA, pc.boundary);
+    float mA = d_mass[triangle.atom_A];
+    float mB = d_mass[triangle.atom_B];
+    float mC = d_mass[triangle.atom_C];
+    Vec3 rO = v3_add(v3_scale(v3_add(v3_scale(rB, mB), v3_scale(rC, mC)),
+                              1.0 / (mA + mB + mC)),
+                     rA);
+    rA = v3_sub(rA, rO);
+    rB = v3_add(rB, rA);
+    rC = v3_add(rC, rA);
+    Vec3 rA3, rB3, rC3;
+    Vec3 vA = vel[triangle.atom_A];
+    Vec3 vB = vel[triangle.atom_B];
+    Vec3 vC = vel[triangle.atom_C];
+    LTMat virial;
+    settle_do_triangle(last_triangle_BA[triangle_i],
+                       last_triangle_CA[triangle_i], rA, rB, rC, triangle.ra,
+                       triangle.rb, triangle.rc, triangle.rd, triangle.re, mA,
+                       mB, mC, pc.dt, pc.half_exp_gamma_plus_half,
+                       pc.exp_gamma, rA3, rB3, rC3, vA, vB, vC, virial);
+    vel[triangle.atom_A] = vA;
+    vel[triangle.atom_B] = vB;
+    vel[triangle.atom_C] = vC;
+    virial_tensor[triangle_i] = virial;
+    crd[triangle.atom_A] = v3_add(rA3, rO);
+    crd[triangle.atom_B] = v3_add(rB3, rO);
+    crd[triangle.atom_C] = v3_add(rC3, rO);
+}

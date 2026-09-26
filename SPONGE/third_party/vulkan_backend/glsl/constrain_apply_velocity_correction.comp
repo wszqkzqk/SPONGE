@@ -1,0 +1,19 @@
+layout(set = 0, binding = 0, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer DeltaVel { Vec3 delta_vel[]; };
+layout(push_constant) uniform Params
+{
+    int local_atom_numbers;
+    float velocity_factor;
+    float coordinate_factor;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.local_atom_numbers) return;
+    Vec3 delta = v3_scale(delta_vel[atom_i], pc.velocity_factor);
+    vel[atom_i] = v3_add(vel[atom_i], delta);
+    if (pc.coordinate_factor != 0.0)
+        crd[atom_i] = v3_add(crd[atom_i], v3_scale(delta, pc.coordinate_factor));
+}

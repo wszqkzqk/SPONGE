@@ -1,0 +1,31 @@
+struct ConstrainTriangle
+{
+    int atom_A;
+    int atom_B;
+    int atom_C;
+    float ra;
+    float rb;
+    float rc;
+    float rd;
+    float re;
+};
+layout(set = 0, binding = 0, std430) buffer Triangles { ConstrainTriangle triangles[]; };
+layout(set = 0, binding = 1, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 2, std430) buffer LastBA { Vec3 last_triangle_BA[]; };
+layout(set = 0, binding = 3, std430) buffer LastCA { Vec3 last_triangle_CA[]; };
+layout(push_constant) uniform Params
+{
+    int num_triangle_local;
+    Boundary boundary;
+}
+pc;
+void main()
+{
+    int triangle_i = int(gl_GlobalInvocationID.x);
+    if (triangle_i >= pc.num_triangle_local) return;
+    ConstrainTriangle triangle = triangles[triangle_i];
+    last_triangle_BA[triangle_i] = get_displacement(
+        crd[triangle.atom_B], crd[triangle.atom_A], pc.boundary);
+    last_triangle_CA[triangle_i] = get_displacement(
+        crd[triangle.atom_C], crd[triangle.atom_A], pc.boundary);
+}

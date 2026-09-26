@@ -1,0 +1,24 @@
+struct ConstrainPair
+{
+    int atom_i_serial;
+    int atom_j_serial;
+    float constant_r;
+    float constrain_k;
+};
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 atom_crd[]; };
+layout(set = 0, binding = 1, std430) buffer Pairs { ConstrainPair constrain_pair[]; };
+layout(set = 0, binding = 2, std430) buffer PairDr { Vec3 pair_dr[]; };
+layout(push_constant) uniform Params
+{
+    int constrain_pair_numbers;
+    Boundary boundary;
+}
+pc;
+void main()
+{
+    int pair_i = int(gl_GlobalInvocationID.x);
+    if (pair_i >= pc.constrain_pair_numbers) return;
+    ConstrainPair cp = constrain_pair[pair_i];
+    pair_dr[pair_i] = get_displacement(atom_crd[cp.atom_i_serial],
+                                       atom_crd[cp.atom_j_serial], pc.boundary);
+}

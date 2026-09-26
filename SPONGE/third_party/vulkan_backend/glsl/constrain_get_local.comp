@@ -1,0 +1,36 @@
+struct ConstrainPair
+{
+    int atom_i_serial;
+    int atom_j_serial;
+    float constant_r;
+    float constrain_k;
+};
+layout(set = 0, binding = 0, std430) buffer Pairs { ConstrainPair d_constrain_pair[]; };
+layout(set = 0, binding = 1, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 2, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 3, std430) buffer PairsLocal { ConstrainPair constrain_pair_local[]; };
+layout(set = 0, binding = 4, std430) buffer NumPairLocal { int num_pair_local[]; };
+layout(push_constant) uniform Params { int constrain_pair_numbers; } pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    num_pair_local[0] = 0;
+    for (int i = 0; i < pc.constrain_pair_numbers; i++)
+    {
+        ConstrainPair pair = d_constrain_pair[i];
+        if (label_at(pair.atom_i_serial) != 0u)
+        {
+            int slot = num_pair_local[0];
+            constrain_pair_local[slot] = pair;
+            constrain_pair_local[slot].atom_i_serial =
+                atom_local_id[pair.atom_i_serial];
+            constrain_pair_local[slot].atom_j_serial =
+                atom_local_id[pair.atom_j_serial];
+            num_pair_local[0] = slot + 1;
+        }
+    }
+}

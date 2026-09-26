@@ -2,6 +2,73 @@
 
 #include "velocity_projection.h"
 
+#ifdef USE_VULKAN
+struct ShakeForceCycleVkParams
+{
+    int constrain_pair_numbers;
+    Boundary boundary;
+};
+static_assert(sizeof(ShakeForceCycleVkParams) == 56,
+              "ShakeForceCycleVkParams must match the GLSL push constant "
+              "layout");
+
+struct ShakeRefreshCoordinateVkParams
+{
+    int atom_numbers;
+    float x_factor;
+};
+static_assert(sizeof(ShakeRefreshCoordinateVkParams) == 8,
+              "ShakeRefreshCoordinateVkParams must match the GLSL push "
+              "constant layout");
+
+struct ShakeRefreshCrdVelVkParams
+{
+    int atom_numbers;
+    float dt_inverse;
+    float exp_gamma;
+    float half_exp_gamma_plus_half;
+};
+static_assert(sizeof(ShakeRefreshCrdVelVkParams) == 16,
+              "ShakeRefreshCrdVelVkParams must match the GLSL push constant "
+              "layout");
+
+struct ProjectVelocityPairsVkParams
+{
+    int pair_numbers;
+    Boundary boundary;
+    float relative_tolerance;
+    int use_violation;
+};
+static_assert(sizeof(ProjectVelocityPairsVkParams) == 64,
+              "ProjectVelocityPairsVkParams must match the GLSL push constant "
+              "layout");
+
+struct ApplyVelocityCorrectionVkParams
+{
+    int local_atom_numbers;
+    float velocity_factor;
+    float coordinate_factor;
+};
+static_assert(sizeof(ApplyVelocityCorrectionVkParams) == 12,
+              "ApplyVelocityCorrectionVkParams must match the GLSL push "
+              "constant layout");
+
+struct SumVirialToStressVkParams
+{
+    int n;
+    float factor;
+    int virial_offset;
+};
+static_assert(sizeof(SumVirialToStressVkParams) == 12,
+              "SumVirialToStressVkParams must match the GLSL push constant "
+              "layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
+
 static __global__ void Constrain_Force_Cycle(
     const int constrain_pair_numbers, const VECTOR* crd, Boundary boundary,
     const CONSTRAIN_PAIR* constrain_pair, const VECTOR* pair_dr,
@@ -183,12 +250,23 @@ void SHAKE::Remember_Last_Coordinates(const VECTOR* crd, Boundary boundary)
     if (is_initialized)
     {
         // 获得分子模拟迭代中上一步的距离信息
+#ifdef USE_VULKAN
+        ShakeForceCycleVkParams params{constrain->num_pair_local, boundary};
+        const void* buffers[] = {crd, constrain->constrain_pair_local,
+                                 last_pair_dr};
+        VK_LAUNCH(
+            shake_last_crd_to_dr,
+            (constrain->num_pair_local + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Last_Crd_To_dr,
             (constrain->num_pair_local + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, constrain->num_pair_local,
             crd, boundary, constrain->constrain_pair_local, last_pair_dr);
+#endif
     }
 }
 
@@ -323,6 +401,22 @@ bool SHAKE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
     {
         if (!update_coordinates) deviceMemset(d_violation, 0, sizeof(int));
         deviceMemset(constrain_frc, 0, sizeof(VECTOR) * local_atom_numbers);
+#ifdef USE_VULKAN
+        ProjectVelocityPairsVkParams params{constrain->num_pair_local, boundary,
+                                            relative_tolerance,
+                                            d_violation != NULL ? 1 : 0};
+        const void* buffers[] = {constrain->constrain_pair_local,
+                                 crd,
+                                 mass_inverse,
+                                 vel,
+                                 constrain_frc,
+                                 vk_or_dummy(d_violation, constrain_frc)};
+        VK_LAUNCH(
+            constrain_project_velocity_pairs,
+            (constrain->num_pair_local + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             project_velocity_to_shake_pairs,
             (constrain->num_pair_local + CONTROLLER::device_max_thread - 1) /
@@ -330,6 +424,7 @@ bool SHAKE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
             CONTROLLER::device_max_thread, 0, NULL, constrain->num_pair_local,
             constrain->constrain_pair_local, crd, boundary, mass_inverse, vel,
             constrain_frc, relative_tolerance, d_violation);
+#endif
         if (!update_coordinates)
         {
             int violation = 0;
@@ -341,6 +436,17 @@ bool SHAKE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
                 break;
             }
         }
+#ifdef USE_VULKAN
+        ApplyVelocityCorrectionVkParams apply_params{
+            local_atom_numbers, velocity_factor,
+            update_coordinates ? 0.5f * constrain->dt : 0.0f};
+        const void* apply_buffers[] = {vel, crd, constrain_frc};
+        VK_LAUNCH(constrain_apply_velocity_correction,
+                  (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, apply_buffers,
+                  &apply_params, NULL);
+#else
         Launch_Device_Kernel(
             apply_shake_velocity_correction,
             (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -348,6 +454,7 @@ bool SHAKE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
             CONTROLLER::device_max_thread, 0, NULL, local_atom_numbers, vel,
             crd, constrain_frc, velocity_factor,
             update_coordinates ? 0.5f * constrain->dt : 0.0f);
+#endif
     }
     if (d_violation != NULL) deviceFree(d_violation);
     return converged;
@@ -434,6 +541,43 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
         }
         for (int i = 0; i < iteration_numbers; i = i + 1)
         {
+#ifdef USE_VULKAN
+            ShakeRefreshCoordinateVkParams refresh_params{atom_numbers,
+                                                          constrain->x_factor};
+            const void* refresh_buffers[] = {crd, test_crd, constrain_frc,
+                                             mass_inverse};
+            VK_LAUNCH(shake_refresh_coordinate,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, refresh_buffers,
+                      &refresh_params, NULL);
+            ShakeForceCycleVkParams cycle_params{constrain->num_pair_local,
+                                                 boundary};
+            if (need_pressure > 0)
+            {
+                const void* cycle_buffers[] = {
+                    test_crd, constrain->constrain_pair_local, last_pair_dr,
+                    constrain_frc, d_pair_virial};
+                VK_LAUNCH(shake_constrain_force_cycle_with_virial,
+                          (constrain->num_pair_local +
+                           CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, cycle_buffers,
+                          &cycle_params, NULL);
+            }
+            else
+            {
+                const void* cycle_buffers[] = {test_crd,
+                                               constrain->constrain_pair_local,
+                                               last_pair_dr, constrain_frc};
+                VK_LAUNCH(shake_constrain_force_cycle,
+                          (constrain->num_pair_local +
+                           CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, CONTROLLER::device_max_thread, 1, cycle_buffers,
+                          &cycle_params, NULL);
+            }
+#else
             Launch_Device_Kernel(
                 Refresh_Coordinate,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -464,6 +608,7 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
                                      boundary, constrain->constrain_pair_local,
                                      last_pair_dr, constrain_frc);
             }
+#endif
         }
 
         if (need_pressure > 0)
@@ -471,6 +616,19 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
             dim3 blockSize = {
                 CONTROLLER::device_warp,
                 CONTROLLER::device_max_thread / CONTROLLER::device_warp};
+#ifdef USE_VULKAN
+            SumVirialToStressVkParams params{
+                constrain->num_pair_local,
+                1 / constrain->dt / constrain->dt * boundary.rcell.a11 *
+                    boundary.rcell.a22 * boundary.rcell.a33,
+                0};
+            const void* buffers[] = {d_pair_virial, d_stress};
+            VK_LAUNCH(constrain_sum_virial_to_stress,
+                      (constrain->num_pair_local +
+                       CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, blockSize.x, blockSize.y, buffers, &params, NULL);
+#else
             Launch_Device_Kernel(Sum_Virial_Tensor_To_Stress,
                                  (constrain->num_pair_local +
                                   CONTROLLER::device_max_thread - 1) /
@@ -480,8 +638,19 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
                                  1 / constrain->dt / constrain->dt *
                                      boundary.rcell.a11 * boundary.rcell.a22 *
                                      boundary.rcell.a33);
+#endif
         }
 
+#ifdef USE_VULKAN
+        ShakeRefreshCrdVelVkParams params{atom_numbers, constrain->dt_inverse,
+                                          constrain->v_factor,
+                                          constrain->x_factor};
+        const void* buffers[] = {crd, vel, constrain_frc, mass_inverse};
+        VK_LAUNCH(shake_refresh_crd_vel,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Refresh_Crd_Vel,
             (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -489,5 +658,6 @@ void SHAKE::Constrain(int atom_numbers, VECTOR* crd, VECTOR* vel,
             CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
             constrain->dt_inverse, constrain->dt, crd, vel, constrain_frc,
             mass_inverse, constrain->v_factor, constrain->x_factor);
+#endif
     }
 }

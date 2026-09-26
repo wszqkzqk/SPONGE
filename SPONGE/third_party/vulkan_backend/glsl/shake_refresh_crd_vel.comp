@@ -1,0 +1,32 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 2, std430) buffer TestFrc { Vec3 test_frc[]; };
+layout(set = 0, binding = 3, std430) buffer MassInverse { float mass_inverse[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float dt_inverse;
+    float exp_gamma;
+    float half_exp_gamma_plus_half;
+}
+pc;
+void main()
+{
+    int atom_i = int(gl_GlobalInvocationID.x);
+    if (atom_i >= pc.atom_numbers) return;
+    Vec3 crd_lin = crd[atom_i];
+    Vec3 frc_lin = test_frc[atom_i];
+    Vec3 vel_lin = vel[atom_i];
+    float mass_lin = mass_inverse[atom_i];
+    frc_lin.x = frc_lin.x * mass_lin;
+    frc_lin.y = frc_lin.y * mass_lin;
+    frc_lin.z = frc_lin.z * mass_lin;
+    crd_lin.x = crd_lin.x + pc.half_exp_gamma_plus_half * frc_lin.x;
+    crd_lin.y = crd_lin.y + pc.half_exp_gamma_plus_half * frc_lin.y;
+    crd_lin.z = crd_lin.z + pc.half_exp_gamma_plus_half * frc_lin.z;
+    vel_lin.x = vel_lin.x + pc.exp_gamma * frc_lin.x * pc.dt_inverse;
+    vel_lin.y = vel_lin.y + pc.exp_gamma * frc_lin.y * pc.dt_inverse;
+    vel_lin.z = vel_lin.z + pc.exp_gamma * frc_lin.z * pc.dt_inverse;
+    crd[atom_i] = crd_lin;
+    vel[atom_i] = vel_lin;
+}

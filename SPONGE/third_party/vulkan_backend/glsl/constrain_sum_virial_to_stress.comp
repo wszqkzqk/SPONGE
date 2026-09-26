@@ -1,0 +1,19 @@
+layout(set = 0, binding = 0, std430) buffer PairVirial { LTMat pair_virial[]; };
+layout(set = 0, binding = 1, std430) buffer Stress { LTMat stress[]; };
+layout(push_constant) uniform Params
+{
+    int n;
+    float factor;
+    int virial_offset;
+}
+pc;
+void main()
+{
+    int i = int(gl_WorkGroupID.x * (gl_WorkGroupSize.x * gl_WorkGroupSize.y) +
+                gl_LocalInvocationID.x * gl_WorkGroupSize.y +
+                gl_LocalInvocationID.y);
+    LTMat virial_sum = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    if (i < pc.n) virial_sum = lt_add(virial_sum, pair_virial[pc.virial_offset + i]);
+    virial_sum = lt_scale(virial_sum, pc.factor);
+    warp_aadd_lt(stress[0], virial_sum);
+}

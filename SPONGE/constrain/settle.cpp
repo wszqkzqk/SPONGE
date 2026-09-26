@@ -3,6 +3,87 @@
 #include "../utils/float_classification.hpp"
 #include "velocity_projection.h"
 
+#ifdef USE_VULKAN
+struct SettleRememberVkParams
+{
+    int num_task_local;
+    Boundary boundary;
+};
+static_assert(sizeof(SettleRememberVkParams) == 56,
+              "SettleRememberVkParams must match the GLSL push constant "
+              "layout");
+
+struct SettleTaskVkParams
+{
+    int num_task_local;
+    Boundary boundary;
+    float dt;
+    float exp_gamma;
+    float half_exp_gamma_plus_half;
+};
+static_assert(sizeof(SettleTaskVkParams) == 68,
+              "SettleTaskVkParams must match the GLSL push constant layout");
+
+struct SettlePairVkParams
+{
+    int num_task_local;
+    Boundary boundary;
+    float dt;
+    float exp_gamma;
+    float half_exp_gamma_plus_half;
+    int virial_offset;
+};
+static_assert(sizeof(SettlePairVkParams) == 72,
+              "SettlePairVkParams must match the GLSL push constant layout");
+
+struct ProjectVelocityPairsVkParams
+{
+    int pair_numbers;
+    Boundary boundary;
+    float relative_tolerance;
+    int use_violation;
+};
+static_assert(sizeof(ProjectVelocityPairsVkParams) == 64,
+              "ProjectVelocityPairsVkParams must match the GLSL push constant "
+              "layout");
+
+struct SettleProjectTrianglesVkParams
+{
+    int triangle_numbers;
+    Boundary boundary;
+    float relative_tolerance;
+    int use_violation;
+};
+static_assert(sizeof(SettleProjectTrianglesVkParams) == 64,
+              "SettleProjectTrianglesVkParams must match the GLSL push "
+              "constant layout");
+
+struct ApplyVelocityCorrectionVkParams
+{
+    int local_atom_numbers;
+    float velocity_factor;
+    float coordinate_factor;
+};
+static_assert(sizeof(ApplyVelocityCorrectionVkParams) == 12,
+              "ApplyVelocityCorrectionVkParams must match the GLSL push "
+              "constant layout");
+
+struct SumVirialToStressVkParams
+{
+    int n;
+    float factor;
+    int virial_offset;
+};
+static_assert(sizeof(SumVirialToStressVkParams) == 12,
+              "SumVirialToStressVkParams must match the GLSL push constant "
+              "layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
+
 static __global__ void remember_triangle_BA_CA(
     const int num_triangle_local, const CONSTRAIN_TRIANGLE* triangles,
     const VECTOR* crd, Boundary boundary, VECTOR* last_triangle_BA,
@@ -715,6 +796,23 @@ void SETTLE::Remember_Last_Coordinates(const VECTOR* crd, Boundary boundary)
 {
     if (!is_initialized) return;
 
+#ifdef USE_VULKAN
+    SettleRememberVkParams pair_params{num_pair_local, boundary};
+    const void* pair_buffers[] = {d_pairs_local, crd, last_pair_AB};
+    VK_LAUNCH(settle_remember_pair,
+              (num_pair_local + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, pair_buffers, &pair_params,
+              NULL);
+    SettleRememberVkParams triangle_params{num_triangle_local, boundary};
+    const void* triangle_buffers[] = {d_triangles_local, crd, last_triangle_BA,
+                                      last_triangle_CA};
+    VK_LAUNCH(settle_remember_triangle,
+              (num_triangle_local + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, triangle_buffers,
+              &triangle_params, NULL);
+#else
     Launch_Device_Kernel(remember_pair_AB,
                          (num_pair_local + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
@@ -727,6 +825,7 @@ void SETTLE::Remember_Last_Coordinates(const VECTOR* crd, Boundary boundary)
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, num_triangle_local,
         d_triangles_local, crd, boundary, last_triangle_BA, last_triangle_CA);
+#endif
 }
 
 static __global__ void get_local_device(int triangle_numbers, int pair_numbers,
@@ -785,10 +884,23 @@ void SETTLE::Get_Local(const int* atom_local_id, const char* atom_local_label,
     this->local_atom_numbers = local_atom_numbers;
     num_triangle_local = 0;
     num_pair_local = 0;
+#ifdef USE_VULKAN
+    struct
+    {
+        int triangle_numbers;
+        int pair_numbers;
+    } params{triangle_numbers, pair_numbers};
+    const void* buffers[] = {
+        d_triangles,          d_triangles_local, d_pairs,
+        d_pairs_local,        atom_local_id,     atom_local_label,
+        d_num_triangle_local, d_num_pair_local};
+    VK_LAUNCH(settle_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(get_local_device, 1, 1, 0, NULL, triangle_numbers,
                          pair_numbers, d_triangles, d_triangles_local, d_pairs,
                          d_pairs_local, atom_local_id, atom_local_label,
                          d_num_triangle_local, d_num_pair_local);
+#endif
     deviceMemcpy(&num_triangle_local, d_num_triangle_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
     deviceMemcpy(&num_pair_local, d_num_pair_local, sizeof(int),
@@ -801,8 +913,30 @@ void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
                        LTMatrix3* d_stress)
 {
     if (!is_initialized) return;
-#ifndef GPU_ARCH_NAME
+#if !defined(GPU_ARCH_NAME) || defined(USE_VULKAN)
     int invalid_pair = -1;
+#endif
+#ifdef USE_VULKAN
+    int* invalid_pair_buffer = NULL;
+    Device_Malloc_Safely((void**)&invalid_pair_buffer, sizeof(int));
+    deviceMemcpy(invalid_pair_buffer, &invalid_pair, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    SettlePairVkParams pair_params{num_pair_local,      boundary,
+                                   constrain->dt,       constrain->v_factor,
+                                   constrain->x_factor, triangle_numbers};
+    const void* pair_buffers[] = {d_pairs_local, atom_local,         d_mass,
+                                  crd,           last_pair_AB,       vel,
+                                  virial_tensor, invalid_pair_buffer};
+    VK_LAUNCH(settle_pair,
+              (num_pair_local + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, pair_buffers, &pair_params,
+              NULL);
+    deviceMemcpy(&invalid_pair, invalid_pair_buffer, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    deviceFree(invalid_pair_buffer);
+#else
+#ifndef GPU_ARCH_NAME
     int* invalid_pair_buffer = &invalid_pair;
 #else
     int* invalid_pair_buffer = NULL;
@@ -815,8 +949,9 @@ void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
                          last_pair_AB, constrain->dt, constrain->v_factor,
                          constrain->x_factor, vel,
                          virial_tensor + triangle_numbers, invalid_pair_buffer);
+#endif
 
-#ifndef GPU_ARCH_NAME
+#if !defined(GPU_ARCH_NAME) || defined(USE_VULKAN)
     if (invalid_pair >= 0)
     {
         const CONSTRAIN_PAIR pair = d_pairs_local[invalid_pair];
@@ -851,6 +986,19 @@ void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
     }
 #endif
 
+#ifdef USE_VULKAN
+    SettleTaskVkParams triangle_params{num_triangle_local, boundary,
+                                       constrain->dt, constrain->v_factor,
+                                       constrain->x_factor};
+    const void* triangle_buffers[] = {d_triangles_local, d_mass,           crd,
+                                      last_triangle_BA,  last_triangle_CA, vel,
+                                      virial_tensor};
+    VK_LAUNCH(settle_triangle,
+              (num_triangle_local + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, triangle_buffers,
+              &triangle_params, NULL);
+#else
     Launch_Device_Kernel(
         settle_triangle,
         (num_triangle_local + CONTROLLER::device_max_thread - 1) /
@@ -859,12 +1007,31 @@ void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
         d_triangles_local, d_mass, crd, boundary, last_triangle_BA,
         last_triangle_CA, constrain->dt, constrain->v_factor,
         constrain->x_factor, vel, virial_tensor);
+#endif
 
     if (need_pressure)
     {
         dim3 blockSize = {
             CONTROLLER::device_warp,
             CONTROLLER::device_max_thread / CONTROLLER::device_warp};
+#ifdef USE_VULKAN
+        const float rcell_det =
+            boundary.rcell.a11 * boundary.rcell.a22 * boundary.rcell.a33;
+        const unsigned int sum_grid = (num_triangle_local + num_pair_local +
+                                       CONTROLLER::device_max_thread - 1) /
+                                      CONTROLLER::device_max_thread;
+        SumVirialToStressVkParams triangle_sum_params{num_triangle_local,
+                                                      rcell_det, 0};
+        const void* triangle_sum_buffers[] = {virial_tensor, d_stress};
+        VK_LAUNCH(constrain_sum_virial_to_stress, sum_grid, 1, blockSize.x,
+                  blockSize.y, triangle_sum_buffers, &triangle_sum_params,
+                  NULL);
+        SumVirialToStressVkParams pair_sum_params{num_pair_local, rcell_det,
+                                                  triangle_numbers};
+        const void* pair_sum_buffers[] = {virial_tensor, d_stress};
+        VK_LAUNCH(constrain_sum_virial_to_stress, sum_grid, 1, blockSize.x,
+                  blockSize.y, pair_sum_buffers, &pair_sum_params, NULL);
+#else
         Launch_Device_Kernel(Sum_Virial_Tensor_To_Stress,
                              (num_triangle_local + num_pair_local +
                               CONTROLLER::device_max_thread - 1) /
@@ -878,6 +1045,7 @@ void SETTLE::Do_SETTLE(CONTROLLER* controller, const int* atom_local,
                              blockSize, 0, NULL, num_pair_local,
                              virial_tensor + triangle_numbers, d_stress,
                              boundary.rcell);
+#endif
     }
 }
 
@@ -1072,6 +1240,20 @@ bool SETTLE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
         deviceMemset(d_delta_vel_local, 0, sizeof(VECTOR) * local_atom_numbers);
         if (num_pair_local > 0 && d_pairs_local != NULL)
         {
+#ifdef USE_VULKAN
+            ProjectVelocityPairsVkParams params{num_pair_local, boundary,
+                                                relative_tolerance,
+                                                d_violation != NULL ? 1 : 0};
+            const void* buffers[] = {
+                d_pairs_local,     crd,
+                mass_inverse,      vel,
+                d_delta_vel_local, vk_or_dummy(d_violation, d_delta_vel_local)};
+            VK_LAUNCH(constrain_project_velocity_pairs,
+                      (num_pair_local + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(
                 project_velocity_to_settle_pairs,
                 (num_pair_local + CONTROLLER::device_max_thread - 1) /
@@ -1079,9 +1261,24 @@ bool SETTLE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
                 CONTROLLER::device_max_thread, 0, NULL, num_pair_local,
                 d_pairs_local, crd, boundary, mass_inverse, vel,
                 d_delta_vel_local, relative_tolerance, d_violation);
+#endif
         }
         if (num_triangle_local > 0 && d_triangles_local != NULL)
         {
+#ifdef USE_VULKAN
+            SettleProjectTrianglesVkParams params{num_triangle_local, boundary,
+                                                  relative_tolerance,
+                                                  d_violation != NULL ? 1 : 0};
+            const void* buffers[] = {
+                d_triangles_local, crd,
+                mass_inverse,      vel,
+                d_delta_vel_local, vk_or_dummy(d_violation, d_delta_vel_local)};
+            VK_LAUNCH(settle_project_velocity_triangles,
+                      (num_triangle_local + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(
                 project_velocity_to_settle_triangles,
                 (num_triangle_local + CONTROLLER::device_max_thread - 1) /
@@ -1089,6 +1286,7 @@ bool SETTLE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
                 CONTROLLER::device_max_thread, 0, NULL, num_triangle_local,
                 d_triangles_local, crd, boundary, mass_inverse, vel,
                 d_delta_vel_local, relative_tolerance, d_violation);
+#endif
         }
         if (!update_coordinates)
         {
@@ -1101,6 +1299,17 @@ bool SETTLE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
                 break;
             }
         }
+#ifdef USE_VULKAN
+        ApplyVelocityCorrectionVkParams apply_params{
+            local_atom_numbers, velocity_factor,
+            update_coordinates ? 0.5f * constrain->dt : 0.0f};
+        const void* apply_buffers[] = {vel, crd, d_delta_vel_local};
+        VK_LAUNCH(constrain_apply_velocity_correction,
+                  (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, apply_buffers,
+                  &apply_params, NULL);
+#else
         Launch_Device_Kernel(
             apply_settle_velocity_correction,
             (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1108,6 +1317,7 @@ bool SETTLE::Project_Velocity_To_Constraint_Manifold(VECTOR* vel, VECTOR* crd,
             CONTROLLER::device_max_thread, 0, NULL, local_atom_numbers, vel,
             crd, d_delta_vel_local, velocity_factor,
             update_coordinates ? 0.5f * constrain->dt : 0.0f);
+#endif
     }
     if (d_violation != NULL) deviceFree(d_violation);
     return converged;

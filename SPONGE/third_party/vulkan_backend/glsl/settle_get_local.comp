@@ -1,0 +1,69 @@
+struct ConstrainPair
+{
+    int atom_i_serial;
+    int atom_j_serial;
+    float constant_r;
+    float constrain_k;
+};
+struct ConstrainTriangle
+{
+    int atom_A;
+    int atom_B;
+    int atom_C;
+    float ra;
+    float rb;
+    float rc;
+    float rd;
+    float re;
+};
+layout(set = 0, binding = 0, std430) buffer Triangles { ConstrainTriangle d_triangles[]; };
+layout(set = 0, binding = 1, std430) buffer TrianglesLocal { ConstrainTriangle d_triangles_local[]; };
+layout(set = 0, binding = 2, std430) buffer Pairs { ConstrainPair d_pairs[]; };
+layout(set = 0, binding = 3, std430) buffer PairsLocal { ConstrainPair d_pairs_local[]; };
+layout(set = 0, binding = 4, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 5, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 6, std430) buffer NumTriangleLocal { int num_triangle_local[]; };
+layout(set = 0, binding = 7, std430) buffer NumPairLocal { int num_pair_local[]; };
+layout(push_constant) uniform Params
+{
+    int triangle_numbers;
+    int pair_numbers;
+}
+pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    num_triangle_local[0] = 0;
+    for (int i = 0; i < pc.triangle_numbers; i++)
+    {
+        ConstrainTriangle triangle = d_triangles[i];
+        if (label_at(triangle.atom_A) != 0u)
+        {
+            int slot = num_triangle_local[0];
+            d_triangles_local[slot] = triangle;
+            d_triangles_local[slot].atom_A = atom_local_id[triangle.atom_A];
+            d_triangles_local[slot].atom_B = atom_local_id[triangle.atom_B];
+            d_triangles_local[slot].atom_C = atom_local_id[triangle.atom_C];
+            num_triangle_local[0] = slot + 1;
+        }
+    }
+    num_pair_local[0] = 0;
+    for (int i = 0; i < pc.pair_numbers; i++)
+    {
+        ConstrainPair pair = d_pairs[i];
+        if (label_at(pair.atom_i_serial) != 0u)
+        {
+            int slot = num_pair_local[0];
+            d_pairs_local[slot] = pair;
+            d_pairs_local[slot].atom_i_serial =
+                atom_local_id[pair.atom_i_serial];
+            d_pairs_local[slot].atom_j_serial =
+                atom_local_id[pair.atom_j_serial];
+            num_pair_local[0] = slot + 1;
+        }
+    }
+}

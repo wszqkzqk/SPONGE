@@ -1,0 +1,237 @@
+struct ConstrainPair
+{
+    int atom_i_serial;
+    int atom_j_serial;
+    float constant_r;
+    float constrain_k;
+};
+layout(set = 0, binding = 0, std430) buffer Pairs { ConstrainPair pairs[]; };
+layout(set = 0, binding = 1, std430) buffer AtomLocal { int atom_local[]; };
+layout(set = 0, binding = 2, std430) buffer Mass { float d_mass[]; };
+layout(set = 0, binding = 3, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 4, std430) buffer LastAB { Vec3 last_pair_AB[]; };
+layout(set = 0, binding = 5, std430) buffer Vel { Vec3 vel[]; };
+layout(set = 0, binding = 6, std430) buffer Virial { LTMat virial_tensor[]; };
+layout(set = 0, binding = 7, std430) buffer InvalidPair { int invalid_pair[]; };
+layout(push_constant) uniform Params
+{
+    int num_task_local;
+    Boundary boundary;
+    float dt;
+    float exp_gamma;
+    float half_exp_gamma_plus_half;
+    int virial_offset;
+}
+pc;
+const float SPONGE_FLT_MAX = 3.4028234663852886e+38;
+bool f_is_finite(float v)
+{
+    return (floatBitsToUint(v) & 0x7f800000u) != 0x7f800000u;
+}
+#if SPONGE_VK_FP64
+bool d_is_finite(double v) { return !isinf(v) && !isnan(v); }
+bool settle_double_is_finite_nonnegative(double value)
+{
+    return d_is_finite(value) && !(value < 0.0);
+}
+double settle_pair_precise_radicand(Vec3 r1, Vec3 r2, float target)
+{
+    double r1x = double(r1.x);
+    double r1y = double(r1.y);
+    double r1z = double(r1.z);
+    double r2x = double(r2.x);
+    double r2y = double(r2.y);
+    double r2z = double(r2.z);
+    double cross_x = r1y * r2z - r1z * r2y;
+    double cross_y = r1z * r2x - r1x * r2z;
+    double cross_z = r1x * r2y - r1y * r2x;
+    double cross_squared =
+        cross_x * cross_x + cross_y * cross_y + cross_z * cross_z;
+    double r2_squared = r2x * r2x + r2y * r2y + r2z * r2z;
+    double target_double = double(target);
+    return r2_squared * target_double * target_double - cross_squared;
+}
+bool settle_try_precise_pair_solution(Vec3 r1, Vec3 r2, float target,
+                                      out float k)
+{
+    double radicand = settle_pair_precise_radicand(r1, r2, target);
+    double r1r2 = double(r1.x) * r2.x + double(r1.y) * r2.y + double(r1.z) * r2.z;
+    double r2r2 = double(r2.x) * r2.x + double(r2.y) * r2.y + double(r2.z) * r2.z;
+    if (!settle_double_is_finite_nonnegative(radicand) ||
+        !settle_double_is_finite_nonnegative(r2r2) || !(r2r2 > 0.0))
+    {
+        return false;
+    }
+    double precise_k = (sqrt(radicand) - r1r2) / r2r2;
+    double maximum_float = double(SPONGE_FLT_MAX);
+    if (!d_is_finite(precise_k) || precise_k > maximum_float ||
+        precise_k < -maximum_float)
+    {
+        return false;
+    }
+    float narrowed_k = float(precise_k);
+    if (isinf(narrowed_k) || isnan(narrowed_k)) return false;
+    k = narrowed_k;
+    return true;
+}
+#else
+// Double-single (two-float, Dekker/Knuth) emulation of the fp64 rescue path.
+// Every input is a float, so products are exact via fma and sums via TwoSum;
+// the ~2^-40 relative accuracy of the emulated radicand/sqrt/division far
+// exceeds the fp32 tolerance the narrowed result must meet.
+struct Ds
+{
+    float hi;
+    float lo;
+};
+Ds ds_two_sum(float a, float b)
+{
+    float s = a + b;
+    float bp = s - a;
+    float err = (a - (s - bp)) + (b - bp);
+    return Ds(s, err);
+}
+Ds ds_quick_two_sum(float a, float b)
+{
+    float s = a + b;
+    return Ds(s, b - (s - a));
+}
+Ds ds_two_prod(float a, float b)
+{
+    float p = a * b;
+    return Ds(p, fma(a, b, -p));
+}
+Ds ds_add(Ds a, Ds b)
+{
+    Ds s = ds_two_sum(a.hi, b.hi);
+    Ds t = ds_two_sum(a.lo, b.lo);
+    s.lo += t.hi;
+    Ds r = ds_quick_two_sum(s.hi, s.lo);
+    r.lo += t.lo;
+    return ds_quick_two_sum(r.hi, r.lo);
+}
+Ds ds_neg(Ds a) { return Ds(-a.hi, -a.lo); }
+Ds ds_sub(Ds a, Ds b) { return ds_add(a, ds_neg(b)); }
+Ds ds_mul(Ds a, Ds b)
+{
+    Ds p = ds_two_prod(a.hi, b.hi);
+    p.lo += a.hi * b.lo + a.lo * b.hi;
+    return ds_quick_two_sum(p.hi, p.lo);
+}
+Ds ds_div(Ds a, Ds b)
+{
+    float q1 = a.hi / b.hi;
+    Ds r = ds_sub(a, ds_mul(Ds(q1, 0.0), b));
+    float q2 = r.hi / b.hi;
+    r = ds_sub(r, ds_mul(Ds(q2, 0.0), b));
+    float q3 = r.hi / b.hi;
+    return ds_add(ds_quick_two_sum(q1, q2), Ds(q3, 0.0));
+}
+Ds ds_sqrt(Ds a)
+{
+    if (a.hi == 0.0 && a.lo == 0.0) return Ds(0.0, 0.0);
+    float x = 1.0 / sqrt(a.hi);
+    float ax = a.hi * x;
+    Ds diff = ds_sub(a, ds_two_prod(ax, ax));
+    return ds_add(Ds(ax, 0.0), ds_mul(diff, Ds(0.5 * x, 0.0)));
+}
+bool ds_is_finite(Ds v) { return f_is_finite(v.hi) && f_is_finite(v.lo); }
+bool ds_is_finite_nonnegative(Ds v)
+{
+    return ds_is_finite(v) && (v.hi > 0.0 || (v.hi == 0.0 && v.lo >= 0.0));
+}
+Ds ds_cross_component(float a1, float b1, float a2, float b2)
+{
+    return ds_sub(ds_two_prod(a1, b1), ds_two_prod(a2, b2));
+}
+Ds ds_dot3(Vec3 a, Vec3 b)
+{
+    return ds_add(ds_add(ds_two_prod(a.x, b.x), ds_two_prod(a.y, b.y)),
+                  ds_two_prod(a.z, b.z));
+}
+Ds ds_square(Ds a) { return ds_mul(a, a); }
+bool settle_try_precise_pair_solution(Vec3 r1, Vec3 r2, float target,
+                                      out float k)
+{
+    Ds cross_x = ds_cross_component(r1.y, r2.z, r1.z, r2.y);
+    Ds cross_y = ds_cross_component(r1.z, r2.x, r1.x, r2.z);
+    Ds cross_z = ds_cross_component(r1.x, r2.y, r1.y, r2.x);
+    Ds cross_squared =
+        ds_add(ds_add(ds_square(cross_x), ds_square(cross_y)),
+               ds_square(cross_z));
+    Ds r2r2 = ds_dot3(r2, r2);
+    Ds target_squared = ds_two_prod(target, target);
+    Ds radicand = ds_sub(ds_mul(r2r2, target_squared), cross_squared);
+    Ds r1r2 = ds_dot3(r1, r2);
+    if (!ds_is_finite_nonnegative(radicand) ||
+        !ds_is_finite_nonnegative(r2r2) || !(r2r2.hi > 0.0))
+    {
+        return false;
+    }
+    Ds precise_k = ds_div(ds_sub(ds_sqrt(radicand), r1r2), r2r2);
+    if (!ds_is_finite(precise_k) || precise_k.hi > SPONGE_FLT_MAX ||
+        precise_k.hi < -SPONGE_FLT_MAX)
+    {
+        return false;
+    }
+    float narrowed_k = precise_k.hi + precise_k.lo;
+    if (isinf(narrowed_k) || isnan(narrowed_k)) return false;
+    k = narrowed_k;
+    return true;
+}
+#endif
+void main()
+{
+    int pair_i = int(gl_GlobalInvocationID.x);
+    if (pair_i >= pc.num_task_local) return;
+    ConstrainPair pair = pairs[pair_i];
+    Vec3 r1 = get_displacement(crd[pair.atom_j_serial],
+                               crd[pair.atom_i_serial], pc.boundary);
+    Vec3 r2 = last_pair_AB[pair_i];
+    float mA = d_mass[pair.atom_i_serial];
+    float mB = d_mass[pair.atom_j_serial];
+    float r0r0 = pair.constant_r * pair.constant_r;
+    float r1r1 = v3_dot(r1, r1);
+    float r1r2 = v3_dot(r1, r2);
+    float r2r2 = v3_dot(r2, r2);
+    float projection_squared = r1r2 * r1r2;
+    float length_product = r1r1 * r2r2;
+    float target_product = r2r2 * r0r0;
+    float radicand = projection_squared - length_product + target_product;
+    float radicand_error_bound =
+        8.0 * SPONGE_FLT_EPSILON *
+        (projection_squared + length_product + target_product);
+    uint r2r2_bits = floatBitsToUint(r2r2);
+    uint r2r2_magnitude = r2r2_bits & 0x7fffffffu;
+    bool finite_radicand = f_is_finite(radicand);
+    bool valid_r2r2 = (r2r2_bits & 0x80000000u) == 0u &&
+                      r2r2_magnitude != 0u && f_is_finite(r2r2);
+    bool solved = false;
+    float k = 0.0;
+    if (finite_radicand && valid_r2r2 && radicand > radicand_error_bound)
+    {
+        k = (sqrt(radicand) - r1r2) / r2r2;
+        solved = f_is_finite(k);
+    }
+    else if (finite_radicand && valid_r2r2)
+    {
+        solved = settle_try_precise_pair_solution(r1, r2, pair.constant_r, k);
+    }
+    if (!solved)
+    {
+        atomicExchange(invalid_pair[0], pair_i);
+        return;
+    }
+    Vec3 kr2 = v3_scale(r2, k);
+    r1 = v3_scale(kr2, -mB * pair.constrain_k);
+    kr2 = v3_scale(kr2, mA * pair.constrain_k);
+    crd[pair.atom_i_serial] = v3_add(crd[pair.atom_i_serial], r1);
+    crd[pair.atom_j_serial] = v3_add(crd[pair.atom_j_serial], kr2);
+    k = pc.exp_gamma / pc.dt / pc.half_exp_gamma_plus_half;
+    vel[pair.atom_i_serial] =
+        v3_add(vel[pair.atom_i_serial], v3_scale(r1, k));
+    vel[pair.atom_j_serial] =
+        v3_add(vel[pair.atom_j_serial], v3_scale(kr2, k));
+    r1 = v3_scale(kr2, k * mB / pc.dt / pc.exp_gamma);
+    virial_tensor[pc.virial_offset + pair_i] = virial_from_force_dis(r1, r2);
+}

@@ -1,0 +1,35 @@
+struct ConstrainPair
+{
+    int atom_i_serial;
+    int atom_j_serial;
+    float constant_r;
+    float constrain_k;
+};
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Pairs { ConstrainPair constrain_pair[]; };
+layout(set = 0, binding = 2, std430) buffer PairDr { Vec3 pair_dr[]; };
+layout(set = 0, binding = 3, std430) buffer TestFrc { Vec3 test_frc[]; };
+layout(set = 0, binding = 4, std430) buffer PairVirial { LTMat pair_virial[]; };
+layout(push_constant) uniform Params
+{
+    int constrain_pair_numbers;
+    Boundary boundary;
+}
+pc;
+void main()
+{
+    int pair_i = int(gl_GlobalInvocationID.x);
+    if (pair_i >= pc.constrain_pair_numbers) return;
+    ConstrainPair cp = constrain_pair[pair_i];
+    Vec3 dr0 = pair_dr[pair_i];
+    Vec3 dr = get_displacement(crd[cp.atom_i_serial], crd[cp.atom_j_serial],
+                               pc.boundary);
+    float r_1 = 1.0 / v3_len(dr);
+    float frc_abs = 0.5 * (v3_dot(dr, dr) - cp.constant_r * cp.constant_r) /
+                    v3_dot(dr, dr0) * cp.constrain_k;
+    Vec3 frc_lin = v3_scale(dr0, frc_abs);
+    pair_virial[pair_i] =
+        lt_sub(pair_virial[pair_i], virial_from_force_dis(frc_lin, dr0));
+    aadd_v3(test_frc[cp.atom_j_serial], frc_lin);
+    aadd_v3(test_frc[cp.atom_i_serial], v3_neg(frc_lin));
+}

@@ -13,12 +13,14 @@ cpu-mpi = ["cpu-mpi", "cpu"]
 hip = ["hip"]
 cuda12 = ["cuda", "cuda12"]
 cuda13 = ["cuda", "cuda13"]
+vulkan = ["vulkan"]
 dev-cpu = ["dev", "cpu"]
 dev-cpu-mpi = ["dev", "cpu-mpi", "cpu"]
 dev-hip = ["dev", "hip"]
 dev-cuda12 = ["dev", "cuda", "cuda12"]
 dev-cuda13 = ["dev", "cuda", "cuda13"]
 dev-cuda13-mpi = ["dev", "cuda", "cuda13", "cuda-mpi"]
+dev-vulkan = ["dev", "vulkan"]
 ref-gen = ["ref-gen"]
 
 [feature.cuda.target.linux-64.dependencies]
@@ -119,6 +121,49 @@ clangxx = "22.1.*"
 tomlplusplus = "*"
 llvmdev = ">=22.1.0,<23"
 clangdev = "22.1.*"
+
+[feature.vulkan.dependencies]
+highfive = "*"
+hdf5 = "*"
+zlib = "*"
+glslang = "*"
+libvulkan-headers = "*"
+libvulkan-loader = "*"
+tomlplusplus = "*"
+
+[feature.vulkan.target.linux-64.dependencies]
+cmake = ">=3.24"
+ninja = "*"
+mkl-devel = "*"
+gcc_linux-64 = "11.*"
+gxx_linux-64 = "11.*"
+llvmdev = ">=22.1.0,<23"
+clangdev = "22.1.*"
+
+[feature.vulkan.target.linux-aarch64.dependencies]
+cmake = ">=3.24"
+ninja = "*"
+openblas = "*"
+fftw = "*"
+liblapacke = "*"
+gcc_linux-aarch64 = "11.*"
+gxx_linux-aarch64 = "11.*"
+llvmdev = ">=22.1.0,<23"
+clangdev = "22.1.*"
+
+[feature.vulkan.target.osx-arm64.dependencies]
+cmake = ">=3.24"
+ninja = "*"
+openblas = "*"
+fftw = "*"
+liblapacke = "*"
+clang = "22.1.*"
+clangxx = "22.1.*"
+llvmdev = ">=22.1.0,<23"
+clangdev = "22.1.*"
+
+[feature.vulkan.target.osx-arm64.activation.env]
+VK_DRIVER_FILES = "$CONDA_PREFIX/share/vulkan/icd.d/MoltenVK_icd.json"
 
 [feature.cpu-mpi.target.linux-64.dependencies]
 openmpi = "5.*"
@@ -245,6 +290,18 @@ compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release -
 
 [feature.hip.target.linux-64.tasks]
 configure = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='hip' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\""
+compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release --target install --parallel {{ jobs }}", args = [{ arg = "jobs", default = "4" }] }
+
+[feature.vulkan.target.linux-64.tasks]
+configure = { cmd = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='{{ parallel }}' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\" -DCMAKE_CXX_COMPILER=\"$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++\"", args = [{ arg = "parallel", default = "vulkan" }] }
+compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release --target install --parallel {{ jobs }}", args = [{ arg = "jobs", default = "4" }] }
+
+[feature.vulkan.target.linux-aarch64.tasks]
+configure = { cmd = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='{{ parallel }}' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\"", args = [{ arg = "parallel", default = "vulkan" }] }
+compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release --target install --parallel {{ jobs }}", args = [{ arg = "jobs", default = "4" }] }
+
+[feature.vulkan.target.osx-arm64.tasks]
+configure = { cmd = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='{{ parallel }}' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\"", args = [{ arg = "parallel", default = "vulkan" }] }
 compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release --target install --parallel {{ jobs }}", args = [{ arg = "jobs", default = "4" }] }
 
 [feature.ref-gen.target.linux-64.tasks]

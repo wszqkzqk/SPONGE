@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "../../third_party/toml/toml.h"
 
@@ -22,7 +22,7 @@ inline bool Malloc_Safely(void** address, size_t size)
 
 inline bool Device_Malloc_Safely(void** address, size_t size)
 {
-#ifdef GPU_ARCH_NAME
+#if defined(GPU_ARCH_NAME) || defined(USE_VULKAN)
     if (deviceMalloc(&address[0], size) == DEVICE_MALLOC_SUCCESS)
     {
         return true;

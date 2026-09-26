@@ -1,0 +1,33 @@
+layout(set = 0, binding = 0, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 1, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 2, std430) buffer Label { uint label[]; };
+layout(set = 0, binding = 3, std430) buffer LocalId { int atom_local_id[]; };
+layout(set = 0, binding = 4, std430) buffer ALocal { int atom_a_local[]; };
+layout(set = 0, binding = 5, std430) buffer BLocal { int atom_b_local[]; };
+layout(set = 0, binding = 6, std430) buffer K { float bond_k[]; };
+layout(set = 0, binding = 7, std430) buffer R0 { float bond_r0[]; };
+layout(set = 0, binding = 8, std430) buffer KLocal { float k_local[]; };
+layout(set = 0, binding = 9, std430) buffer R0Local { float r0_local[]; };
+layout(set = 0, binding = 10, std430) buffer NumLocal { int num_bond_local[]; };
+layout(push_constant) uniform Params { int bond_numbers; } pc;
+uint label_at(int i)
+{
+    return (label[uint(i) >> 2] >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+void main()
+{
+    if (gl_GlobalInvocationID.x != 0u) return;
+    num_bond_local[0] = 0;
+    for (int i = 0; i < pc.bond_numbers; i++)
+    {
+        if (label_at(atom_a[i]) == 1u || label_at(atom_b[i]) == 1u)
+        {
+            int slot = num_bond_local[0];
+            atom_a_local[slot] = atom_local_id[atom_a[i]];
+            atom_b_local[slot] = atom_local_id[atom_b[i]];
+            k_local[slot] = bond_k[i];
+            r0_local[slot] = bond_r0[i];
+            num_bond_local[0] = slot + 1;
+        }
+    }
+}

@@ -1,0 +1,44 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomA { int atom_a[]; };
+layout(set = 0, binding = 2, std430) buffer AtomB { int atom_b[]; };
+layout(set = 0, binding = 3, std430) buffer K { float bond_k[]; };
+layout(set = 0, binding = 4, std430) buffer R0 { float bond_r0[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomEnergy { float atom_energy[]; };
+layout(set = 0, binding = 7, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(set = 0, binding = 8, std430) buffer BondEne { float bond_ene[]; };
+layout(push_constant) uniform Params
+{
+    int bond_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+}
+pc;
+void main()
+{
+    int bond_i = int(gl_GlobalInvocationID.x);
+    if (bond_i >= pc.bond_numbers) return;
+    int atom_i = atom_a[bond_i];
+    int atom_j = atom_b[bond_i];
+    float k = bond_k[bond_i];
+    float r0 = bond_r0[bond_i];
+    Vec3 dr = get_displacement(crd[atom_i], crd[atom_j], pc.boundary);
+    float abs_r = v3_len(dr);
+    float tempf2 = abs_r - r0;
+    float tempf = 2.0 * tempf2 * k;
+    Vec3 f = v3_scale(dr, -tempf / abs_r);
+    if (atom_j < pc.local_atom_numbers) aadd_v3(frc[atom_j], v3_neg(f));
+    if (atom_i < pc.local_atom_numbers)
+    {
+        aadd_v3(frc[atom_i], f);
+        if (pc.need_atom_energy != 0)
+        {
+            afadd(atom_energy[atom_i], k * tempf2 * tempf2);
+            bond_ene[bond_i] = k * tempf2 * tempf2;
+        }
+        if (pc.need_virial != 0)
+            aadd_lt(atom_virial[atom_i], virial_from_force_dis(f, dr));
+    }
+}

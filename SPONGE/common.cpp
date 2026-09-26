@@ -1,4 +1,4 @@
-﻿#include "common.h"
+#include "common.h"
 
 #include "control.h"
 
@@ -10,7 +10,7 @@
 #define COMMON_SIMPLE_DEVICE_FOR(i, N) SIMPLE_DEVICE_FOR(i, N)
 #endif
 
-#ifdef USE_CPU
+#if defined(USE_CPU) || defined(USE_VULKAN)
 float rnorm3df(float a, float b, float c)
 {
     return 1.0f / sqrtf(a * a + b * b + c * c);
@@ -81,7 +81,9 @@ int atomicExch(int* address, int val)
     }
     return old;
 }
+#endif
 
+#ifdef USE_CPU
 void deviceMemcpy(void* to, const void* from, size_t size,
                   deviceMemcpyKind kind)
 {
@@ -147,17 +149,39 @@ static __global__ void Reset_List_Device(const int element_numbers, float* list,
 void Reset_List(int* list, const int replace_element, const int element_numbers,
                 const int threads)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+        int value;
+    } params{element_numbers, replace_element};
+    const void* buffers[] = {list};
+    VK_LAUNCH(reset_list_int, (element_numbers + threads - 1) / threads, 1,
+              threads, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Reset_List_Device,
                          (element_numbers + threads - 1) / threads, threads, 0,
                          NULL, element_numbers, list, replace_element);
+#endif
 }
 
 void Reset_List(float* list, const float replace_element,
                 const int element_numbers, const int threads)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+        float value;
+    } params{element_numbers, replace_element};
+    const void* buffers[] = {list};
+    VK_LAUNCH(reset_list_float, (element_numbers + threads - 1) / threads, 1,
+              threads, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Reset_List_Device,
                          (element_numbers + threads - 1) / threads, threads, 0,
                          NULL, element_numbers, list, replace_element);
+#endif
 }
 
 static __global__ void Scale_List_Device(const int element_numbers, float* list,
@@ -169,9 +193,20 @@ static __global__ void Scale_List_Device(const int element_numbers, float* list,
 void Scale_List(float* list, const float scaler, const int element_numbers,
                 int threads)
 {
+#ifdef USE_VULKAN
+    struct
+    {
+        int n;
+        float scaler;
+    } params{element_numbers, scaler};
+    const void* buffers[] = {list};
+    VK_LAUNCH(scale_list_float, (element_numbers + threads - 1) / threads, 1,
+              threads, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Scale_List_Device,
                          (element_numbers + threads - 1) / threads, threads, 0,
                          NULL, element_numbers, list, scaler);
+#endif
 }
 static __global__ void Sum_Of_List_Device(const int start, const int end,
                                           const int* list, int* sum)
@@ -295,8 +330,19 @@ static __global__ void Sum_Of_List_Device(const int start, const int end,
 void Sum_Of_List(const int* list, int* sum, const int end, const int start,
                  int threads)
 {
+#ifdef USE_VULKAN
+    deviceMemset(sum, 0, sizeof(int));
+    struct
+    {
+        int start;
+        int end;
+    } params{start, end};
+    const void* buffers[] = {list, sum};
+    VK_LAUNCH(sum_of_list_int, 1, 1, threads, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Sum_Of_List_Device, 1, threads, 0, NULL, start, end,
                          list, sum);
+#endif
 }
 
 // 使用双精度 warp shuffle 归约的 float 求和，接口仍为 float
@@ -395,7 +441,50 @@ static __global__ void Sum_Of_List_Float_Final(const double* block_sums,
 void Sum_Of_List(const float* list, float* sum, const int end, const int start,
                  int threads)
 {
-#ifdef GPU_ARCH_NAME
+#if defined(USE_VULKAN)
+    int device_warp = static_cast<int>(CONTROLLER::device_warp);
+    if (device_warp < 1) device_warp = 32;
+    if (threads < device_warp) threads = device_warp;
+    if (threads > 1024) threads = 1024;
+    threads = ((threads + device_warp - 1) / device_warp) * device_warp;
+
+    int grid = (end - start + threads - 1) / threads;
+    if (grid < 1) grid = 1;
+
+    static float* s_block_sums = nullptr;
+    static int s_block_sums_capacity = 0;
+    if (grid > s_block_sums_capacity)
+    {
+        if (s_block_sums != nullptr) deviceFree(s_block_sums);
+        int new_capacity = s_block_sums_capacity > 0 ? s_block_sums_capacity
+                                                     : 256;
+        while (new_capacity < grid) new_capacity *= 2;
+        deviceMalloc((void**)&s_block_sums, sizeof(float) * new_capacity);
+        s_block_sums_capacity = new_capacity;
+    }
+
+    struct
+    {
+        int start;
+        int end;
+    } block_params{start, end};
+    const void* block_buffers[] = {list, s_block_sums};
+    VK_LAUNCH(sum_of_list_float_block, grid, 1, threads, 1, block_buffers,
+              &block_params, NULL);
+
+    int final_threads = (grid < 256) ? grid : 256;
+    if (final_threads < device_warp) final_threads = device_warp;
+    final_threads =
+        ((final_threads + device_warp - 1) / device_warp) * device_warp;
+    if (final_threads > 256) final_threads = 256;
+    struct
+    {
+        int block_count;
+    } final_params{grid};
+    const void* final_buffers[] = {s_block_sums, sum};
+    VK_LAUNCH(sum_of_list_float_final, 1, 1, final_threads, 1, final_buffers,
+              &final_params, NULL);
+#elif defined(GPU_ARCH_NAME)
     int device_warp = static_cast<int>(CONTROLLER::device_warp);
     if (device_warp < 1) device_warp = 32;
     if (threads < device_warp) threads = device_warp;
@@ -445,15 +534,37 @@ void Sum_Of_List(const float* list, float* sum, const int end, const int start,
 void Sum_Of_List(const VECTOR* list, VECTOR* sum, const int end,
                  const int start, int threads)
 {
+#ifdef USE_VULKAN
+    deviceMemset(sum, 0, sizeof(VECTOR));
+    struct
+    {
+        int start;
+        int end;
+    } params{start, end};
+    const void* buffers[] = {list, sum};
+    VK_LAUNCH(sum_of_list_vector, 1, 1, threads, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Sum_Of_List_Device, 1, threads, 0, NULL, start, end,
                          list, sum);
+#endif
 }
 
 void Sum_Of_List(const LTMatrix3* list, LTMatrix3* sum, const int end,
                  const int start, int threads)
 {
+#ifdef USE_VULKAN
+    deviceMemset(sum, 0, sizeof(LTMatrix3));
+    struct
+    {
+        int start;
+        int end;
+    } params{start, end};
+    const void* buffers[] = {list, sum};
+    VK_LAUNCH(sum_of_list_ltmat, 1, 1, threads, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(Sum_Of_List_Device, 1, threads, 0, NULL, start, end,
                          list, sum);
+#endif
 }
 
 __global__ void Setup_Rand_Normal_Kernel(const int float4_numbers,

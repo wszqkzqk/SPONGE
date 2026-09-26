@@ -1,4 +1,4 @@
-﻿#include "eeq.h"
+#include "eeq.h"
 
 #define COULOMB_CONSTANT (332.05221729f)
 #ifdef USE_CPU
@@ -9,7 +9,7 @@
 #define EEQ_SIMPLE_DEVICE_FOR(i, N) SIMPLE_DEVICE_FOR(i, N)
 #endif
 
-#ifndef USE_CPU
+#if !defined(USE_CPU) && !defined(USE_VULKAN)
 #include <thrust/device_ptr.h>
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
@@ -373,7 +373,7 @@ static __global__ void Elementwise_Multiply(int n, float* out, const float* a,
     EEQ_SIMPLE_DEVICE_FOR(i, n) { out[i] = a[i] * b[i]; }
 }
 
-#ifndef USE_CPU
+#if !defined(USE_CPU) && !defined(USE_VULKAN)
 
 static __device__ __forceinline__ float EEQ_Warp_Reduce_Sum(float value)
 {
@@ -623,7 +623,7 @@ static __global__ void EEQ_Calculate_Eele_Kernel(int n, float* out,
 // =====================================================================
 // GPU-only kernels: device-side CG scalar operations
 // =====================================================================
-#ifndef USE_CPU
+#if !defined(USE_CPU) && !defined(USE_VULKAN)
 
 static __global__ void CG_Compute_Alpha_Kernel(const float* rr_old,
                                                const float* pAp, float* alpha)
@@ -695,7 +695,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                          d_h_numnbrs);
 
     int total_nnz = 0;
-#ifndef USE_CPU
+#if !defined(USE_CPU) && !defined(USE_VULKAN)
     {
         thrust::device_ptr<int> d_numnbrs_ptr(d_h_numnbrs);
         thrust::device_ptr<int> d_firstnbrs_ptr(d_h_firstnbrs);
@@ -738,7 +738,7 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     }
 
     // ---- CG solver ----
-#ifndef USE_CPU
+#if !defined(USE_CPU) && !defined(USE_VULKAN)
     // GPU path: Jacobi-preconditioned CG, device-side scalars
     auto solve = [&](float* x, float* b_in, bool warm)
     {

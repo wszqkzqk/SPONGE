@@ -1,4 +1,4 @@
-﻿#include "control.h"
+#include "control.h"
 
 #define SPONGE_VERSION "v" SPONGE_VERSION_STR
 
@@ -596,7 +596,7 @@ void CONTROLLER::Default_Set()
 // 初始化设备
 void CONTROLLER::Init_Device()
 {
-#ifdef USE_GPU
+#if defined(USE_GPU) || defined(USE_VULKAN)
     printf("    Start initializing GPU\n");
 
 #ifdef USE_CUDA
@@ -620,13 +620,20 @@ void CONTROLLER::Init_Device()
 #else
     printf("        Compiled by unknown HIP/ROCm version\n");
 #endif
+#elif defined(USE_VULKAN)
+    printf("        Compiled with Vulkan backend\n");
+#endif
+#ifdef USE_VULKAN
+    const char* device_backend_name = VULKAN_ARCH_NAME;
+#else
+    const char* device_backend_name = GPU_ARCH_NAME;
 #endif
 
     if (deviceInit(0) != DEVICE_INIT_SUCCESS)
     {
         std::string error_reason =
             string_format("Reason:\n\tFail to initialize %backend% runtime",
-                          {{"backend", GPU_ARCH_NAME}});
+                          {{"backend", device_backend_name}});
         Throw_SPONGE_Error(spongeErrorMallocFailed, "CONTROLLER::Init_Device",
                            error_reason.c_str());
     }
@@ -682,6 +689,11 @@ neither equal to the size of MPI ranks (%d) nor 1\n",
             "            Device %d:\n                Name: %s\n                "
             "Memory: %.1f GB\n                Architecture: %s\n",
             i, prop.name, GlobalMem, runtime_arch.c_str());
+#elif defined(USE_VULKAN)
+        printf(
+            "            Device %d:\n                Name: %s\n                "
+            "Memory: %.1f GB\n                Vulkan API: %d.%d\n",
+            i, prop.name, GlobalMem, prop.major, prop.minor);
 #else
         printf(
             "            Device %d:\n                Name: %s\n                "
@@ -691,7 +703,11 @@ neither equal to the size of MPI ranks (%d) nor 1\n",
         if (i == working_device)
         {
             device_max_thread = prop.maxThreadsPerBlock;
+#ifdef USE_VULKAN
+            device_warp = prop.warp_size;
+#else
             device_warp = prop.warpSize;
+#endif
         }
     }
     if (count <= working_device)
@@ -734,6 +750,9 @@ neither equal to the size of MPI ranks (%d) nor 1\n",
     printf("        Runtime HIP ARCH %s\n",
            Get_Device_Runtime_Arch_Name(prop).c_str());
     printf("        Runtime backend HIP/ROCm\n");
+#endif
+#ifdef USE_VULKAN
+    printf("        Runtime backend Vulkan\n");
 #endif
     printf("    End initializing GPU\n");
 #else

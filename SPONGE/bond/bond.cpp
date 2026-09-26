@@ -1,7 +1,25 @@
-﻿#include "bond.h"
+#include "bond.h"
 
 #include "../xponge/load/native/bond.hpp"
 #include "../xponge/xponge.h"
+
+#ifdef USE_VULKAN
+struct BondForceVkParams
+{
+    int bond_numbers;
+    Boundary boundary;
+    int local_atom_numbers;
+    int need_atom_energy;
+    int need_virial;
+};
+static_assert(sizeof(BondForceVkParams) == 68,
+              "BondForceVkParams must match the GLSL push constant layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 
 // 由于，大部分情况下bond的energy和virial计算耗时不显著，为简化bond模块的逻辑复杂度，
 // 将bond
@@ -230,11 +248,25 @@ void BOND::Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
     if (!is_initialized) return;
     num_bond_local = 0;
     this->local_atom_numbers = local_atom_numbers;
+#ifdef USE_VULKAN
+    struct
+    {
+        int bond_numbers;
+    } params{this->bond_numbers};
+    const void* buffers[] = {this->d_atom_a,      this->d_atom_b,
+                             atom_local_label,    atom_local_id,
+                             this->d_atom_a_local, this->d_atom_b_local,
+                             this->d_k,           this->d_r0,
+                             this->d_k_local,     this->d_r0_local,
+                             this->d_num_bond_local};
+    VK_LAUNCH(bond_get_local, 1, 1, 1, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(
         get_local_device, 1, 1, 0, NULL, this->bond_numbers, this->d_atom_a,
         this->d_atom_b, atom_local_label, atom_local_id, this->d_atom_a_local,
         this->d_atom_b_local, this->d_k, this->d_r0, this->d_k_local,
         this->d_r0_local, this->d_num_bond_local);
+#endif
     deviceMemcpy(&this->num_bond_local, this->d_num_bond_local, sizeof(int),
                  deviceMemcpyDeviceToHost);
 }
@@ -245,6 +277,27 @@ void BOND::Bond_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+#ifdef USE_VULKAN
+        BondForceVkParams params{this->num_bond_local,
+                                 boundary,
+                                 this->local_atom_numbers,
+                                 need_atom_energy,
+                                 need_virial};
+        const void* buffers[] = {
+            crd,
+            this->d_atom_a_local,
+            this->d_atom_b_local,
+            this->d_k_local,
+            this->d_r0_local,
+            frc,
+            vk_or_dummy(atom_energy, frc),
+            vk_or_dummy(atom_virial, frc),
+            this->d_bond_ene};
+        VK_LAUNCH(bond_force,
+                  (bond_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             Bond_Force_With_Atom_Energy_And_Virial_Device,
             (bond_numbers + CONTROLLER::device_max_thread - 1) /
@@ -254,6 +307,7 @@ void BOND::Bond_Force_With_Atom_Energy_And_Virial(
             this->d_atom_b_local, this->d_k_local, this->d_r0_local, frc,
             need_atom_energy, atom_energy, need_virial, atom_virial,
             this->d_bond_ene);
+#endif
     }
 }
 

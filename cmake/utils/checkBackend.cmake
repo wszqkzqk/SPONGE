@@ -232,7 +232,29 @@ function(CheckNeon)
   endif()
 endfunction()
 
-set(PARALLEL_BACKEND_GPU_CHECK_FUNCTIONS CheckCuda CheckHIP)
+function(CheckVulkan)
+  message(STATUS "Performing Test HAVE_VULKAN")
+  find_path(
+    SPONGE_VULKAN_INCLUDE_DIR
+    NAMES "vulkan/vulkan.h"
+    HINTS "$ENV{VULKAN_SDK}" "$ENV{CONDA_PREFIX}"
+    PATH_SUFFIXES "include")
+  find_library(
+    SPONGE_VULKAN_LIBRARY
+    NAMES "vulkan" "vulkan-1"
+    HINTS "$ENV{VULKAN_SDK}" "$ENV{CONDA_PREFIX}"
+    PATH_SUFFIXES "lib")
+  if(SPONGE_VULKAN_INCLUDE_DIR AND SPONGE_VULKAN_LIBRARY)
+    set(PARALLEL_BACKEND
+        "vulkan"
+        PARENT_SCOPE)
+    message(STATUS "Performing Test HAVE_VULKAN - Success")
+  else()
+    message(STATUS "Performing Test HAVE_VULKAN - Failed")
+  endif()
+endfunction()
+
+set(PARALLEL_BACKEND_GPU_CHECK_FUNCTIONS CheckCuda CheckHIP CheckVulkan)
 
 set(PARALLEL_BACKEND_CPU_CHECK_FUNCTIONS
     CheckAVX512

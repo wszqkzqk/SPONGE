@@ -1,4 +1,4 @@
-﻿#ifndef SPONGE_LANE_GROUP_H
+#ifndef SPONGE_LANE_GROUP_H
 #define SPONGE_LANE_GROUP_H
 
 #include <stdint.h>
@@ -7,6 +7,8 @@
 #include "../device_backend/hip_api.h"
 #elif defined(USE_CUDA)
 #include "../device_backend/cuda_api.h"
+#elif defined(USE_VULKAN)
+#include "../device_backend/vulkan_api.h"
 #else
 #include "../device_backend/cpu_api.h"
 #endif

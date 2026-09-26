@@ -1,0 +1,17 @@
+layout(set = 0, binding = 0, std430) buffer List { Vec3 list[]; };
+layout(set = 0, binding = 1, std430) buffer Sum { Vec3 sum[]; };
+layout(push_constant) uniform Params { int start; int end; } pc;
+void main()
+{
+    Vec3 v = Vec3(0.0, 0.0, 0.0);
+    for (uint i = gl_LocalInvocationIndex + uint(pc.start); i < uint(pc.end);
+         i += gl_WorkGroupSize.x)
+    {
+        Vec3 t = list[i];
+        v = v3_add(v, t);
+    }
+    v.x = block_sum(v.x);
+    v.y = block_sum(v.y);
+    v.z = block_sum(v.z);
+    if (gl_LocalInvocationIndex == 0u) sum[0] = v;
+}

@@ -3,7 +3,8 @@ include("${PROJECT_ROOT_DIR}/cmake/parallel/none.cmake")
 if(MSVC)
   message(
     WARNING "NEON backend selected, but no explicit MSVC ARM NEON flag is set")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|ARM)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|ARM)"
+       AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "64")
   target_compile_options(common_libraries INTERFACE -mfpu=neon)
 else()
   target_compile_options(common_libraries INTERFACE -march=armv8-a+simd)

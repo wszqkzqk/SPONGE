@@ -63,7 +63,7 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/native_init.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp)
 
-set(SOURCES ${SPONGE_SOURCES})
+set(SOURCES ${SPONGE_SOURCES} ${SPONGE_VULKAN_BACKEND_SOURCES})
 
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(HighFive CONFIG REQUIRED)

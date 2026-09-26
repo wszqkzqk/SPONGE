@@ -1,0 +1,7 @@
+layout(set = 0, binding = 0, std430) buffer List { int list[]; };
+layout(push_constant) uniform Params { int n; int value; } pc;
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (int(i) < pc.n) list[i] = pc.value;
+}

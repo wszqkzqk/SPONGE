@@ -1,0 +1,12 @@
+layout(set = 0, binding = 0, std430) buffer BlockSums { float block_sums[]; };
+layout(set = 0, binding = 1, std430) buffer Sum { float sum[]; };
+layout(push_constant) uniform Params { int block_count; } pc;
+void main()
+{
+    Kahan k = Kahan(0.0, 0.0);
+    for (uint i = gl_LocalInvocationIndex; i < uint(pc.block_count);
+         i += gl_WorkGroupSize.x)
+        kahan_add(k, block_sums[i]);
+    float total = block_sum(k.sum);
+    if (gl_LocalInvocationIndex == 0u) sum[0] = total;
+}

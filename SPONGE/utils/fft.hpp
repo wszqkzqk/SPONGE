@@ -1,4 +1,4 @@
-﻿/*
+/*
 CUFFT for cuda backend - license: Nvidia SDK License
 MKL for x86 backend - license: Intel Simplified Software License
 KML for kunpeng backend - license: 鲲鹏应用使能套件BoostKit用户许可协议 2.0
@@ -13,6 +13,8 @@ Agreement HCFFT for hpcc backend -  cooperated with 沐曦MetaX
 #include "../third_party/device_backend/hip_api.h"
 #elif defined(USE_CUDA)
 #include "../third_party/device_backend/cuda_api.h"
+#elif defined(USE_VULKAN)
+#include "../third_party/device_backend/vulkan_api.h"
 #else
 #include "../third_party/device_backend/cpu_api.h"
 #endif
@@ -54,7 +56,7 @@ struct SPONGE_FFT_WRAPPER
                                     int dimension, FFT_SIZE_t* length,
                                     FFT_TYPE type)
     {
-#ifdef USE_GPU
+#if defined(USE_GPU) || defined(USE_VULKAN)
         return deviceFFTPlanMany(handle, dimension, length, NULL, 0, 0, NULL, 0,
                                  0, type, batch);
 #else
@@ -92,7 +94,7 @@ struct SPONGE_FFT_WRAPPER
 
     static void R2C(FFT_HANDLE handle, float* input, FFT_COMPLEX* output)
     {
-#ifdef USE_GPU
+#if defined(USE_GPU) || defined(USE_VULKAN)
         deviceFFTExecR2C(handle, input, output);
 #else
         fftwf_execute_dft_r2c(handle, input, (fftwf_complex*)output);
@@ -101,7 +103,7 @@ struct SPONGE_FFT_WRAPPER
 
     static void C2R(FFT_HANDLE handle, FFT_COMPLEX* input, float* output)
     {
-#ifdef USE_GPU
+#if defined(USE_GPU) || defined(USE_VULKAN)
         deviceFFTExecC2R(handle, input, output);
 #else
         fftwf_execute_dft_c2r(handle, (fftwf_complex*)input, output);
@@ -110,7 +112,7 @@ struct SPONGE_FFT_WRAPPER
 
     static void Destroy_FFT_Plan(FFT_HANDLE* handle)
     {
-#ifdef USE_GPU
+#if defined(USE_GPU) || defined(USE_VULKAN)
         deviceFFTDestroy(handle[0]);
 #else
         fftwf_destroy_plan(handle[0]);

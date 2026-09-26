@@ -1,0 +1,25 @@
+layout(set = 0, binding = 0, std430) buffer List { LTMat list[]; };
+layout(set = 0, binding = 1, std430) buffer Sum { LTMat sum[]; };
+layout(push_constant) uniform Params { int start; int end; } pc;
+void main()
+{
+    LTMat v = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint i = gl_LocalInvocationIndex + uint(pc.start); i < uint(pc.end);
+         i += gl_WorkGroupSize.x)
+    {
+        LTMat t = list[i];
+        v.a11 += t.a11;
+        v.a21 += t.a21;
+        v.a22 += t.a22;
+        v.a31 += t.a31;
+        v.a32 += t.a32;
+        v.a33 += t.a33;
+    }
+    v.a11 = block_sum(v.a11);
+    v.a21 = block_sum(v.a21);
+    v.a22 = block_sum(v.a22);
+    v.a31 = block_sum(v.a31);
+    v.a32 = block_sum(v.a32);
+    v.a33 = block_sum(v.a33);
+    if (gl_LocalInvocationIndex == 0u) sum[0] = v;
+}

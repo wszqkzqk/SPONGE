@@ -1,0 +1,13 @@
+layout(set = 0, binding = 0, std430) buffer List { float list[]; };
+layout(set = 0, binding = 1, std430) buffer BlockSums { float block_sums[]; };
+layout(push_constant) uniform Params { int start; int end; } pc;
+void main()
+{
+    Kahan k = Kahan(0.0, 0.0);
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x + uint(pc.start); i < uint(pc.end);
+         i += stride)
+        kahan_add(k, list[i]);
+    float total = block_sum(k.sum);
+    if (gl_LocalInvocationIndex == 0u) block_sums[gl_WorkGroupID.x] = total;
+}

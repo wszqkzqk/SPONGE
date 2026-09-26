@@ -1,0 +1,12 @@
+layout(set = 0, binding = 0, std430) buffer List { int list[]; };
+layout(set = 0, binding = 1, std430) buffer Sum { int sum[]; };
+layout(push_constant) uniform Params { int start; int end; } pc;
+void main()
+{
+    int v = 0;
+    for (uint i = gl_LocalInvocationIndex + uint(pc.start); i < uint(pc.end);
+         i += gl_WorkGroupSize.x)
+        v += list[i];
+    v = block_sum_int(v);
+    if (gl_LocalInvocationIndex == 0u) atomicAdd(sum[0], v);
+}

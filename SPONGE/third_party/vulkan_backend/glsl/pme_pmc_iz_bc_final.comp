@@ -1,0 +1,26 @@
+layout(set = 0, binding = 0, std430) buffer C { vec2 c[]; };
+layout(set = 0, binding = 1, std430) buffer B { vec2 b[]; };
+layout(set = 0, binding = 2, std430) buffer BC { float bc[]; };
+layout(push_constant) uniform Params
+{
+    int Nfft;
+    int fftx;
+    int ffty;
+    int fftz;
+}
+pc;
+void main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= uint(pc.Nfft)) return;
+    int t = int(tid);
+    int fftc = pc.fftz / 2 + 1;
+    int ffta = pc.fftx / 2 + 1;
+    int zi = t - (t / fftc) * fftc;
+    int yi = (t / fftc) - (t / fftc / pc.ffty) * pc.ffty;
+    int xi = t / fftc / pc.ffty;
+    if (xi >= pc.fftx / 2) xi = pc.fftx - xi;
+    int ti = zi * ffta * pc.ffty + yi * ffta + xi;
+    float bv = b[ti].x;
+    bc[tid] = c[ti].x / (bv * bv);
+}

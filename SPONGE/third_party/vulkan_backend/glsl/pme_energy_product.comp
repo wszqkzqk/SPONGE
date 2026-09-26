@@ -1,0 +1,15 @@
+layout(set = 0, binding = 0, std430) buffer List1 { float list1[]; };
+layout(set = 0, binding = 1, std430) buffer List2 { float list2[]; };
+layout(set = 0, binding = 2, std430) buffer Sum { float sum[]; };
+layout(push_constant) uniform Params { int element_number; } pc;
+void main()
+{
+    float lin = 0.0;
+    for (uint i = gl_LocalInvocationID.x; i < uint(pc.element_number);
+         i += gl_WorkGroupSize.x)
+    {
+        lin = lin + list1[i] * list2[i];
+    }
+    float total = block_sum(lin);
+    if (gl_LocalInvocationIndex == 0u) sum[0] = total;
+}

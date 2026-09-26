@@ -1,0 +1,40 @@
+const float PME_Ma[4] = float[4](1.0 / 6.0, -0.5, 0.5, -1.0 / 6.0);
+const float PME_Mb[4] = float[4](0.0, 0.5, -1.0, 0.5);
+const float PME_Mc[4] = float[4](0.0, 0.5, 0.0, -0.5);
+const float PME_Md[4] = float[4](0.0, 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0);
+layout(set = 0, binding = 0, std430) buffer AtomNear { int atom_near[]; };
+layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 2, std430) buffer Frxyz { Vec3 frxyz[]; };
+layout(set = 0, binding = 3, std430) buffer Q { float pme_q[]; };
+layout(push_constant) uniform Params { int atom_numbers; int PME_Nall; } pc;
+void main()
+{
+    int atom = int(gl_GlobalInvocationID.x);
+    if (atom >= pc.atom_numbers) return;
+    int base = atom * 64;
+    Vec3 fr = frxyz[atom];
+    float tempcharge = charge[atom];
+    for (int k = int(gl_LocalInvocationID.y); k < 64;
+         k += int(gl_WorkGroupSize.y))
+    {
+        int kx = k / 16;
+        float tempf = fr.x;
+        float tempf2 = tempf * tempf;
+        float tempQ = tempcharge * (PME_Ma[kx] * tempf * tempf2 +
+                                    PME_Mb[kx] * tempf2 + PME_Mc[kx] * tempf +
+                                    PME_Md[kx]);
+        kx = (k - kx * 16) / 4;
+        tempf = fr.y;
+        tempf2 = tempf * tempf;
+        tempQ = tempQ * (PME_Ma[kx] * tempf * tempf2 + PME_Mb[kx] * tempf2 +
+                         PME_Mc[kx] * tempf + PME_Md[kx]);
+        kx = k - (k / 4) * 4;
+        tempf = fr.z;
+        tempf2 = tempf * tempf;
+        tempQ = tempQ * (PME_Ma[kx] * tempf * tempf2 + PME_Mb[kx] * tempf2 +
+                         PME_Mc[kx] * tempf + PME_Md[kx]);
+        int near_index = atom_near[base + k];
+        if (uint(near_index) < uint(pc.PME_Nall))
+            afadd(pme_q[near_index], tempQ);
+    }
+}

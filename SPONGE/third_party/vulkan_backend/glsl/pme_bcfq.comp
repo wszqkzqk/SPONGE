@@ -1,0 +1,9 @@
+layout(set = 0, binding = 0, std430) buffer FQ { vec2 fq[]; };
+layout(set = 0, binding = 1, std430) buffer BC { float bc[]; };
+layout(push_constant) uniform Params { int PME_Nfft; } pc;
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= uint(pc.PME_Nfft)) return;
+    fq[index] = fq[index] * bc[index];
+}

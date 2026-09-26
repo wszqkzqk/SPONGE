@@ -1,0 +1,64 @@
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 2, std430) buffer ExclStart { int excluded_list_start[]; };
+layout(set = 0, binding = 3, std430) buffer ExclList { int excluded_list[]; };
+layout(set = 0, binding = 4, std430) buffer ExclNum { int excluded_atom_numbers[]; };
+layout(set = 0, binding = 5, std430) buffer Frc { Vec3 frc[]; };
+layout(set = 0, binding = 6, std430) buffer AtomEne { float atom_ene[]; };
+layout(set = 0, binding = 7, std430) buffer ThisEne { float this_ene[]; };
+layout(set = 0, binding = 8, std430) buffer AtomVirial { LTMat atom_virial[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    Boundary boundary;
+    float pme_beta;
+    int need_energy;
+    int need_virial;
+    float factor;
+}
+pc;
+void main()
+{
+    int local_i = int(gl_GlobalInvocationID.x);
+    if (local_i >= pc.atom_numbers) return;
+    int global_i = local_i;
+    int excluded_numbers = excluded_atom_numbers[global_i];
+    if (excluded_numbers <= 0) return;
+    int list_start = excluded_list_start[global_i];
+    int list_end = list_start + excluded_numbers;
+    float charge_i = charge[local_i];
+    Vec3 r1 = crd[local_i];
+    Vec3 frc_record = v3(0.0, 0.0, 0.0);
+    LTMat virial_record = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    float ene_lin = 0.0;
+    for (int i = list_start; i < list_end; i++)
+    {
+        int local_j = excluded_list[i];
+        Vec3 r2 = crd[local_j];
+        float charge_j = charge[local_j];
+        Vec3 dr = get_displacement_periodic(r2, r1, pc.boundary);
+        float dr2 = v3_dot(dr, dr);
+        float dr_abs = sqrt(dr2);
+        float beta_dr = pc.pme_beta * dr_abs;
+        float frc_abs = beta_dr * 1.1283791670218446 * exp(-beta_dr * beta_dr) +
+                        erfcf(beta_dr);
+        frc_abs = (frc_abs - 1.0) / dr2 / dr_abs;
+        frc_abs = -charge_i * charge_j * frc_abs;
+        Vec3 frc_lin = v3_scale(dr, frc_abs);
+        if (pc.factor > 0.6) aadd_v3(frc[local_j], v3_neg(frc_lin));
+        frc_record = v3_add(frc_record, frc_lin);
+        if (pc.need_energy != 0)
+            ene_lin -= pc.factor * charge_i * charge_j * erff(beta_dr) / dr_abs;
+        if (pc.need_virial != 0)
+            virial_record = lt_sub(
+                virial_record,
+                lt_scale(virial_from_force_dis(frc_lin, dr), pc.factor));
+    }
+    aadd_v3(frc[local_i], frc_record);
+    if (pc.need_energy != 0)
+    {
+        afadd(atom_ene[local_i], ene_lin);
+        this_ene[local_i] = ene_lin;
+    }
+    if (pc.need_virial != 0) aadd_lt(atom_virial[local_i], virial_record);
+}

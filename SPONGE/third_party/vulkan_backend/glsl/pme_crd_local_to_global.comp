@@ -1,0 +1,10 @@
+layout(set = 0, binding = 0, std430) buffer LCrd { Vec3 l_crd[]; };
+layout(set = 0, binding = 1, std430) buffer GCrd { Vec3 g_crd[]; };
+layout(set = 0, binding = 2, std430) buffer IdLG { int atom_id_l_g[]; };
+layout(push_constant) uniform Params { int n; } pc;
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(pc.n)) return;
+    g_crd[atom_id_l_g[i]] = l_crd[i];
+}

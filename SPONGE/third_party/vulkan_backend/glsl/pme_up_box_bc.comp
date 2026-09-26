@@ -1,0 +1,62 @@
+layout(set = 0, binding = 0, std430) buffer BC { float pme_bc[]; };
+layout(set = 0, binding = 1, std430) buffer BC0 { float pme_bc0[]; };
+layout(set = 0, binding = 2, std430) buffer VirialBC { LTMat virial_bc[]; };
+layout(push_constant) uniform Params
+{
+    int fftx;
+    int ffty;
+    int fftz;
+    float mprefactor;
+    LTMat rcell;
+    float volume;
+    int block_z;
+}
+pc;
+void main()
+{
+    int ky_local = int(gl_LocalInvocationID.y) / pc.block_z;
+    int kz0 = int(gl_LocalInvocationID.y) - ky_local * pc.block_z;
+    int ky_rows = int(gl_WorkGroupSize.y) / pc.block_z;
+    int fftc = pc.fftz / 2 + 1;
+    for (int kx = int(gl_GlobalInvocationID.x); kx < pc.fftx;
+         kx += int(gl_NumWorkGroups.x * gl_WorkGroupSize.x))
+    {
+        float kxrp = float(kx);
+        if (kx > pc.fftx / 2) kxrp = float(kx - pc.fftx);
+        for (int ky = int(gl_WorkGroupID.y) * ky_rows + ky_local; ky < pc.ffty;
+             ky += int(gl_NumWorkGroups.y) * ky_rows)
+        {
+            float kyrp = float(ky);
+            if (ky > pc.ffty / 2) kyrp = float(ky - pc.ffty);
+            for (int kz = kz0; kz <= pc.fftz / 2; kz += pc.block_z)
+            {
+                Vec3 m = v3_mul_transpose_lt(
+                    v3(kxrp, kyrp, float(kz)), pc.rcell.a11, pc.rcell.a21,
+                    pc.rcell.a22, pc.rcell.a31, pc.rcell.a32, pc.rcell.a33);
+                float msq = v3_dot(m, m);
+                int index = kx * pc.ffty * fftc + ky * fftc + kz;
+                if (kx + ky + kz == 0)
+                {
+                    pme_bc[index] = 0.0;
+                    virial_bc[index] = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                }
+                else
+                {
+                    float bc_local = 1.0 / 3.1415926 / msq *
+                                     exp(pc.mprefactor * msq) / pc.volume *
+                                     pme_bc0[index];
+                    float vfac = 2.0 / msq * (1.0 + pc.mprefactor * msq);
+                    LTMat vir0;
+                    vir0.a11 = 1.0 - vfac * m.x * m.x;
+                    vir0.a21 = 0.0 - vfac * m.y * m.x;
+                    vir0.a22 = 1.0 - vfac * m.y * m.y;
+                    vir0.a31 = 0.0 - vfac * m.z * m.x;
+                    vir0.a32 = 0.0 - vfac * m.z * m.y;
+                    vir0.a33 = 1.0 - vfac * m.z * m.z;
+                    virial_bc[index] = lt_scale(vir0, 0.5 * bc_local);
+                    pme_bc[index] = bc_local;
+                }
+            }
+        }
+    }
+}

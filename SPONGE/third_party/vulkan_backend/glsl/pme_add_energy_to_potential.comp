@@ -1,0 +1,7 @@
+layout(set = 0, binding = 0, std430) buffer Ene { float ene[]; };
+layout(set = 0, binding = 1, std430) buffer SelfEne { float self_ene[]; };
+layout(set = 0, binding = 2, std430) buffer ReciprocalEne { float reciprocal_ene[]; };
+void main()
+{
+    ene[0] += self_ene[0] + reciprocal_ene[0];
+}

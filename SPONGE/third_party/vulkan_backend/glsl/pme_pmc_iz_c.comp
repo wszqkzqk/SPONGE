@@ -1,0 +1,47 @@
+layout(set = 0, binding = 0, std430) buffer C { vec2 c[]; };
+layout(push_constant) uniform Params
+{
+    int PME_Nfft;
+    int fftx;
+    int ffty;
+    int fftz;
+    float bli_x2;
+    float bli_y2;
+    float grid_length_of_z;
+    float beta;
+    float scalor;
+}
+pc;
+void main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= uint(pc.PME_Nfft)) return;
+    int t = int(tid);
+    int ffta = pc.fftx / 2 + 1;
+    int grid_x = t - (t / ffta) * ffta;
+    int grid_y = (t - (t / (ffta * pc.ffty)) * (ffta * pc.ffty)) / ffta;
+    int grid_z = t / pc.ffty / ffta;
+    if (grid_x >= pc.fftx / 2) grid_x = pc.fftx - grid_x;
+    if (grid_y >= pc.ffty / 2) grid_y = pc.ffty - grid_y;
+    if (grid_z >= pc.fftz / 2) grid_z = pc.fftz - grid_z;
+    float z = pc.grid_length_of_z * float(grid_z);
+    float A = 2.0 * 3.1415926535897932 *
+              sqrt(float(grid_x * grid_x) * pc.bli_x2 +
+                   float(grid_y * grid_y) * pc.bli_y2);
+    float AB = A / pc.beta / 2.0;
+    float zb2 = z * pc.beta;
+    float AB_minus_zb2 = AB - zb2;
+    float AB_plus_zb2 = AB + zb2;
+    float temp_f = exp(-A * z) *
+                   (erfcf(AB_minus_zb2) +
+                    exp(2.0 * A * z - AB_plus_zb2 * AB_plus_zb2) *
+                        erfcxf(AB_plus_zb2));
+    temp_f = temp_f / A;
+    if (grid_x == 0 && grid_y == 0)
+    {
+        temp_f = 2.0 / sqrt(3.1415926535897932) / pc.beta *
+                     (1.0 - exp(-zb2 * zb2)) -
+                 2.0 * z * erff(zb2);
+    }
+    c[tid] = vec2(pc.scalor * temp_f, 0.0);
+}

@@ -1,0 +1,72 @@
+struct UIntVec3
+{
+    uint x, y, z;
+};
+layout(set = 0, binding = 0, std430) buffer Crd { Vec3 crd[]; };
+layout(set = 0, binding = 1, std430) buffer AtomNear { int atom_near[]; };
+layout(set = 0, binding = 2, std430) buffer Uxyz { UIntVec3 uxyz[]; };
+layout(set = 0, binding = 3, std430) buffer Frxyz { Vec3 frxyz[]; };
+layout(set = 0, binding = 4, std430) buffer ForceBackup { Vec3 force_backup[]; };
+layout(push_constant) uniform Params
+{
+    int PME_Nin;
+    Boundary boundary;
+    int atom_numbers;
+    int fftx;
+    int ffty;
+    int fftz;
+}
+pc;
+void main()
+{
+    int atom = int(gl_GlobalInvocationID.x);
+    if (atom >= pc.atom_numbers) return;
+    force_backup[atom] = v3(0.0, 0.0, 0.0);
+    Vec3 frac_crd = v3_mul_lt(crd[atom], pc.boundary.r11, pc.boundary.r21,
+                              pc.boundary.r22, pc.boundary.r31, pc.boundary.r32,
+                              pc.boundary.r33);
+    frac_crd = v3_sub(frac_crd, v3_floor(frac_crd));
+    if ((floatBitsToUint(frac_crd.x) & 0x7F800000u) == 0x7F800000u ||
+        (floatBitsToUint(frac_crd.y) & 0x7F800000u) == 0x7F800000u ||
+        (floatBitsToUint(frac_crd.z) & 0x7F800000u) == 0x7F800000u)
+    {
+        frac_crd = v3(0.0, 0.0, 0.0);
+    }
+    frac_crd.x *= float(pc.fftx);
+    int tempux = int(frac_crd.x);
+    tempux = tempux < 0 ? 0 : (tempux < pc.fftx ? tempux : pc.fftx - 1);
+    frxyz[atom].x = frac_crd.x - float(tempux);
+    frxyz[atom].x = frxyz[atom].x - floor(frxyz[atom].x);
+    frac_crd.y *= float(pc.ffty);
+    int tempuy = int(frac_crd.y);
+    tempuy = tempuy < 0 ? 0 : (tempuy < pc.ffty ? tempuy : pc.ffty - 1);
+    frxyz[atom].y = frac_crd.y - float(tempuy);
+    frxyz[atom].y = frxyz[atom].y - floor(frxyz[atom].y);
+    frac_crd.z *= float(pc.fftz);
+    int tempuz = int(frac_crd.z);
+    tempuz = tempuz < 0 ? 0 : (tempuz < pc.fftz ? tempuz : pc.fftz - 1);
+    frxyz[atom].z = frac_crd.z - float(tempuz);
+    frxyz[atom].z = frxyz[atom].z - floor(frxyz[atom].z);
+    if (uint(tempux) != uxyz[atom].x || uint(tempuy) != uxyz[atom].y ||
+        uint(tempuz) != uxyz[atom].z)
+    {
+        uxyz[atom] = UIntVec3(uint(tempux), uint(tempuy), uint(tempuz));
+        int base = atom * 64;
+        for (int k = 0; k < 64; k++)
+        {
+            int kx = k / 16;
+            int ky = (k - 16 * kx) / 4;
+            int kz = k - (k / 4) * 4;
+            kx = tempux - kx;
+            if (kx < 0) kx += pc.fftx;
+            if (kx >= pc.fftx) kx -= pc.fftx;
+            ky = tempuy - ky;
+            if (ky < 0) ky += pc.ffty;
+            if (ky >= pc.ffty) ky -= pc.ffty;
+            kz = tempuz - kz;
+            if (kz < 0) kz += pc.fftz;
+            if (kz >= pc.fftz) kz -= pc.fftz;
+            atom_near[base + k] = kx * pc.PME_Nin + ky * pc.fftz + kz;
+        }
+    }
+}

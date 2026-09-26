@@ -1,0 +1,24 @@
+layout(set = 0, binding = 0, std430) buffer VirialBC { LTMat virial_bc[]; };
+layout(set = 0, binding = 1, std430) buffer FQ { vec2 fq[]; };
+layout(set = 0, binding = 2, std430) buffer Virial { LTMat virial[]; };
+layout(push_constant) uniform Params { int nfft; int fftz; } pc;
+void main()
+{
+    LTMat vir = LTMat(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    int fftc = pc.fftz / 2 + 1;
+    uint stride =
+        gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_NumWorkGroups.x;
+    for (uint index = gl_WorkGroupSize.x * gl_WorkGroupID.x *
+                          gl_WorkGroupSize.y +
+                      gl_LocalInvocationID.x * gl_WorkGroupSize.y +
+                      gl_LocalInvocationID.y;
+         index < uint(pc.nfft); index += stride)
+    {
+        int nz = int(index) % fftc;
+        float factor = (nz == 0 || nz == fftc - 1) ? 0.5 : 1.0;
+        vec2 f = fq[index];
+        vir = lt_sub(vir, lt_scale(virial_bc[index],
+                                   factor * (f.x * f.x + f.y * f.y)));
+    }
+    warp_aadd_lt(virial[0], vir);
+}

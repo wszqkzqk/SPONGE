@@ -1,0 +1,81 @@
+const float PME_Ma[4] = float[4](1.0 / 6.0, -0.5, 0.5, -1.0 / 6.0);
+const float PME_Mb[4] = float[4](0.0, 0.5, -1.0, 0.5);
+const float PME_Mc[4] = float[4](0.0, 0.5, 0.0, -0.5);
+const float PME_Md[4] = float[4](0.0, 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0);
+const float PME_dMa[4] = float[4](0.5, -1.5, 1.5, -0.5);
+const float PME_dMb[4] = float[4](0.0, 1.0, -2.0, 1.0);
+const float PME_dMc[4] = float[4](0.0, 0.5, 0.0, -0.5);
+layout(set = 0, binding = 0, std430) buffer AtomNear { int atom_near[]; };
+layout(set = 0, binding = 1, std430) buffer Charge { float charge[]; };
+layout(set = 0, binding = 2, std430) buffer Q { float pme_q[]; };
+layout(set = 0, binding = 3, std430) buffer Force { Vec3 force[]; };
+layout(set = 0, binding = 4, std430) buffer Frxyz { Vec3 frxyz[]; };
+layout(push_constant) uniform Params
+{
+    LTMat rcell;
+    int fftx;
+    int ffty;
+    int fftz;
+    int atom_numbers;
+    int PME_Nall;
+}
+pc;
+void main()
+{
+    int atom = int(gl_WorkGroupSize.y * gl_WorkGroupID.x +
+                   gl_LocalInvocationID.y);
+    if (atom >= pc.atom_numbers) return;
+    float temp_charge = charge[atom];
+    int base = atom * 64;
+    Vec3 fr = frxyz[atom];
+    Vec3 tempnv = v3(0.0, 0.0, 0.0);
+    for (int k = int(gl_LocalInvocationID.x); k < 64;
+         k += int(gl_WorkGroupSize.x))
+    {
+        int near_index = atom_near[base + k];
+        if (uint(near_index) >= uint(pc.PME_Nall)) continue;
+        float tempdQf = -pme_q[near_index] * temp_charge;
+        int kx = k / 16;
+        float tempf = fr.x;
+        float tempf2 = tempf * tempf;
+        float tempx = PME_Ma[kx] * tempf * tempf2 + PME_Mb[kx] * tempf2 +
+                      PME_Mc[kx] * tempf + PME_Md[kx];
+        float tempdx =
+            PME_dMa[kx] * tempf2 + PME_dMb[kx] * tempf + PME_dMc[kx];
+        kx = (k - kx * 16) / 4;
+        tempf = fr.y;
+        tempf2 = tempf * tempf;
+        float tempy = PME_Ma[kx] * tempf * tempf2 + PME_Mb[kx] * tempf2 +
+                      PME_Mc[kx] * tempf + PME_Md[kx];
+        float tempdy =
+            PME_dMa[kx] * tempf2 + PME_dMb[kx] * tempf + PME_dMc[kx];
+        kx = k - (k / 4) * 4;
+        tempf = fr.z;
+        tempf2 = tempf * tempf;
+        float tempz = PME_Ma[kx] * tempf * tempf2 + PME_Mb[kx] * tempf2 +
+                      PME_Mc[kx] * tempf + PME_Md[kx];
+        float tempdz =
+            PME_dMa[kx] * tempf2 + PME_dMb[kx] * tempf + PME_dMc[kx];
+        Vec3 tempdQ =
+            v3(tempdx * tempy * tempz * float(pc.fftx),
+               tempdy * tempx * tempz * float(pc.ffty),
+               tempdz * tempx * tempy * float(pc.fftz));
+        tempdQ = v3_scale(v3_mul_transpose_lt(tempdQ, pc.rcell.a11,
+                                              pc.rcell.a21, pc.rcell.a22,
+                                              pc.rcell.a31, pc.rcell.a32,
+                                              pc.rcell.a33),
+                          tempdQf);
+        tempnv = v3_add(tempnv, tempdQ);
+    }
+    uint lane = gl_SubgroupInvocationID;
+    tempnv.x += subgroupShuffle(tempnv.x, lane + 4u);
+    tempnv.y += subgroupShuffle(tempnv.y, lane + 4u);
+    tempnv.z += subgroupShuffle(tempnv.z, lane + 4u);
+    tempnv.x += subgroupShuffle(tempnv.x, lane + 2u);
+    tempnv.y += subgroupShuffle(tempnv.y, lane + 2u);
+    tempnv.z += subgroupShuffle(tempnv.z, lane + 2u);
+    tempnv.x += subgroupShuffle(tempnv.x, lane + 1u);
+    tempnv.y += subgroupShuffle(tempnv.y, lane + 1u);
+    tempnv.z += subgroupShuffle(tempnv.z, lane + 1u);
+    if (gl_LocalInvocationID.x == 0u) aadd_v3(force[atom], tempnv);
+}

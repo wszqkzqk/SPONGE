@@ -1,6 +1,137 @@
 #include "PM_force.h"
 
 #include "../utils/float_classification.hpp"
+
+#ifdef USE_VULKAN
+struct PmeAtomNearVkParams
+{
+    int PME_Nin;
+    Boundary boundary;
+    int atom_numbers;
+    int fftx;
+    int ffty;
+    int fftz;
+};
+static_assert(sizeof(PmeAtomNearVkParams) == 72,
+              "PmeAtomNearVkParams must match the GLSL push constant layout");
+
+struct PmeQSpreadVkParams
+{
+    int atom_numbers;
+    int PME_Nall;
+};
+static_assert(sizeof(PmeQSpreadVkParams) == 8,
+              "PmeQSpreadVkParams must match the GLSL push constant layout");
+
+struct PmeSumVirialVkParams
+{
+    int nfft;
+    int fftz;
+};
+static_assert(sizeof(PmeSumVirialVkParams) == 8,
+              "PmeSumVirialVkParams must match the GLSL push constant layout");
+
+struct PmeFinalVkParams
+{
+    LTMatrix3 rcell;
+    int fftx;
+    int ffty;
+    int fftz;
+    int atom_numbers;
+    int PME_Nall;
+};
+static_assert(sizeof(PmeFinalVkParams) == 44,
+              "PmeFinalVkParams must match the GLSL push constant layout");
+
+struct PmeExcludedVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float pme_beta;
+};
+static_assert(sizeof(PmeExcludedVkParams) == 60,
+              "PmeExcludedVkParams must match the GLSL push constant layout");
+
+struct PmeMpiExcludedVkParams
+{
+    int atom_numbers;
+    Boundary boundary;
+    float pme_beta;
+    int need_energy;
+    int need_virial;
+    float factor;
+};
+static_assert(
+    sizeof(PmeMpiExcludedVkParams) == 72,
+    "PmeMpiExcludedVkParams must match the GLSL push constant layout");
+
+struct PmeCountVkParams
+{
+    int n;
+};
+static_assert(sizeof(PmeCountVkParams) == 4,
+              "PmeCountVkParams must match the GLSL push constant layout");
+
+struct PmeFactorVkParams
+{
+    float factor;
+};
+static_assert(sizeof(PmeFactorVkParams) == 4,
+              "PmeFactorVkParams must match the GLSL push constant layout");
+
+struct PmeDeviceAddForceVkParams
+{
+    int atom_numbers;
+    float update_interval;
+};
+static_assert(sizeof(PmeDeviceAddForceVkParams) == 8,
+              "PmeDeviceAddForceVkParams must match the GLSL push constant "
+              "layout");
+
+struct PmeUpBoxBcVkParams
+{
+    int fftx;
+    int ffty;
+    int fftz;
+    float mprefactor;
+    LTMatrix3 rcell;
+    float volume;
+    int block_z;
+};
+static_assert(sizeof(PmeUpBoxBcVkParams) == 48,
+              "PmeUpBoxBcVkParams must match the GLSL push constant layout");
+
+struct PmePmcIzCVkParams
+{
+    int PME_Nfft;
+    int fftx;
+    int ffty;
+    int fftz;
+    float bli_x2;
+    float bli_y2;
+    float grid_length_of_z;
+    float beta;
+    float scalor;
+};
+static_assert(sizeof(PmePmcIzCVkParams) == 36,
+              "PmePmcIzCVkParams must match the GLSL push constant layout");
+
+struct PmePmcIzBcFinalVkParams
+{
+    int Nfft;
+    int fftx;
+    int ffty;
+    int fftz;
+};
+static_assert(sizeof(PmePmcIzBcFinalVkParams) == 16,
+              "PmePmcIzBcFinalVkParams must match the GLSL push constant "
+              "layout");
+
+static inline const void* vk_or_dummy(const void* ptr, const void* dummy)
+{
+    return ptr != NULL ? ptr : dummy;
+}
+#endif
 /*
     2025-10-14 SPONGE Particle Mesh算法
     目前支持单进程Particle-Mesh-Ewald 与 PMC-IZ
@@ -218,6 +349,23 @@ static void Build_PMC_IZ_BC(CONTROLLER* controller, int fftx, int ffty,
     Device_Malloc_And_Copy_Safely((void**)&d_FB, h_FB,
                                   sizeof(float) * PME_Nall);
     SPONGE_FFT_WRAPPER::R2C(plan_3d_temp_r2c, d_FB, B);
+#ifdef USE_VULKAN
+    PmePmcIzCVkParams pmc_iz_c_params{temp_Nfft,
+                                      fftx,
+                                      ffty,
+                                      fftz,
+                                      box_length_inverse_x_square,
+                                      box_length_inverse_y_square,
+                                      grid_length_of_z,
+                                      beta,
+                                      scalor};
+    const void* pmc_iz_c_buffers[] = {C};
+    VK_LAUNCH(pme_pmc_iz_c,
+              (temp_Nfft + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, pmc_iz_c_buffers,
+              &pmc_iz_c_params, NULL);
+#else
     Launch_Device_Kernel(Build_PMC_IZ_C,
                          (temp_Nfft + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
@@ -225,14 +373,25 @@ static void Build_PMC_IZ_BC(CONTROLLER* controller, int fftx, int ffty,
                          fftx, ffty, fftz, box_length_inverse_x_square,
                          box_length_inverse_y_square, grid_length_of_z, beta,
                          scalor, C);
+#endif
 
     SPONGE_FFT_WRAPPER::C2R(plan_2d_many_c2r, C, FC);
     SPONGE_FFT_WRAPPER::R2C(plan_3d_temp_r2c, FC, C);
+#ifdef USE_VULKAN
+    PmePmcIzBcFinalVkParams pmc_iz_bc_final_params{PME_Nfft, fftx, ffty, fftz};
+    const void* pmc_iz_bc_final_buffers[] = {C, B, BC[0]};
+    VK_LAUNCH(pme_pmc_iz_bc_final,
+              (PME_Nfft + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, pmc_iz_bc_final_buffers,
+              &pmc_iz_bc_final_params, NULL);
+#else
     Launch_Device_Kernel(Build_PMC_IZ_BC_Final,
                          (PME_Nfft + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, PME_Nfft, fftx,
                          ffty, fftz, C, B, BC[0]);
+#endif
 
     Free_Single_Device_Pointer((void**)&FC);
     Free_Single_Device_Pointer((void**)&C);
@@ -993,6 +1152,22 @@ void Particle_Mesh::PME_Excluded_Force_With_Atom_Energy(
             deviceMemset(d_correction_atom_energy, 0,
                          sizeof(float) * atom_numbers);
         if (CONTROLLER::MPI_rank != 0) return;
+#ifdef USE_VULKAN
+        PmeExcludedVkParams params{atom_numbers, boundary, beta};
+        const void* buffers[] = {crd,
+                                 charge,
+                                 excluded_list_start,
+                                 excluded_list,
+                                 excluded_atom_numbers,
+                                 frc,
+                                 vk_or_dummy(atom_ene, frc),
+                                 d_correction_atom_energy,
+                                 vk_or_dummy(atom_virial, frc)};
+        VK_LAUNCH(pme_excluded_force,
+                  (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             PME_Excluded_Force_With_Atom_Energy_Correction,
             (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1001,6 +1176,7 @@ void Particle_Mesh::PME_Excluded_Force_With_Atom_Energy(
             charge, beta, excluded_list_start, excluded_list,
             excluded_atom_numbers, frc, atom_ene, d_correction_atom_energy,
             atom_virial);
+#endif
     }
 }
 
@@ -1083,6 +1259,17 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
         {
             // 计算插值索引
             deviceMemset(PME_Q, 0, sizeof(float) * PME_Nall);
+#ifdef USE_VULKAN
+            PmeAtomNearVkParams atom_near_params{
+                PME_Nin, boundary, atom_numbers, fftx, ffty, fftz};
+            const void* atom_near_buffers[] = {crd, PME_atom_near, PME_uxyz,
+                                               PME_frxyz, force_backup};
+            VK_LAUNCH(pme_atom_near,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, atom_near_buffers,
+                      &atom_near_params, NULL);
+#else
             Launch_Device_Kernel(
                 PME_Atom_Near,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1090,14 +1277,25 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
                 CONTROLLER::device_max_thread, 0, NULL, crd, PME_atom_near,
                 PME_Nin, boundary, atom_numbers, fftx, ffty, fftz, PME_uxyz,
                 PME_frxyz, force_backup);
+#endif
 
             dim3 blockSize = {CONTROLLER::device_max_thread / 64, 64};
 
             // 电荷Bspline插值
+#ifdef USE_VULKAN
+            PmeQSpreadVkParams q_spread_params{atom_numbers, PME_Nall};
+            const void* q_spread_buffers[] = {PME_atom_near, charge, PME_frxyz,
+                                              PME_Q};
+            VK_LAUNCH(pme_q_spread,
+                      (atom_numbers + blockSize.x - 1) / blockSize.x, 1,
+                      blockSize.x, blockSize.y, q_spread_buffers,
+                      &q_spread_params, NULL);
+#else
             Launch_Device_Kernel(PME_Q_Spread,
                                  (atom_numbers + blockSize.x - 1) / blockSize.x,
                                  blockSize, 0, NULL, PME_atom_near, charge,
                                  PME_frxyz, PME_Q, atom_numbers, PME_Nall);
+#endif
 
             // do FFT
             SPONGE_FFT_WRAPPER::R2C(PME_plan_r2c, PME_Q, PME_FQ);
@@ -1107,62 +1305,139 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
                 CONTROLLER::device_warp,
                 CONTROLLER::device_max_thread / CONTROLLER::device_warp};
             if (need_virial)
+            {
+#ifdef USE_VULKAN
+                PmeSumVirialVkParams sum_virial_params{PME_Nfft, fftz};
+                const void* sum_virial_buffers[] = {PME_Virial_BC, PME_FQ,
+                                                    d_virial};
+                VK_LAUNCH(pme_sum_virial,
+                          (PME_Nfft + 4 * CONTROLLER::device_max_thread - 1) /
+                              CONTROLLER::device_max_thread,
+                          1, blockSize.x, blockSize.y, sum_virial_buffers,
+                          &sum_virial_params, NULL);
+#else
                 Launch_Device_Kernel(
                     PME_Sum_Virial,
                     (PME_Nfft + 4 * CONTROLLER::device_max_thread - 1) /
                         CONTROLLER::device_max_thread,
                     blockSize, 0, NULL, PME_Nfft, PME_Virial_BC, PME_FQ,
                     d_virial, fftz);
+#endif
+            }
 
+#ifdef USE_VULKAN
+            PmeCountVkParams bcfq_params{PME_Nfft};
+            const void* bcfq_buffers[] = {PME_FQ, PME_BC};
+            VK_LAUNCH(pme_bcfq,
+                      (PME_Nfft + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, bcfq_buffers,
+                      &bcfq_params, NULL);
+#else
             Launch_Device_Kernel(
                 PME_BCFQ,
                 (PME_Nfft + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, PME_FQ, PME_BC,
                 PME_Nfft);
+#endif
 
             // do inverse FFT
             SPONGE_FFT_WRAPPER::C2R(PME_plan_c2r, PME_FQ, PME_FBCFQ);
 
             // 计算势能和力
             blockSize = {8, CONTROLLER::device_max_thread / 8};
+#ifdef USE_VULKAN
+            PmeFinalVkParams final_params{boundary.rcell, fftx,    ffty, fftz,
+                                          atom_numbers,   PME_Nall};
+            const void* final_buffers[] = {PME_atom_near, charge, PME_FBCFQ,
+                                           force_backup, PME_frxyz};
+            VK_LAUNCH(pme_final, (atom_numbers + blockSize.x - 1) / blockSize.x,
+                      1, blockSize.x, blockSize.y, final_buffers, &final_params,
+                      NULL);
+#else
             Launch_Device_Kernel(
                 PME_Final, (atom_numbers + blockSize.x - 1) / blockSize.x,
                 blockSize, 0, NULL, PME_atom_near, charge, PME_FBCFQ,
                 force_backup, PME_frxyz, boundary.rcell, fftx, ffty, fftz,
                 atom_numbers, PME_Nall);
+#endif
 
+#ifdef USE_VULKAN
+            PmeDeviceAddForceVkParams add_force_params{
+                atom_numbers, static_cast<float>(update_interval)};
+            const void* add_force_buffers[] = {force, force_backup};
+            VK_LAUNCH(pme_device_add_force,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, add_force_buffers,
+                      &add_force_params, NULL);
+#else
             Launch_Device_Kernel(
                 device_add_force,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
                 update_interval, force, force_backup);
+#endif
         }
         if (need_energy)
         {
+#ifdef USE_VULKAN
+            PmeCountVkParams energy_product_params{PME_Nall};
+            const void* energy_product_buffers[] = {PME_Q, PME_FBCFQ,
+                                                    d_reciprocal_ene};
+            VK_LAUNCH(pme_energy_product, 1, 1, CONTROLLER::device_max_thread,
+                      1, energy_product_buffers, &energy_product_params, NULL);
+#else
             Launch_Device_Kernel(PME_Energy_Product, 1,
                                  CONTROLLER::device_max_thread, 0, NULL,
                                  PME_Nall, PME_Q, PME_FBCFQ, d_reciprocal_ene);
+#endif
             Scale_List(d_reciprocal_ene, 0.5f, 1);
 
+#ifdef USE_VULKAN
+            PmeCountVkParams charge_square_params{atom_numbers};
+            const void* charge_square_buffers[] = {charge, charge_square};
+            VK_LAUNCH(pme_charge_square,
+                      (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1,
+                      charge_square_buffers, &charge_square_params, NULL);
+#else
             Launch_Device_Kernel(
                 charge_square_kernel,
                 (atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, atom_numbers, charge,
                 charge_square);
+#endif
             Sum_Of_List(charge_square, d_self_ene, atom_numbers);
 
             Scale_List(d_self_ene, -beta / sqrt(PI), 1);
 
             Sum_Of_List(charge, charge_sum, atom_numbers);
 
+#ifdef USE_VULKAN
+            PmeFactorVkParams device_add_params{neutralizing_factor};
+            const void* device_add_buffers[] = {d_self_ene, charge_sum};
+            VK_LAUNCH(pme_device_add, 1, 1, 1, 1, device_add_buffers,
+                      &device_add_params, NULL);
+#else
             Launch_Device_Kernel(device_add, 1, 1, 0, NULL, d_self_ene,
                                  neutralizing_factor, charge_sum);
+#endif
 
+#ifdef USE_VULKAN
+            PmeCountVkParams add_potential_params{0};
+            const void* add_potential_buffers[] = {d_potential, d_self_ene,
+                                                   d_reciprocal_ene};
+            VK_LAUNCH(pme_add_energy_to_potential, 1, 1, 1, 1,
+                      add_potential_buffers, &add_potential_params, NULL);
+#else
             Launch_Device_Kernel(PME_Add_Energy_To_Potential, 1, 1, 0, NULL,
                                  d_potential, d_self_ene, d_reciprocal_ene);
+#endif
         }
     }
 }
@@ -1258,9 +1533,22 @@ void Particle_Mesh::Update_Box(const Boundary boundary, LTMatrix3 g, float dt)
     float mprefactor = PI * PI / -beta / beta;
     dim3 blockSize = {8, 8, CONTROLLER::device_max_thread / 64};
     dim3 gridSize = {64, 64};
+#ifdef USE_VULKAN
+    PmeUpBoxBcVkParams params{fftx,
+                              ffty,
+                              fftz,
+                              mprefactor,
+                              boundary.rcell,
+                              volume,
+                              static_cast<int>(blockSize.z)};
+    const void* buffers[] = {PME_BC, PME_BC0, PME_Virial_BC};
+    VK_LAUNCH(pme_up_box_bc, gridSize.x, gridSize.y, blockSize.x,
+              blockSize.y * blockSize.z, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(up_box_bc, gridSize, blockSize, 0, NULL, fftx, ffty,
                          fftz, PME_BC, PME_BC0, PME_Virial_BC, mprefactor,
                          boundary.rcell, volume);
+#endif
     Scale_Positions_Device(g, &min_corner, dt);
     Scale_Positions_Device(g, &max_corner, dt);
 }
@@ -1670,21 +1958,41 @@ void Particle_Mesh::Get_Atoms(CONTROLLER* controller, VECTOR* pme_crd,
         // 反转local与global的映射关系
         if (id_label)
         {
+#ifdef USE_VULKAN
+            PmeCountVkParams params{this->atom_numbers};
+            const void* buffers[] = {atom_id_l_g, atom_id_g_l};
+            VK_LAUNCH(pme_inverse_global_local,
+                      (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(
                 inverse_global_and_local,
                 (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, atom_id_l_g,
                 atom_id_g_l, this->atom_numbers);
+#endif
         }
         if (crd_label)
         {
+#ifdef USE_VULKAN
+            PmeCountVkParams params{this->atom_numbers};
+            const void* buffers[] = {pme_crd, g_crd, atom_id_l_g};
+            VK_LAUNCH(pme_crd_local_to_global,
+                      (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
+                          CONTROLLER::device_max_thread,
+                      1, CONTROLLER::device_max_thread, 1, buffers, &params,
+                      NULL);
+#else
             Launch_Device_Kernel(
                 crd_local_to_global,
                 (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
                     CONTROLLER::device_max_thread,
                 CONTROLLER::device_max_thread, 0, NULL, pme_crd, g_crd,
                 atom_id_l_g, this->atom_numbers);
+#endif
         }
     }
 #endif
@@ -1711,12 +2019,21 @@ void Particle_Mesh::Send_Recv_Force(CONTROLLER* controller, VECTOR* frc,
 #ifdef USE_GPU
         deviceStreamSynchronize(pm_stream);
 #endif
+#ifdef USE_VULKAN
+        PmeDeviceAddForceVkParams params{pp_atom_numbers, 1.0f};
+        const void* buffers[] = {pp_frc, frc};
+        VK_LAUNCH(pme_device_add_force,
+                  (pp_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             device_add_force,
             (pp_atom_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, pp_atom_numbers, 1, pp_frc,
             frc);
+#endif
     }
     else
     {
@@ -1829,6 +2146,24 @@ void Particle_Mesh::MPI_PME_Excluded_Force_With_Atom_Energy(
             deviceMemset(d_correction_atom_energy, 0,
                          sizeof(float) * local_atom_numbers);
 
+#ifdef USE_VULKAN
+        PmeMpiExcludedVkParams params{
+            local_atom_numbers, boundary,    beta,
+            need_energy,        need_virial, exclude_factor};
+        const void* buffers[] = {crd,
+                                 charge,
+                                 excluded_list_start,
+                                 excluded_list,
+                                 excluded_atom_numbers,
+                                 frc,
+                                 vk_or_dummy(atom_ene, frc),
+                                 d_correction_atom_energy,
+                                 vk_or_dummy(atom_virial, frc)};
+        VK_LAUNCH(pme_mpi_excluded_force,
+                  (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                      CONTROLLER::device_max_thread,
+                  1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
         Launch_Device_Kernel(
             MPI_PME_Excluded_Force_With_Atom_Energy_Correction,
             (local_atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -1838,6 +2173,7 @@ void Particle_Mesh::MPI_PME_Excluded_Force_With_Atom_Energy(
             excluded_atom_numbers, frc, atom_ene, d_correction_atom_energy,
             atom_virial, need_energy, need_virial, atom_local, atom_local_id,
             exclude_factor);
+#endif
     }
 }
 
@@ -1939,9 +2275,18 @@ static __global__ void add_global_to_local_force(const VECTOR* g_frc,
 
 void Particle_Mesh::add_force_g_to_l(VECTOR* l_frc)
 {
+#ifdef USE_VULKAN
+    PmeCountVkParams params{atom_numbers};
+    const void* buffers[] = {g_frc, l_frc, atom_id_g_l};
+    VK_LAUNCH(pme_add_global_to_local_force,
+              (atom_numbers + CONTROLLER::device_max_thread - 1) /
+                  CONTROLLER::device_max_thread,
+              1, CONTROLLER::device_max_thread, 1, buffers, &params, NULL);
+#else
     Launch_Device_Kernel(add_global_to_local_force,
                          (atom_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL, g_frc, l_frc,
                          atom_id_g_l, atom_numbers);
+#endif
 }

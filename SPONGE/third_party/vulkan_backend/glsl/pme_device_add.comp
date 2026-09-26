@@ -1,0 +1,7 @@
+layout(set = 0, binding = 0, std430) buffer Ene { float ene[]; };
+layout(set = 0, binding = 1, std430) buffer ChargeSum { float charge_sum[]; };
+layout(push_constant) uniform Params { float factor; } pc;
+void main()
+{
+    ene[0] += pc.factor * charge_sum[0] * charge_sum[0];
+}

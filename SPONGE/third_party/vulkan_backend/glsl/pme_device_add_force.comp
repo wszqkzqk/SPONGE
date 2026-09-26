@@ -1,0 +1,15 @@
+layout(set = 0, binding = 0, std430) buffer Force { Vec3 force[]; };
+layout(set = 0, binding = 1, std430) buffer ForceBackup { Vec3 force_backup[]; };
+layout(push_constant) uniform Params
+{
+    int atom_numbers;
+    float update_interval;
+}
+pc;
+void main()
+{
+    uint atom_i = gl_GlobalInvocationID.x;
+    if (atom_i >= uint(pc.atom_numbers)) return;
+    force[atom_i] =
+        v3_add(force[atom_i], v3_scale(force_backup[atom_i], pc.update_interval));
+}

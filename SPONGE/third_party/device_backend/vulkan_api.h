@@ -59,6 +59,7 @@ struct deviceProp
 };
 
 int deviceInit(unsigned int flags);
+int deviceReset();
 int deviceGetDeviceCount(int* count);
 int getDeviceProperties(deviceProp* prop, int device);
 int setWorkingDevice(int device);

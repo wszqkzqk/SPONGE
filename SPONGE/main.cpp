@@ -1,4 +1,4 @@
-﻿#include "main.h"
+#include "main.h"
 
 #include "utils/float_classification.hpp"
 #include "utils/h5md/h5_legacy_sidecar.hpp"
@@ -1096,6 +1096,9 @@ int main(int argc, char* argv[])
         Main_Print();
     }
     Main_Clear();
+#ifdef USE_VULKAN
+    deviceReset();
+#endif
     return 0;
 }
 

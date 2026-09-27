@@ -92,6 +92,7 @@ struct GraphState
 };
 
 GraphState* g_recording = nullptr;
+std::vector<GraphState*> g_graphs;
 
 StreamState* StreamOf(void* stream)
 {
@@ -637,6 +638,7 @@ void* GraphCreate()
     pool_info.pPoolSizes = &pool_size;
     VK_CHECK(vkCreateDescriptorPool(S().device, &pool_info, nullptr,
                                     &graph->pool));
+    g_graphs.push_back(graph);
     return graph;
 }
 
@@ -675,6 +677,64 @@ void GraphExecute(void* graph_ptr, deviceStream_t stream_handle)
 }
 
 }  // namespace sponge_vk
+
+int deviceReset()
+{
+    std::lock_guard<std::recursive_mutex> lock(S().mutex);
+    if (S().device == VK_NULL_HANDLE) return 0;
+    sponge_vk::HostBarrier();
+    for (auto& [_, stream] : g_streams) DestroyStream(stream);
+    g_streams.clear();
+    SubmitAndWaitImpl(&g_default_stream);
+    vkDestroyDescriptorPool(S().device, g_default_stream.pool, nullptr);
+    vkDestroyFence(S().device, g_default_stream.fence, nullptr);
+    vkFreeCommandBuffers(S().device, S().command_pool, 1, &g_default_stream.cb);
+    g_default_stream = StreamState{};
+    for (auto* graph : g_graphs)
+    {
+        vkFreeCommandBuffers(S().device, S().command_pool, 1, &graph->cb);
+        vkDestroyDescriptorPool(S().device, graph->pool, nullptr);
+        delete graph;
+    }
+    g_graphs.clear();
+    for (auto& [_, alloc] : S().allocations)
+    {
+        vkDestroyBuffer(S().device, alloc.buffer, nullptr);
+        vkFreeMemory(S().device, alloc.memory, nullptr);
+    }
+    S().allocations.clear();
+    g_serial_pools.clear();
+    if (S().staging != VK_NULL_HANDLE)
+    {
+        vkDestroyBuffer(S().device, S().staging, nullptr);
+        vkFreeMemory(S().device, S().staging_memory, nullptr);
+        S().staging = VK_NULL_HANDLE;
+        S().staging_memory = VK_NULL_HANDLE;
+        S().staging_mapped = nullptr;
+        S().staging_size = 0;
+        S().staging_offset = 0;
+    }
+    for (auto& [_, module] : S().shader_modules)
+        vkDestroyShaderModule(S().device, module, nullptr);
+    S().shader_modules.clear();
+    for (auto& [_, pipeline] : S().pipelines)
+        vkDestroyPipeline(S().device, pipeline, nullptr);
+    S().pipelines.clear();
+    for (auto& [_, layout] : S().pipeline_layouts)
+        vkDestroyPipelineLayout(S().device, layout, nullptr);
+    S().pipeline_layouts.clear();
+    for (auto& [_, layout] : S().ds_layouts)
+        vkDestroyDescriptorSetLayout(S().device, layout, nullptr);
+    S().ds_layouts.clear();
+    vkDestroyCommandPool(S().device, S().command_pool, nullptr);
+    S().command_pool = VK_NULL_HANDLE;
+    vkDestroyDevice(S().device, nullptr);
+    S().device = VK_NULL_HANDLE;
+    vkDestroyInstance(S().instance, nullptr);
+    S().instance = VK_NULL_HANDLE;
+    glslang::FinalizeProcess();
+    return 0;
+}
 
 int deviceInit(unsigned int)
 {

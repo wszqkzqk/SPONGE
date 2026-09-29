@@ -1,4 +1,4 @@
-﻿/*
+/*
 nvrtc for CUDA backend,
 directly compiling for CPU backend
 */
@@ -226,7 +226,9 @@ struct JIT_Function
 #include <clang/Frontend/CompilerInvocation.h>
 #include <clang/Frontend/TextDiagnosticPrinter.h>
 #include <clang/Lex/PreprocessorOptions.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
+#include <llvm/Support/VirtualFileSystem.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
@@ -531,7 +533,12 @@ extern "C" float floorf(float x);
         clang::CompilerInstance compiler(invocation);
         auto diag_client = std::make_unique<clang::TextDiagnosticPrinter>(
             diag_stream, invocation->getDiagnosticOpts());
+#if LLVM_VERSION_MAJOR >= 22
         compiler.createDiagnostics(diag_client.release(), true);
+#else
+        compiler.createDiagnostics(*llvm::vfs::getRealFileSystem(),
+                                   diag_client.release(), true);
+#endif
         if (!compiler.hasDiagnostics())
         {
             error_reason =
@@ -567,7 +574,11 @@ extern "C" float floorf(float x);
         }
         compiler.setTarget(target_info);
         compiler.createFileManager();
+#if LLVM_VERSION_MAJOR >= 15 && LLVM_VERSION_MAJOR < 22
+        compiler.createSourceManager(compiler.getFileManager());
+#else
         compiler.createSourceManager();
+#endif
         compiler.getPreprocessorOpts().RetainRemappedFileBuffers = true;
         compiler.getPreprocessorOpts().addRemappedFile(
             kInputFile,

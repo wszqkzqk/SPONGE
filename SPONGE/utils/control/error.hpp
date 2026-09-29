@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../float_classification.hpp"
 
 // SPONGE错误类型

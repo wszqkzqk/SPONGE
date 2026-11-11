@@ -1,4 +1,4 @@
-﻿#include "simple_cv.h"
+#include "simple_cv.h"
 
 REGISTER_CV_STRUCTURE(CV_POSITION, "position_x", 0);
 REGISTER_CV_STRUCTURE(CV_POSITION, "position_y", 1);
@@ -198,6 +198,7 @@ void CV_BOX_LENGTH::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
 }
 
 REGISTER_CV_STRUCTURE(CV_DISTANCE, "distance", 0);
+REGISTER_CV_STRUCTURE(CV_DISTANCE, "distance_path", 4);
 REGISTER_CV_STRUCTURE(CV_DISTANCE, "displacement_x", 1);
 REGISTER_CV_STRUCTURE(CV_DISTANCE, "displacement_y", 2);
 REGISTER_CV_STRUCTURE(CV_DISTANCE, "displacement_z", 3);
@@ -214,6 +215,31 @@ static __global__ void distance_get_all(const int atom0, const int atom1,
     value[0] = dr_abs;
     crd_grads[atom1] = drdx;
     crd_grads[atom0] = -drdx;
+    virial[0] = Get_Virial_From_Force_Dis(dr, drdx);
+}
+
+static __global__ void distance_path_get_all(const int path_count,
+                                             const int* path, const VECTOR* crd,
+                                             const LTMatrix3 cell,
+                                             const LTMatrix3 rcell,
+                                             float* value, VECTOR* crd_grads,
+                                             LTMatrix3* virial)
+{
+    VECTOR dr = {0.0f, 0.0f, 0.0f};
+    for (int index = 1; index < path_count; ++index)
+    {
+        VECTOR bond = Get_Periodic_Displacement(
+            crd[path[index]], crd[path[index - 1]], cell, rcell);
+        dr.x += bond.x;
+        dr.y += bond.y;
+        dr.z += bond.z;
+    }
+    float dr_abs = norm3df(dr.x, dr.y, dr.z);
+    float dr_1 = 1.0f / dr_abs;
+    VECTOR drdx = dr_1 * dr;
+    value[0] = dr_abs;
+    crd_grads[path[path_count - 1]] = drdx;
+    crd_grads[path[0]] = -drdx;
     virial[0] = Get_Virial_From_Force_Dis(dr, drdx);
 }
 
@@ -256,7 +282,26 @@ static __global__ void displacement_z_get_all(
 void CV_DISTANCE::Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager,
                           int atom_numbers, const char* module_name)
 {
-    atom = manager->Ask_For_Int_Parameter(module_name, "atom", 2, 2);
+    if (strcmp(type_name, "distance_path") == 0)
+    {
+        std::vector<int> path =
+            manager->Ask_For_Indefinite_Length_Int_Parameter(module_name,
+                                                             "path_atom");
+        if (path.size() < 2)
+        {
+            manager->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand, "CV_DISTANCE::Initial",
+                "Reason:\n\tpath_atom requires at least two atom indices\n");
+        }
+        path_count = static_cast<int>(path.size());
+        Device_Malloc_Safely((void**)&d_path, sizeof(int) * path.size());
+        deviceMemcpy(d_path, path.data(), sizeof(int) * path.size(),
+                     deviceMemcpyHostToDevice);
+    }
+    else
+    {
+        atom = manager->Ask_For_Int_Parameter(module_name, "atom", 2, 2);
+    }
     Super_Initial(manager, atom_numbers, module_name);
 }
 
@@ -267,7 +312,11 @@ void CV_DISTANCE::Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
     need = Check_Whether_Computed_At_This_Step(step, need);
     if (need != CV_NEED_NONE)
     {
-        if (strcmp(type_name, "distance") == 0)
+        if (strcmp(type_name, "distance_path") == 0)
+            Launch_Device_Kernel(distance_path_get_all, 1, 1, 0, NULL,
+                                 path_count, d_path, crd, cell, rcell, d_value,
+                                 crd_grads, virial);
+        else if (strcmp(type_name, "distance") == 0)
             Launch_Device_Kernel(distance_get_all, 1, 1, 0, NULL, atom[0],
                                  atom[1], crd, cell, rcell, d_value, crd_grads,
                                  virial);

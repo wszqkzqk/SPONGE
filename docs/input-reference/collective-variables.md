@@ -93,7 +93,8 @@ In this example:
 | `position_x`, `position_y`, `position_z` | Cartesian coordinate of one atom | `atom` (1 atom) |
 | `scaled_position_x`, `scaled_position_y`, `scaled_position_z` | Fractional coordinate of one atom | `atom` (1 atom) |
 | `box_length_x`, `box_length_y`, `box_length_z` | Box length along one cell axis | none |
-| `distance` | Distance between two atoms | `atom` (2 atoms) |
+| `distance` | Minimum-image distance between two atoms | `atom` (2 atoms) |
+| `distance_path` | Distance reconstructed from minimum-image displacements along an ordered bonded atom path | `path_atom` (ordered atom indices, at least 2) |
 | `displacement_x`, `displacement_y`, `displacement_z` | Periodic displacement component between two atoms | `atom` (2 atoms) |
 | `angle` | Angle formed by three atoms | `atom` (3 atoms) |
 | `dihedral` | Dihedral angle formed by four atoms | `atom` (4 atoms) |

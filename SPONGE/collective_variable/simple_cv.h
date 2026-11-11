@@ -1,4 +1,4 @@
-﻿// 实现基本的简单的CV
+// 实现基本的简单的CV
 #ifndef CV_POSITION_H
 #define CV_POSITION_H
 
@@ -26,6 +26,8 @@ struct CV_BOX_LENGTH : public COLLECTIVE_VARIABLE_PROTOTYPE
 struct CV_DISTANCE : public COLLECTIVE_VARIABLE_PROTOTYPE
 {
     int* atom;
+    int path_count = 0;
+    int* d_path = NULL;
     void Initial(COLLECTIVE_VARIABLE_CONTROLLER* manager, int atom_numbers,
                  const char* module_name);
     void Compute(int atom_numbers, VECTOR* crd, const LTMatrix3 cell,
